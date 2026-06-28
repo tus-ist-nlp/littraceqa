@@ -41,7 +41,7 @@ import signal
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -50,7 +50,6 @@ import pypdf
 import requests
 
 
-# A metadata/manifest record. Aliased to keep the many signatures readable.
 Record = dict[str, Any]
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,6 +70,10 @@ FALLBACK_INTERVAL = 5.0
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 PDF_MAGIC = b"%PDF-"
 
+# Cap on how many per-paper failure lines are printed to the console at the end
+# of a run; the complete set is always written to ``<output>/_failed.jsonl``.
+FAILURE_DETAIL_LIMIT = 50
+
 DEFAULT_USER_AGENT = (
     "LitTraceQA-PDF-Fetcher/1.0 "
     "(+https://github.com/; academic dataset assembly; contact: maintainer)"
@@ -80,17 +83,10 @@ DEFAULT_USER_AGENT = (
 def resolve_interval(
     host: str, overrides: dict[str, float], default_interval: float
 ) -> float:
-    """Most specific configured minimum interval for ``host``.
-
-    Precedence: an explicit ``--interval`` override, then the built-in per-host
-    default, then the catch-all ``default_interval``.
-    """
+    """Minimum interval for ``host``: --interval override, then built-in, then default."""
     return overrides.get(host, DEFAULT_HOST_INTERVALS.get(host, default_interval))
 
 
-# --------------------------------------------------------------------------- #
-# Validation
-# --------------------------------------------------------------------------- #
 @dataclasses.dataclass
 class Validation:
     ok: bool
@@ -127,7 +123,6 @@ def validate_pdf(path: Path, *, min_bytes: int, min_text_chars: int) -> Validati
         tail = handle.read(2048)
 
     if PDF_MAGIC not in head:
-        # An HTML error / login / paywall page will not contain "%PDF-".
         return Validation(False, reason="missing %PDF- header (not a PDF?)")
     if b"%%EOF" not in tail:
         return Validation(False, reason="missing %%EOF trailer (truncated?)")
@@ -149,9 +144,6 @@ def validate_pdf(path: Path, *, min_bytes: int, min_text_chars: int) -> Validati
     return Validation(True, pages=pages, text_chars=text_chars)
 
 
-# --------------------------------------------------------------------------- #
-# Manifest (resumable progress log)
-# --------------------------------------------------------------------------- #
 class Manifest:
     """Append-only JSONL log of per-paper outcomes, safe across threads."""
 
@@ -195,9 +187,6 @@ class Manifest:
                 self._handle = None
 
 
-# --------------------------------------------------------------------------- #
-# Downloading
-# --------------------------------------------------------------------------- #
 @dataclasses.dataclass
 class FetchResult:
     """Outcome of one paper download; ``to_record`` serializes it for the manifest."""
@@ -240,9 +229,8 @@ def _stream_to_temp(
 ) -> int:
     """Stream ``resp`` into ``tmp``, updating ``digest``; return byte count.
 
-    Raises ``IOError`` if the body grows past ``max_bytes`` (0 = no limit) or if
-    ``stop_event`` fires mid-stream, so Ctrl-C is honoured even during a large or
-    trickle-fed download (otherwise the read-timeout resets on every chunk).
+    Raises ``IOError`` on ``max_bytes`` overflow (0 = no limit) or if ``stop_event``
+    fires mid-stream, so Ctrl-C is honoured even during a long download.
     """
     downloaded = 0
     with tmp.open("wb") as out:
@@ -265,11 +253,8 @@ def _compute_backoff_delay(
     args: argparse.Namespace,
     interval: float,
 ) -> float:
-    """Seconds to wait before the next attempt (capped, jittered, host-paced).
-
-    Floored at the host ``interval`` so a paper's retries never undercut the
-    host's minimum spacing -- including when a server replies ``Retry-After: 0``.
-    """
+    """Seconds before the next attempt: capped, jittered, and floored at the host
+    ``interval`` so retries never undercut its minimum spacing (e.g. ``Retry-After: 0``)."""
     if retry_after is not None:
         delay = min(retry_after, args.backoff_cap)
     else:
@@ -350,8 +335,7 @@ def fetch_one(
                         result.timestamp = time.time()
                         return result
 
-                    # 200 but not a valid PDF: could be a transient HTML error
-                    # page, so allow a couple of retries within the budget.
+                    # 200 but not a valid PDF (maybe a transient error page): retry.
                     tmp.unlink(missing_ok=True)
                     result.error = f"invalid PDF: {validation.reason}"
 
@@ -365,20 +349,15 @@ def fetch_one(
             tmp.unlink(missing_ok=True)
             result.error = f"unexpected error: {exc.__class__.__name__}: {exc}"
 
-        # Decide whether to retry.
         if attempt < max_attempts and not stop_event.is_set():
             delay = _compute_backoff_delay(attempt, retry_after, args, interval)
-            # Interruptible sleep so Ctrl-C is responsive during long backoffs.
-            stop_event.wait(timeout=delay)
+            stop_event.wait(timeout=delay)  # interruptible sleep
 
     result.timestamp = time.time()
     tmp.unlink(missing_ok=True)
     return result
 
 
-# --------------------------------------------------------------------------- #
-# Orchestration
-# --------------------------------------------------------------------------- #
 @dataclasses.dataclass
 class Progress:
     total: int
@@ -430,6 +409,13 @@ def download_host(
         manifest.write(outcome.to_record())
         progress.record(outcome.status)
 
+        # Show a confirmed failure at once; skip Ctrl-C aborts (not real failures).
+        if outcome.status == "failed" and not stop_event.is_set():
+            print(
+                f"  FAIL {outcome.paper_id}  {outcome.error}  {outcome.url}",
+                file=sys.stderr,
+            )
+
 
 def load_metadata(path: Path) -> list[Record]:
     records: list[Record] = []
@@ -451,11 +437,10 @@ def should_skip(
     output_dir: Path,
     args: argparse.Namespace,
 ) -> bool:
-    """A paper is skipped only if it already succeeded and its file is present.
+    """Skip a paper only if it already succeeded and its file is present.
 
-    Past *failures* are always re-attempted on the next run, which is exactly
-    the "automatically retry" behaviour we want across restarts. ``--force``
-    re-downloads everything regardless.
+    Past failures are re-attempted on the next run (unless ``--skip-failed``);
+    ``--force`` re-downloads everything.
     """
     if args.force:
         return False
@@ -593,7 +578,6 @@ def print_plan(
 ) -> int:
     """Report the planned work to stderr; return the number of papers to fetch."""
     pending = sum(len(v) for v in by_host.values())
-    # Every selected paper is either skipped or queued, so this is len(records).
     total = skipped + pending
     print(
         f"papers: {total} | already ok (skip): {skipped} | to fetch: {pending}",
@@ -618,12 +602,81 @@ def print_summary(
         file=sys.stderr,
     )
     print(f"manifest: {manifest_path}", file=sys.stderr)
-    if progress.failed:
+
+
+def _error_class(record: Record) -> str:
+    """Coarse bucket for grouping similar failures in the summary tallies."""
+    status = record.get("http_status")
+    if status and status != 200:
+        return f"HTTP {status}"
+    error = record.get("error") or "unknown error"
+    return error.split(":", 1)[0].strip()
+
+
+def collect_failures(manifest: Manifest) -> list[Record]:
+    """Every currently-failed paper in the manifest, sorted by paper_id."""
+    failures = [
+        record
+        for record in manifest.records.values()
+        if record.get("status") == "failed"
+    ]
+    failures.sort(key=lambda record: record.get("paper_id") or "")
+    return failures
+
+
+def write_failures_file(failures: list[Record], output_dir: Path) -> Path:
+    """Write the full failed set to ``<output>/_failed.jsonl`` for inspection."""
+    path = output_dir / "_failed.jsonl"
+    with path.open("w", encoding="utf-8") as handle:
+        for record in failures:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
+def report_failures(
+    manifest: Manifest, output_dir: Path, *, detail_limit: int = FAILURE_DETAIL_LIMIT
+) -> None:
+    """Print per-host/per-error tallies and per-paper failure lines (capped at
+    ``detail_limit``); write the full set to ``<output>/_failed.jsonl``."""
+    failures = collect_failures(manifest)
+    if not failures:
+        return
+
+    by_host = Counter(record.get("host") for record in failures)
+    by_error = Counter(_error_class(record) for record in failures)
+
+    print(f"\n=== failed: {len(failures)} ===", file=sys.stderr)
+    print("-- by host --", file=sys.stderr)
+    for host, count in by_host.most_common():
+        print(f"  {count:5d}  {host}", file=sys.stderr)
+    print("-- by error --", file=sys.stderr)
+    for error, count in by_error.most_common():
+        print(f"  {count:5d}  {error}", file=sys.stderr)
+
+    print("-- details (paper_id / http / attempts / error / url) --", file=sys.stderr)
+    for record in failures[:detail_limit]:
         print(
-            "re-run the same command to retry the failures "
-            "(successful PDFs are skipped automatically).",
+            f"  {(record.get('paper_id') or '?'):18s} "
+            f"http={str(record.get('http_status')):>4s} "
+            f"attempts={record.get('attempts')}  "
+            f"{record.get('error')}",
             file=sys.stderr,
         )
+        print(f"      {record.get('url')}", file=sys.stderr)
+    if len(failures) > detail_limit:
+        print(
+            f"  ... and {len(failures) - detail_limit} more "
+            "(see the file below for the full list)",
+            file=sys.stderr,
+        )
+
+    path = write_failures_file(failures, output_dir)
+    print(f"\nfailed entries written to: {path}", file=sys.stderr)
+    print(
+        "re-run the same command to retry them "
+        "(successful PDFs are skipped automatically).",
+        file=sys.stderr,
+    )
 
 
 def run_downloads(
@@ -637,11 +690,10 @@ def run_downloads(
     progress: Progress,
     stop_event: threading.Event,
 ) -> None:
-    """Run one worker per host concurrently; block until all finish or stop.
+    """Run one worker per host concurrently until all finish or stop.
 
-    On a worker error or KeyboardInterrupt, signal every worker to stop and tear
-    the pool down *without waiting*, so a single failed or stuck host cannot pin
-    the whole run (workers poll ``stop_event`` and abort promptly).
+    On any worker error or KeyboardInterrupt, set ``stop_event`` and tear down
+    without waiting, so a stuck host cannot pin the run.
     """
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(by_host))
     futures = [
@@ -716,7 +768,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     session = build_session(args)
     start = time.monotonic()
 
-    # Periodic progress reporter (daemon: dies with the process).
     def reporter() -> None:
         while not stop_event.wait(timeout=15.0):
             elapsed = time.monotonic() - start
@@ -752,6 +803,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         manifest.close()
 
     print_summary(progress, skipped, manifest_path, time.monotonic() - start)
+    if progress.failed:
+        report_failures(manifest, output_dir)
     return 1 if progress.failed and progress.ok == 0 else 0
 
 
