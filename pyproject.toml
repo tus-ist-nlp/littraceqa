@@ -1,0 +1,15 @@
+[project]
+name = "littraceqa"
+version = "0.1.0"
+description = "Scripts for the LitTraceQA dataset (PDF downloading and evaluation)."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "requests>=2.31",
+    "pypdf>=4.0",
+]
+
+[tool.uv]
+# These scripts are run directly (uv run python scripts/...), not installed as a
+# package, so skip building/installing the project itself.
+package = false
