@@ -1,0 +1,91 @@
+{
+  "input": "/Users/yimuwang/github/multipaperqa-hf/relevant_data/dset/at_least_one_fail_June17.json",
+  "output": "/Users/yimuwang/github/multipaperqa-hf/hf-dataset/data/littraceqa_release.jsonl",
+  "samples": 56,
+  "errors": 1,
+  "warnings": 11,
+  "cleanup_counts": {
+    "dropped_metadata_field:metadata_file": 56,
+    "dropped_metadata_field:question_hash": 56,
+    "dropped_metadata_field:source_file": 56,
+    "dropped_metadata_field:source_query_id": 56,
+    "dropped_sample_field:need_llmjudge": 29,
+    "dropped_sample_field:verification": 56,
+    "flattened_mc_only_multiple_choice": 21,
+    "refreshed_paper_metadata:title": 27
+  },
+  "issues": [
+    {
+      "severity": "warn",
+      "query_id": "q_004",
+      "path": "evidence[0].evidence_text_or_value",
+      "message": "evidence text/value is empty"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_012",
+      "path": "evidence[0].evidence_text_or_value",
+      "message": "evidence text/value is empty"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_013",
+      "path": "evidence[0].evidence_text_or_value",
+      "message": "evidence text/value is empty"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_018",
+      "path": "evidence[0].evidence_text_or_value",
+      "message": "evidence text/value is empty"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_026",
+      "path": "evidence[0].evidence_text_or_value",
+      "message": "evidence text/value is empty"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_037",
+      "path": "gold_papers[0]",
+      "message": "converted legacy string paper_id to paper object"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_037",
+      "path": "gold_papers[1]",
+      "message": "converted legacy string paper_id to paper object"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_037",
+      "path": "gold_papers[2]",
+      "message": "converted legacy string paper_id to paper object"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_037",
+      "path": "gold_papers[3]",
+      "message": "converted legacy string paper_id to paper object"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_037",
+      "path": "evidence[0]",
+      "message": "converted legacy evidence_type to source_type"
+    },
+    {
+      "severity": "warn",
+      "query_id": "q_055",
+      "path": "evidence[0].evidence_text_or_value",
+      "message": "evidence text/value is empty"
+    },
+    {
+      "severity": "error",
+      "query_id": "q_016",
+      "path": "evidence",
+      "message": "at least one evidence item is required"
+    }
+  ]
+}
