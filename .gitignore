@@ -5,6 +5,15 @@ __pycache__/
 
 # uv cache
 .uv/
+.uv-bootstrap/
+
+# Local secrets
+.env
 
 # Downloaded PDF cache (scripts/download_pdfs.py default --output)
 pdfs/
+
+# Local pipeline outputs
+archives/
+artifacts/
+runs/
