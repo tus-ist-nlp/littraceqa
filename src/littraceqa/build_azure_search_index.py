@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from azure_config import (
+from .azure_config import (
     OpenAISettings,
     SearchSettings,
     build_openai_client,
@@ -17,7 +17,7 @@ from azure_config import (
     build_search_index_client,
     load_environment,
 )
-from littrace_common import ROOT, Record, batched, read_jsonl
+from .common import ROOT, Record, batched, read_jsonl
 
 
 VECTOR_FIELD = "content_vector"

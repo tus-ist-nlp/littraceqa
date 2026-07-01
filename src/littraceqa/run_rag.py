@@ -10,14 +10,14 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from azure_config import (
+from .azure_config import (
     OpenAISettings,
     SearchSettings,
     build_openai_client,
     build_search_client,
     load_environment,
 )
-from littrace_common import (
+from .common import (
     ROOT,
     Record,
     clean_text,

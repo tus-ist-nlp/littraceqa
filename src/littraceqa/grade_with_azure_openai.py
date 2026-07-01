@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from azure_config import OpenAISettings, build_openai_client, load_environment
-from littrace_common import (
+from .azure_config import OpenAISettings, build_openai_client, load_environment
+from .common import (
     ROOT,
     Record,
     compact_text,

@@ -9,8 +9,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-
-ROOT = Path(__file__).resolve().parent.parent
+from .common import ROOT
 
 REQUIRED = [
     "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT",

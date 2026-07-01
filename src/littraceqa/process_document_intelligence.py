@@ -10,7 +10,7 @@ Outputs
     Search-ready chunks for one paper.
 
 ``artifacts/docint/chunks.jsonl``
-    A merged JSONL file used by ``build_search_index.py``.
+    A merged JSONL file used by ``build_azure_search_index.py``.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from azure_config import (
+from .azure_config import (
     DocumentIntelligenceSettings,
     build_document_intelligence_client,
     load_environment,
 )
-from littrace_common import (
+from .common import (
     DEFAULT_METADATA,
     ROOT,
     Record,

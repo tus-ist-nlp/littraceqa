@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 from urllib.parse import urlparse
 
-from littrace_common import (
+from .common import (
     DEFAULT_METADATA,
     ROOT,
     Record,

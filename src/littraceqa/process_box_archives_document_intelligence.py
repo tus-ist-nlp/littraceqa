@@ -26,13 +26,13 @@ from urllib.parse import urlparse
 
 import requests
 
-from azure_config import (
+from .azure_config import (
     DocumentIntelligenceSettings,
     build_document_intelligence_client,
     load_environment,
 )
-from extract_pdf_archives import build_alias_map, infer_paper_id
-from littrace_common import (
+from .extract_pdf_archives import build_alias_map, infer_paper_id
+from .common import (
     DEFAULT_METADATA,
     ROOT,
     Record,
@@ -42,7 +42,7 @@ from littrace_common import (
     write_json,
     write_jsonl,
 )
-from process_document_intelligence import (
+from .process_document_intelligence import (
     analyze_pdf_bytes,
     build_chunks,
     merge_chunk_files,
