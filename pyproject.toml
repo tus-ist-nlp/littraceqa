@@ -5,12 +5,16 @@ description = "Scripts for the LitTraceQA dataset (PDF downloading and evaluatio
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "requests>=2.31",
+    "pypdf>=4.0",
+]
+
+[project.optional-dependencies]
+azure = [
     "azure-ai-documentintelligence>=1.0.2",
     "azure-search-documents>=11.6.0",
     "openai>=1.93.0",
     "python-dotenv>=1.0.1",
-    "requests>=2.31",
-    "pypdf>=4.0",
     "pypdfium2>=5.11.0",
     "pillow>=12.3.0",
 ]

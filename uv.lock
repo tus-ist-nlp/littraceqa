@@ -267,27 +267,32 @@ name = "littraceqa"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pypdf" },
+    { name = "requests" },
+]
+
+[package.optional-dependencies]
+azure = [
     { name = "azure-ai-documentintelligence" },
     { name = "azure-search-documents" },
     { name = "openai" },
     { name = "pillow" },
-    { name = "pypdf" },
     { name = "pypdfium2" },
     { name = "python-dotenv" },
-    { name = "requests" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "azure-ai-documentintelligence", specifier = ">=1.0.2" },
-    { name = "azure-search-documents", specifier = ">=11.6.0" },
-    { name = "openai", specifier = ">=1.93.0" },
-    { name = "pillow", specifier = ">=12.3.0" },
+    { name = "azure-ai-documentintelligence", marker = "extra == 'azure'", specifier = ">=1.0.2" },
+    { name = "azure-search-documents", marker = "extra == 'azure'", specifier = ">=11.6.0" },
+    { name = "openai", marker = "extra == 'azure'", specifier = ">=1.93.0" },
+    { name = "pillow", marker = "extra == 'azure'", specifier = ">=12.3.0" },
     { name = "pypdf", specifier = ">=4.0" },
-    { name = "pypdfium2", specifier = ">=5.11.0" },
-    { name = "python-dotenv", specifier = ">=1.0.1" },
+    { name = "pypdfium2", marker = "extra == 'azure'", specifier = ">=5.11.0" },
+    { name = "python-dotenv", marker = "extra == 'azure'", specifier = ">=1.0.1" },
     { name = "requests", specifier = ">=2.31" },
 ]
+provides-extras = ["azure"]
 
 [[package]]
 name = "openai"
