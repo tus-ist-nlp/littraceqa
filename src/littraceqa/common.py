@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterable, TypeVar
 
@@ -95,22 +96,34 @@ def compact_text(value: Any, *, max_chars: int = 0) -> str:
     return text
 
 
-def parse_json_object(text: Any) -> Record:
-    """Best-effort JSON object parser for model responses."""
+def try_parse_json_object(text: Any) -> tuple[Record, bool]:
+    """Best-effort JSON object parser that also reports success.
+
+    Returns ``(payload, ok)`` where ``ok`` is True only when a JSON object was
+    actually parsed from the input. The caller keeps the raw text, so failures
+    can be logged without changing :func:`parse_json_object`'s signature.
+    """
     raw = str(text or "").strip()
     if not raw:
-        return {}
+        return {}, False
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
         if not match:
-            return {}
+            return {}, False
         try:
             payload = json.loads(match.group(0))
         except json.JSONDecodeError:
-            return {}
-    return payload if isinstance(payload, dict) else {}
+            return {}, False
+    if isinstance(payload, dict):
+        return payload, True
+    return {}, False
+
+
+def parse_json_object(text: Any) -> Record:
+    """Best-effort JSON object parser for model responses."""
+    return try_parse_json_object(text)[0]
 
 
 def normalize_alias(value: Any) -> str:
@@ -141,6 +154,31 @@ def relative_or_absolute(path: Path) -> str:
         return str(path)
 
 
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Extract a Retry-After delay (seconds) from an SDK error, if present."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get("retry-after") or headers.get("Retry-After")
+    except Exception:  # noqa: BLE001 - headers may be any mapping-ish object.
+        return None
+    if not value:
+        return None
+    try:
+        return max(0.0, min(float(value), 120.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    message = str(exc).lower()
+    return "429" in message or "rate limit" in message
+
+
 def retry_chat_completion(
     client: Any,
     kwargs: Record,
@@ -152,11 +190,12 @@ def retry_chat_completion(
     Some deployments reject ``max_tokens`` in favor of ``max_completion_tokens``;
     others do not support ``response_format`` or fixed ``temperature``. The caller
     supplies normal chat kwargs and this helper removes or renames only when the
-    service explicitly asks for it.
+    service explicitly asks for it. 429s that survive the SDK's own retries get
+    an extra backoff honoring Retry-After (concurrent workers can outlast them).
     """
     request = dict(kwargs)
     last_error: Exception | None = None
-    for _ in range(attempts):
+    for attempt in range(attempts):
         try:
             return client.chat.completions.create(**request)
         except Exception as exc:  # noqa: BLE001 - SDK error classes vary.
@@ -175,6 +214,12 @@ def retry_chat_completion(
                 if request.pop("temperature", None) is not None:
                     changed = True
             if not changed:
+                if _is_rate_limit_error(exc) and attempt < attempts - 1:
+                    delay = _retry_after_seconds(exc)
+                    if delay is None:
+                        delay = min(60.0, 2.0 * (2**attempt))
+                    time.sleep(delay)
+                    continue
                 raise
     if last_error is not None:
         raise last_error
