@@ -13,10 +13,21 @@ cd littraceqa
 uv sync
 ```
 
-## Azure RAG pipeline
+The base install covers the dataset scripts (`scripts/`) and the
+provider-agnostic tools (`littraceqa.fix_chunk_locators`,
+`littraceqa.validate_submission`, `littraceqa.compare_runs`). The Azure
+baseline additionally needs the optional `azure` extra:
 
-The Azure pipeline code lives under `src/littraceqa/` and is invoked with
-`uv run python -m littraceqa.<module>`.
+```bash
+uv sync --extra azure
+```
+
+## Azure RAG pipeline (baseline)
+
+The Azure-based baseline lives under `src/littraceqa/azure/` and is invoked
+with `uv run --extra azure python -m littraceqa.azure.<module>`. (It is a
+subpackage rather than a top-level `src/azure/` because a local package named
+`azure` would shadow the Azure SDK's `azure.*` namespace packages.)
 
 The pipeline is resumable and covers:
 
@@ -72,13 +83,13 @@ as `pdfs/{paper_id}.pdf` exists.
 Smoke test one PDF first:
 
 ```bash
-uv run python -m littraceqa.process_document_intelligence --limit 1
+uv run --extra azure python -m littraceqa.azure.process_document_intelligence --limit 1
 ```
 
 Process the full cache:
 
 ```bash
-uv run python -m littraceqa.process_document_intelligence
+uv run --extra azure python -m littraceqa.azure.process_document_intelligence
 ```
 
 Main outputs:
@@ -93,14 +104,14 @@ The raw JSON is kept so chunking can be rebuilt without another paid
 Document Intelligence call:
 
 ```bash
-uv run python -m littraceqa.process_document_intelligence --merge-only
+uv run --extra azure python -m littraceqa.azure.process_document_intelligence --merge-only
 ```
 
 To process the Box zip archives without keeping individual PDFs on disk, use:
 
 ```bash
-uv run python -m littraceqa.process_box_archives_document_intelligence --list-archives
-uv run python -m littraceqa.process_box_archives_document_intelligence --workers 2
+uv run --extra azure python -m littraceqa.azure.process_box_archives_document_intelligence --list-archives
+uv run --extra azure python -m littraceqa.azure.process_box_archives_document_intelligence --workers 2
 ```
 
 This downloads one zip file at a time into `artifacts/box_tmp/`, sends each PDF
@@ -113,13 +124,13 @@ Increase `--workers` only if your Document Intelligence quota allows it.
 Create the index and upload all chunks:
 
 ```bash
-uv run python -m littraceqa.build_azure_search_index --recreate
+uv run --extra azure python -m littraceqa.azure.build_azure_search_index --recreate
 ```
 
 For a cheap first test:
 
 ```bash
-uv run python -m littraceqa.build_azure_search_index --recreate --limit 100
+uv run --extra azure python -m littraceqa.azure.build_azure_search_index --recreate --limit 100
 ```
 
 `AZURE_OPENAI_EMBEDDING_DIMENSIONS` must match the actual output dimension of
@@ -128,7 +139,7 @@ your embedding deployment.
 ### 5. Run RAG
 
 ```bash
-uv run python -m littraceqa.run_rag \
+uv run --extra azure python -m littraceqa.azure.run_rag \
   --input data/validation_inputs.jsonl \
   --output runs/validation_submission.jsonl
 ```
@@ -144,8 +155,8 @@ uv run python scripts/evaluate.py \
 Useful smoke-test commands:
 
 ```bash
-uv run python -m littraceqa.run_rag --limit 2 --retrieval-only
-uv run python -m littraceqa.run_rag --limit 2
+uv run --extra azure python -m littraceqa.azure.run_rag --limit 2 --retrieval-only
+uv run --extra azure python -m littraceqa.azure.run_rag --limit 2
 ```
 
 ### 6. Semantic grading
@@ -154,7 +165,7 @@ For development analysis, compare a prediction file against
 `data/validation.jsonl` with Azure OpenAI:
 
 ```bash
-uv run python -m littraceqa.grade_with_azure_openai \
+uv run --extra azure python -m littraceqa.azure.grade_with_azure_openai \
   --pred runs/validation_submission.jsonl \
   --output runs/azure_openai_grades.jsonl \
   --report runs/azure_openai_grading_report.md

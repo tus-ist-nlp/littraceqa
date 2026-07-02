@@ -15,7 +15,7 @@ multiple_choice **0.0**, freeform **0.0**, table metrics **0.0**.
 
 ## 1. Confirm the DI job finished
 
-The Box-archive DI pipeline (`littraceqa.process_box_archives_document_intelligence`)
+The Box-archive DI pipeline (`littraceqa.azure.process_box_archives_document_intelligence`)
 must be fully stopped before anything below touches `artifacts\docint\`.
 
 ```powershell
@@ -39,7 +39,7 @@ raw DI JSON (captions, bounding regions, cell indices) is what every future
 chunking fix needs, and it was discarded on the first pass.
 
 ```powershell
-uv run python -m littraceqa.process_box_archives_document_intelligence --save-raw
+uv run --extra azure python -m littraceqa.azure.process_box_archives_document_intelligence --save-raw
 ```
 
 Note on the 3 oversized PDFs: they exceed `--max-pdf-bytes` (default 300 MB).
@@ -88,7 +88,7 @@ The consolidated file only refreshes at archive boundaries and was ~1,300
 papers stale during the run. Rebuild it once, with nothing else writing:
 
 ```powershell
-uv run python -m littraceqa.process_document_intelligence --merge-only
+uv run --extra azure python -m littraceqa.azure.process_document_intelligence --merge-only
 ```
 
 Sanity check: distinct `paper_id` count in `artifacts\docint\chunks.jsonl`
@@ -103,12 +103,12 @@ from `locator_json`, empty when absent) and the semantic configuration
 keywords_fields=[section]).
 
 ```powershell
-uv run python -m littraceqa.build_azure_search_index --recreate `
+uv run --extra azure python -m littraceqa.azure.build_azure_search_index --recreate `
     --embedding-batch-size 256 --upload-batch-size 256
 ```
 
 Use the streaming input and checkpoint/resume flags added alongside the new
-schema (see `uv run python -m littraceqa.build_azure_search_index --help` for
+schema (see `uv run --extra azure python -m littraceqa.azure.build_azure_search_index --help` for
 the exact names) — never load the ~6 GB `chunks.jsonl` into memory, and make
 sure a mid-run failure can resume instead of re-embedding from chunk 0.
 
@@ -146,13 +146,13 @@ Run RAG over the validation inputs with the answer-side fixes enabled
 run-metadata sidecar):
 
 ```powershell
-uv run python -m littraceqa.run_rag `
+uv run --extra azure python -m littraceqa.azure.run_rag `
     --input data\validation_inputs.jsonl `
     --output runs\validation_full_index.jsonl `
     --options-file data\validation.jsonl
 ```
 
-(Decomposition/sidecar flags: see `uv run python -m littraceqa.run_rag --help`;
+(Decomposition/sidecar flags: see `uv run --extra azure python -m littraceqa.azure.run_rag --help`;
 the sidecar `.meta.json` records args, deployments, and index state for the
 mandatory code submission.)
 
