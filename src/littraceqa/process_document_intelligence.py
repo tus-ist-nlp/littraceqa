@@ -19,7 +19,10 @@ import argparse
 import dataclasses
 import io
 import json
+import os
+import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -49,8 +52,18 @@ from .common import (
 TEXT_ROLES_AS_HEADINGS = {
     "title",
     "sectionHeading",
-    "pageHeader",
 }
+
+TEXT_ROLES_TO_SKIP = {
+    "pageHeader",
+    "pageFooter",
+    "pageNumber",
+}
+
+TABLE_LABEL_PATTERN = re.compile(r"^\s*tab(?:le)?\.?\s*([A-Za-z]?\d+[a-z]?)\b", re.IGNORECASE)
+FIGURE_LABEL_PATTERN = re.compile(r"^\s*fig(?:ure)?\.?\s*([A-Za-z]?\d+[a-z]?)\b", re.IGNORECASE)
+
+CAPTION_MAX_CHARS = 300
 
 
 @dataclasses.dataclass
@@ -58,6 +71,7 @@ class TextUnit:
     text: str
     pages: set[int]
     section: str = ""
+    paragraph_index: Optional[int] = None
 
 
 def value(obj: Any, *names: str, default: Any = None) -> Any:
@@ -222,11 +236,13 @@ def paragraph_units(result: Record) -> list[TextUnit]:
     paragraphs = value(result, "paragraphs", default=[]) or []
     units: list[TextUnit] = []
     current_section = ""
-    for paragraph in paragraphs:
+    for index, paragraph in enumerate(paragraphs):
         text = clean_text(value(paragraph, "content", default=""))
         if not text:
             continue
         role = value(paragraph, "role", default="") or ""
+        if role in TEXT_ROLES_TO_SKIP:
+            continue
         if role in TEXT_ROLES_AS_HEADINGS:
             current_section = compact_text(text, max_chars=200)
         prefix = f"[{role}] " if role and role not in {"body", "footnote"} else ""
@@ -235,6 +251,7 @@ def paragraph_units(result: Record) -> list[TextUnit]:
                 text=f"{prefix}{text}",
                 pages=get_pages(paragraph),
                 section=current_section,
+                paragraph_index=index,
             )
         )
     return units
@@ -291,6 +308,12 @@ def chunk_text_units(
         sections = [unit.section for unit in buffer if unit.section]
         for unit in buffer:
             pages.update(unit.pages)
+        indices = sorted(
+            unit.paragraph_index for unit in buffer if unit.paragraph_index is not None
+        )
+        locator: Optional[Record] = (
+            {"paragraph_ids": [indices[0], indices[-1]]} if indices else None
+        )
         chunks.append(
             make_chunk(
                 record,
@@ -299,6 +322,7 @@ def chunk_text_units(
                 text,
                 pages=pages,
                 section=sections[-1] if sections else "",
+                locator=locator,
             )
         )
         chunk_id += 1
@@ -321,7 +345,7 @@ def chunk_text_units(
     for unit in units:
         pieces = split_long_text(unit.text, max_chars)
         for piece in pieces:
-            piece_unit = TextUnit(piece, unit.pages, unit.section)
+            piece_unit = TextUnit(piece, unit.pages, unit.section, unit.paragraph_index)
             piece_len = len(piece) + 2
             if buffer and buffer_len + piece_len > max_chars:
                 emit()
@@ -335,7 +359,37 @@ def markdown_escape_cell(value_: Any) -> str:
     return compact_text(value_, max_chars=400).replace("|", "\\|")
 
 
-def table_to_markdown(table: Any, table_number: int) -> str:
+def caption_text(item: Any) -> str:
+    caption = value(item, "caption", default={}) or {}
+    return clean_text(value(caption, "content", default=""))
+
+
+def caption_label(caption: str, pattern: re.Pattern[str]) -> str:
+    """Parse the visible label ("4", "A2", ...) from a leading caption tag."""
+    match = pattern.match(caption)
+    return match.group(1) if match else ""
+
+
+def bounding_region_payload(item: Any) -> list[Record]:
+    regions: list[Record] = []
+    for region in value(item, "boundingRegions", "bounding_regions", default=[]) or []:
+        entry: Record = {}
+        page = value(region, "pageNumber", "page_number")
+        try:
+            entry["page"] = int(page)
+        except (TypeError, ValueError):
+            pass
+        polygon = value(region, "polygon", default=[]) or []
+        try:
+            entry["polygon"] = [round(float(point), 2) for point in polygon]
+        except (TypeError, ValueError):
+            pass
+        if entry:
+            regions.append(entry)
+    return regions
+
+
+def table_to_markdown(table: Any, heading: str) -> str:
     row_count = int(value(table, "rowCount", "row_count", default=0) or 0)
     column_count = int(value(table, "columnCount", "column_count", default=0) or 0)
     if row_count <= 0 or column_count <= 0:
@@ -351,7 +405,7 @@ def table_to_markdown(table: Any, table_number: int) -> str:
     header = grid[0]
     body = grid[1:] if len(grid) > 1 else []
     lines = [
-        f"Table {table_number}",
+        heading,
         "| " + " | ".join(header) + " |",
         "| " + " | ".join("---" for _ in header) + " |",
     ]
@@ -369,17 +423,37 @@ def table_chunks(
     chunks: list[Record] = []
     chunk_id = start_chunk_id
     tables = value(result, "tables", default=[]) or []
+    caption_ids = {
+        f"table {label.lower()}"
+        for label in (
+            caption_label(caption_text(table), TABLE_LABEL_PATTERN) for table in tables
+        )
+        if label
+    }
     for index, table in enumerate(tables, start=1):
-        content = table_to_markdown(table, index)
+        caption = caption_text(table)
+        label = caption_label(caption, TABLE_LABEL_PATTERN)
+        if label:
+            table_id = f"Table {label}"
+        else:
+            table_id = f"Table {index}"
+            if table_id.lower() in caption_ids:
+                # A caption-derived id already owns this number in the paper;
+                # keep the positional fallback from emitting a duplicate
+                # evaluator key (the suffix never normalizes to a real label).
+                table_id = f"Table {index} (uncaptioned)"
+        content = table_to_markdown(table, caption or table_id)
         if not content:
             continue
         pages = get_pages(table)
         locator: Record = {
-            "table_id": f"Table {index}",
+            "table_id": table_id,
         }
         page = first_page(pages)
         if page is not None:
             locator["page"] = page
+        if caption:
+            locator["caption"] = compact_text(caption, max_chars=CAPTION_MAX_CHARS)
         chunks.append(
             make_chunk(
                 record,
@@ -405,20 +479,31 @@ def figure_chunks(
     figures = value(result, "figures", default=[]) or []
     for index, figure in enumerate(figures, start=1):
         caption = value(figure, "caption", default={}) or {}
-        content = clean_text(value(caption, "content", default=""))
-        if not content:
-            continue
+        caption_content = clean_text(value(caption, "content", default=""))
+        label = caption_label(caption_content, FIGURE_LABEL_PATTERN)
+        figure_id = f"Figure {label}" if label else f"Figure {index}"
         pages = get_pages(figure) or get_pages(caption)
-        locator: Record = {"figure_id": f"Figure {index}"}
         page = first_page(pages)
+        if caption_content:
+            content = caption_content
+        elif page is not None:
+            content = f"{figure_id} (no caption), page {page}"
+        else:
+            content = f"{figure_id} (no caption)"
+        locator: Record = {"figure_id": figure_id}
         if page is not None:
             locator["page"] = page
+        if caption_content:
+            locator["caption"] = compact_text(caption_content, max_chars=CAPTION_MAX_CHARS)
+        regions = bounding_region_payload(figure)
+        if regions:
+            locator["bounding_regions"] = regions
         chunks.append(
             make_chunk(
                 record,
                 chunk_id,
                 "figure",
-                f"Figure {index}: {content}",
+                content,
                 pages=pages,
                 locator=locator,
             )
@@ -586,13 +671,17 @@ def process_one(
 def merge_chunk_files(chunks_dir: Path, output_path: Path) -> int:
     count = 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as out:
+    temp_path = output_path.with_name(
+        f".{output_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    with temp_path.open("w", encoding="utf-8") as out:
         for path in sorted(chunks_dir.glob("*.jsonl")):
             with path.open(encoding="utf-8") as handle:
                 for line in handle:
                     if line.strip():
                         out.write(line)
                         count += 1
+    temp_path.replace(output_path)
     return count
 
 
