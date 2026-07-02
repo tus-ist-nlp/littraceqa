@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
@@ -133,14 +133,26 @@ def build_search_client(settings: SearchSettings):
     )
 
 
-def build_openai_client(settings: OpenAISettings):
+def build_openai_client(
+    settings: OpenAISettings,
+    *,
+    max_retries: Optional[int] = None,
+    timeout: Optional[float] = None,
+):
+    """Build an OpenAI client; SDK retry/timeout defaults apply unless overridden."""
+    client_kwargs: dict[str, Any] = {}
+    if max_retries is not None:
+        client_kwargs["max_retries"] = max_retries
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+
     if settings.use_v1:
         from openai import OpenAI
 
         base_url = settings.endpoint.rstrip("/")
         if not base_url.endswith("/openai/v1"):
             base_url = f"{base_url}/openai/v1"
-        return OpenAI(api_key=settings.api_key, base_url=base_url)
+        return OpenAI(api_key=settings.api_key, base_url=base_url, **client_kwargs)
 
     from openai import AzureOpenAI
 
@@ -148,4 +160,5 @@ def build_openai_client(settings: OpenAISettings):
         azure_endpoint=settings.endpoint,
         api_key=settings.api_key,
         api_version=settings.api_version,
+        **client_kwargs,
     )
