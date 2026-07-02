@@ -477,11 +477,27 @@ def figure_chunks(
     chunks: list[Record] = []
     chunk_id = start_chunk_id
     figures = value(result, "figures", default=[]) or []
+    caption_ids = {
+        f"figure {label.lower()}"
+        for label in (
+            caption_label(caption_text(figure), FIGURE_LABEL_PATTERN) for figure in figures
+        )
+        if label
+    }
     for index, figure in enumerate(figures, start=1):
         caption = value(figure, "caption", default={}) or {}
         caption_content = clean_text(value(caption, "content", default=""))
         label = caption_label(caption_content, FIGURE_LABEL_PATTERN)
-        figure_id = f"Figure {label}" if label else f"Figure {index}"
+        if label:
+            figure_id = f"Figure {label}"
+        else:
+            figure_id = f"Figure {index}"
+            if figure_id.lower() in caption_ids:
+                # Same guard as table_chunks: a caption-derived id already owns
+                # this number in the paper, so the positional fallback must not
+                # emit a duplicate evaluator key (the suffix never normalizes
+                # to a real label).
+                figure_id = f"Figure {index} (uncaptioned)"
         pages = get_pages(figure) or get_pages(caption)
         page = first_page(pages)
         if caption_content:

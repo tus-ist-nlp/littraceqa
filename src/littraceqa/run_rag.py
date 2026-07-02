@@ -88,6 +88,14 @@ def embed_query(client: Any, settings: OpenAISettings, query: str) -> list[float
     return vector
 
 
+def parse_search_fields(raw: Optional[str]) -> Optional[list[str]]:
+    """Split the --search-fields CSV into field names; None keeps all fields."""
+    if not raw:
+        return None
+    fields = [field.strip() for field in raw.split(",") if field.strip()]
+    return fields or None
+
+
 def search_chunks(
     search_client: Any,
     openai_client: Any,
@@ -98,6 +106,7 @@ def search_chunks(
     vector_k: int,
     query_type: str = "hybrid",
     filter_expr: Optional[str] = None,
+    search_fields: Optional[list[str]] = None,
 ) -> list[Record]:
     from azure.search.documents.models import VectorizedQuery
 
@@ -113,6 +122,10 @@ def search_chunks(
         "top": top_chunks,
         "select": SEARCH_SELECT,
     }
+    if search_fields:
+        # Restricts only the keyword (BM25) leg; the vector leg always runs
+        # against content_vector.
+        kwargs["search_fields"] = search_fields
     if filter_expr:
         kwargs["filter"] = filter_expr
     if query_type == "semantic":
@@ -617,6 +630,7 @@ def search_with_decomposition(
                 vector_k=args.vector_k,
                 query_type=args.query_type,
                 filter_expr=filter_expr,
+                search_fields=parse_search_fields(args.search_fields),
             )
             for position, hit in enumerate(hits, start=1):
                 chunk_key = str(hit.get("id") or f"{hit.get('paper_id')}::{hit.get('chunk_id')}")
@@ -719,6 +733,21 @@ def normalize_paper_ids(value: Any) -> list[str]:
     return []
 
 
+# Opening quote -> required closing quote; only matched pairs are stripped.
+QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "`": "`"}
+
+
+def strip_matched_quotes(text: str) -> str:
+    """Drop surrounding matched quote pairs the model sometimes emits.
+
+    Safe for scoring: evaluate.py's normalize_text strips the same quote
+    characters anyway; doing it here just keeps the artifacts clean.
+    """
+    while len(text) >= 2 and QUOTE_PAIRS.get(text[0]) == text[-1]:
+        text = text[1:-1].strip()
+    return text
+
+
 def freeform_text(llm_payload: Record) -> str:
     raw = llm_payload.get("freeform")
     if raw is None or raw == "":
@@ -761,7 +790,7 @@ def build_answer(
 ) -> Record:
     answer_types = set(sample.get("answer_types") or [])
     answer: Record = {}
-    text = freeform_text(llm_payload)
+    text = strip_matched_quotes(freeform_text(llm_payload))
     if "freeform" in answer_types:
         answer["freeform"] = {"text": text}
     if "multiple_choice" in answer_types:
@@ -827,6 +856,7 @@ def run_one(
             top_chunks=args.top_chunks,
             vector_k=args.vector_k,
             query_type=args.query_type,
+            search_fields=parse_search_fields(args.search_fields),
         )
 
     candidates = rank_papers(results, args.top_papers)
@@ -1101,6 +1131,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["hybrid", "semantic"],
         default="hybrid",
         help="semantic requires the index to define the littraceqa-semantic configuration.",
+    )
+    parser.add_argument(
+        "--search-fields",
+        default=None,
+        help=(
+            "Comma-separated index fields for the keyword (BM25) leg of the "
+            "hybrid search, e.g. 'content,section'. Restricting BM25 to "
+            "content,section counters the title/abstract text duplicated into "
+            "every chunk of a paper. Default: all searchable fields (previous "
+            "behavior). The vector leg always uses content_vector."
+        ),
     )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--resume", action="store_true", help="Skip query_ids already in the output file and append.")
