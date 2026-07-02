@@ -31,8 +31,8 @@ from .azure_config import (
     build_document_intelligence_client,
     load_environment,
 )
-from .extract_pdf_archives import build_alias_map, infer_paper_id
-from .common import (
+from ..extract_pdf_archives import build_alias_map, infer_paper_id
+from ..common import (
     DEFAULT_METADATA,
     ROOT,
     Record,

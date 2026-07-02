@@ -25,7 +25,7 @@ from typing import Any, Optional
 import requests
 
 from .azure_config import OpenAISettings, build_openai_client, load_environment
-from .common import (
+from ..common import (
     DEFAULT_METADATA,
     ROOT,
     Record,
@@ -35,7 +35,7 @@ from .common import (
     try_parse_json_object,
     write_jsonl,
 )
-from .fix_chunk_locators import normalize_object_id
+from ..fix_chunk_locators import normalize_object_id
 from .run_rag import (
     extract_choice_value,
     freeform_text,

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .azure_config import OpenAISettings, build_openai_client, load_environment
-from .common import (
+from ..common import (
     ROOT,
     Record,
     compact_text,
@@ -24,7 +24,7 @@ from .common import (
     read_jsonl,
     retry_chat_completion,
 )
-from .compare_runs import DEFAULT_EVALUATE_PATH, load_evaluate_module
+from ..compare_runs import DEFAULT_EVALUATE_PATH, load_evaluate_module
 
 
 JUDGE_WARNING = (

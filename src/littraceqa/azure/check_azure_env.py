@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .common import ROOT
+from ..common import ROOT
 
 # Variables azure_config.py reads with _required(); missing ones fail at runtime.
 REQUIRED = [

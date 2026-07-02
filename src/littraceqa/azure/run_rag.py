@@ -21,7 +21,7 @@ from .azure_config import (
     build_search_client,
     load_environment,
 )
-from .common import (
+from ..common import (
     DEFAULT_METADATA,
     ROOT,
     Record,
@@ -33,7 +33,7 @@ from .common import (
     write_json,
     write_jsonl,
 )
-from .fix_chunk_locators import normalize_object_id
+from ..fix_chunk_locators import normalize_object_id
 
 
 SEARCH_SELECT = [

@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-from .common import ROOT
+from ..common import ROOT
 
 
 def load_environment(env_file: Optional[Path] = None) -> None:

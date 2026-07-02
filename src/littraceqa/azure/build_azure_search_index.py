@@ -26,7 +26,7 @@ from .azure_config import (
     build_search_index_client,
     load_environment,
 )
-from .common import ROOT, Record, batched, read_json, write_json
+from ..common import ROOT, Record, batched, read_json, write_json
 
 
 VECTOR_FIELD = "content_vector"

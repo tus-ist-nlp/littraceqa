@@ -32,7 +32,7 @@ from .azure_config import (
     build_document_intelligence_client,
     load_environment,
 )
-from .common import (
+from ..common import (
     DEFAULT_METADATA,
     ROOT,
     Record,
