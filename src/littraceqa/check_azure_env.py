@@ -11,24 +11,26 @@ from urllib.parse import urlparse
 
 from .common import ROOT
 
+# Variables azure_config.py reads with _required(); missing ones fail at runtime.
 REQUIRED = [
     "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT",
     "AZURE_DOCUMENT_INTELLIGENCE_KEY",
     "AZURE_SEARCH_ENDPOINT",
     "AZURE_SEARCH_ADMIN_KEY",
-    "AZURE_SEARCH_INDEX_NAME",
     "AZURE_OPENAI_ENDPOINT",
     "AZURE_OPENAI_API_KEY",
     "AZURE_OPENAI_CHAT_DEPLOYMENT",
     "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
-    "AZURE_OPENAI_EMBEDDING_DIMENSIONS",
 ]
 
+# Variables azure_config.py reads with a built-in default; validated only when set.
 KNOWN_OPTIONAL = {
     "AZURE_DOCUMENT_INTELLIGENCE_MODEL",
     "AZURE_DOCUMENT_INTELLIGENCE_API_VERSION",
+    "AZURE_SEARCH_INDEX_NAME",
     "AZURE_OPENAI_API_VERSION",
     "AZURE_OPENAI_USE_V1",
+    "AZURE_OPENAI_EMBEDDING_DIMENSIONS",
     "AZURE_OPENAI_EMBEDDING_REQUEST_DIMENSIONS",
 }
 
@@ -80,9 +82,14 @@ def main() -> int:
     issues: list[str] = []
 
     for name in REQUIRED:
-        value = values.get(name, "")
-        if not value:
+        if not values.get(name, ""):
             issues.append(f"missing: {name}")
+
+    # Format checks apply to every recognized variable that is actually set,
+    # required or optional-with-default alike.
+    for name in sorted((set(REQUIRED) | KNOWN_OPTIONAL) & set(values)):
+        value = values[name]
+        if not value:
             continue
         if name.endswith("_ENDPOINT") and not looks_like_endpoint_origin(value):
             issues.append(f"{name}: endpoint should be an https origin without path/query")
@@ -92,14 +99,18 @@ def main() -> int:
             issues.append(f"{name}: should be a deployment name, not a URL")
 
     unknown = sorted(set(values) - set(REQUIRED) - KNOWN_OPTIONAL)
-    for name in unknown:
-        issues.append(f"unknown variable: {name}")
+    warnings = [f"unknown variable: {name}" for name in unknown]
 
     print("checked:", args.env_file)
     for name in REQUIRED:
         value = values.get(name, "")
         status = "OK" if value else "MISSING"
         print(f"{status:7s} {name:45s} length={len(value)}")
+
+    if warnings:
+        print("\nwarnings (do not affect the exit code):")
+        for warning in warnings:
+            print(f"- {warning}")
 
     if issues:
         print("\nissues:")

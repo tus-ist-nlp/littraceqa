@@ -24,6 +24,14 @@ from .common import (
     read_jsonl,
     retry_chat_completion,
 )
+from .compare_runs import DEFAULT_EVALUATE_PATH, load_evaluate_module
+
+
+JUDGE_WARNING = (
+    "WARNING: the judge scores are diagnostic-only (recall-leaning papers, "
+    "locator-blind evidence) and systematically overestimate the official "
+    "metric; rank runs by the official metrics."
+)
 
 
 SYSTEM_PROMPT = """You are a strict but fair evaluator for LitTraceQA.
@@ -106,7 +114,10 @@ Return exactly this JSON shape:
 
 Scoring guidance:
 - answer_score is the main score. Give 1.0 only if the predicted final answer is fully correct.
-- paper_score measures whether the predicted papers include the necessary gold papers.
+- paper_score compares the predicted paper SET with the gold paper SET, like an F1:
+  penalize missing gold papers AND ALSO penalize every extra predicted paper that is
+  not in the gold set. A prediction listing all gold papers plus unrelated extras
+  must NOT get 1.0.
 - evidence_score measures whether the predicted evidence points to the same supporting facts.
 - overall_score should weight answer most, then papers, then evidence.
 - If the prediction says the answer cannot be determined but the gold answer is provided, answer_score should be 0.
@@ -180,11 +191,35 @@ def mean(records: list[Record], field: str) -> float:
     return sum(float(record[field]) for record in records) / len(records) if records else 0.0
 
 
+def compute_official_metrics(
+    gold_records: list[Record],
+    pred_records: list[Record],
+    query_ids: list[str],
+    *,
+    evaluate_path: Path = DEFAULT_EVALUATE_PATH,
+) -> Optional[Record]:
+    """Score the graded subset with the official scripts/evaluate.py logic."""
+    try:
+        evaluate_module = load_evaluate_module(evaluate_path)
+    except Exception as exc:  # noqa: BLE001 - the sidebar must never kill grading.
+        print(f"WARN: official evaluator unavailable: {exc}", file=sys.stderr)
+        return None
+    wanted = set(query_ids)
+    gold_subset = [record for record in gold_records if str(record.get("query_id")) in wanted]
+    pred_subset = [record for record in pred_records if str(record.get("query_id")) in wanted]
+    try:
+        return evaluate_module.evaluate(gold_subset, pred_subset)
+    except Exception as exc:  # noqa: BLE001 - the sidebar must never kill grading.
+        print(f"WARN: official evaluation failed: {exc}", file=sys.stderr)
+        return None
+
+
 def write_markdown_report(
     path: Path,
     gold_by_id: dict[str, Record],
     pred_by_id: dict[str, Record],
     grades: list[Record],
+    official_metrics: Optional[Record] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     verdict_counts: dict[str, int] = {}
@@ -203,9 +238,31 @@ def write_markdown_report(
         f"- overall_score_mean: {mean(grades, 'overall_score'):.3f}",
         f"- verdict_counts: {json.dumps(verdict_counts, ensure_ascii=False, sort_keys=True)}",
         "",
-        "## Per Question",
-        "",
     ]
+    if official_metrics is not None:
+        lines.extend(
+            [
+                "## Official Metrics (scripts/evaluate.py, graded subset)",
+                "",
+                JUDGE_WARNING,
+                "",
+                "```json",
+                json.dumps(
+                    official_metrics.get("metrics"),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "```",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Per Question",
+            "",
+        ]
+    )
     for grade in grades:
         query_id = str(grade["query_id"])
         gold = gold_by_id.get(query_id, {})
@@ -327,7 +384,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     grades_by_id = {str(grade["query_id"]): grade for grade in grades}
     ordered_grades = [grades_by_id[query_id] for query_id in query_ids if query_id in grades_by_id]
-    write_markdown_report(args.report, gold_by_id, pred_by_id, ordered_grades)
+    official = compute_official_metrics(gold_records, pred_records, query_ids)
+    write_markdown_report(
+        args.report, gold_by_id, pred_by_id, ordered_grades, official_metrics=official
+    )
 
     summary = {
         "total": len(ordered_grades),
@@ -337,6 +397,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "evidence_score_mean": mean(ordered_grades, "evidence_score"),
         "overall_score_mean": mean(ordered_grades, "overall_score"),
     }
+    if official is not None:
+        summary["official_metrics"] = official.get("metrics")
+        print(JUDGE_WARNING, file=sys.stderr)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"grades: {args.output}", file=sys.stderr)
     print(f"report: {args.report}", file=sys.stderr)
