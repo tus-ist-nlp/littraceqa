@@ -129,12 +129,16 @@ def analyze_pdf_bytes(
     model: str,
     features: list[str],
     content_format: str,
+    pages: Optional[str] = None,
 ) -> Record:
     kwargs: Record = {}
     if features:
         kwargs["features"] = features
     if content_format:
         kwargs["output_content_format"] = content_format
+    if pages:
+        # Restrict analysis to a page range, e.g. "1-40" (1-based, inclusive).
+        kwargs["pages"] = pages
 
     body = io.BytesIO(pdf_bytes)
     try:

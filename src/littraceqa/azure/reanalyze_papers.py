@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import io
 import random
 import sys
 import threading
@@ -39,6 +40,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import requests
+from pypdf import PdfReader
 
 from .azure_config import (
     DocumentIntelligenceSettings,
@@ -58,8 +60,9 @@ from ..common import (
 )
 from .process_box_archives_document_intelligence import (
     analyze_pdf_bytes_with_retries,
+    is_transient_document_intelligence_error,
 )
-from .process_document_intelligence import build_chunks
+from .process_document_intelligence import analyze_pdf_bytes, build_chunks, value
 
 
 DEFAULT_BOX_MANIFEST = ROOT / "artifacts" / "docint" / "_box_archive_manifest.jsonl"
@@ -276,6 +279,239 @@ def download_pdf(
     raise IOError(f"download failed after {attempts} attempts: {last_error}")
 
 
+# ---------------------------------------------------------------------------
+# Page-window splitting for giant PDFs.
+#
+# Some long, media-heavy PDFs make a whole-document Document Intelligence
+# analysis fail with (Timeout)/(InternalServerError). The layout model accepts
+# a ``pages="<start>-<end>"`` restriction, so with ``--page-window N`` we count
+# pages locally (pypdf), analyze the document in N-page windows, and stitch the
+# per-window results into one dict compatible with ``build_chunks``.
+#
+# Empirical note (verified 2026-07 against the deployed layout model with
+# ``pages="2-3"``): the returned ``pageNumber`` values in ``pages[]`` and in
+# every ``boundingRegions`` entry are ABSOLUTE document page numbers (2, 3),
+# NOT window-relative. ``window_page_offset`` therefore normally returns 0 and
+# exists only as a guard should a future API version switch to relative
+# numbering.
+# ---------------------------------------------------------------------------
+
+STITCH_LIST_KEYS = ("pages", "paragraphs", "tables", "figures")
+STITCH_SCALAR_KEYS = ("apiVersion", "modelId", "contentFormat", "stringIndexType")
+
+
+def count_pdf_pages(pdf_bytes: bytes) -> Optional[int]:
+    """Local page count via pypdf; None when the PDF cannot be parsed."""
+    try:
+        return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+    except Exception as exc:  # noqa: BLE001 - malformed PDFs raise many types.
+        print(f"WARN pypdf could not count pages: {exc}", file=sys.stderr)
+        return None
+
+
+def plan_page_windows(
+    page_count: int, window: int, max_pages: int
+) -> list[tuple[int, int]]:
+    """Inclusive 1-based (start, end) windows; --max-pages caps total coverage."""
+    last = page_count if max_pages <= 0 else min(page_count, max_pages)
+    return [
+        (start, min(start + window - 1, last))
+        for start in range(1, last + 1, window)
+    ]
+
+
+def window_page_offset(result: Record, window_start: int) -> int:
+    """0 when page numbers are absolute (the verified behavior); window_start-1
+    when the result numbers pages relative to the analyzed window."""
+    numbers: list[int] = []
+    for page in result.get("pages") or []:
+        try:
+            numbers.append(int(value(page, "pageNumber", "page_number")))
+        except (TypeError, ValueError):
+            continue
+    if window_start > 1 and numbers and min(numbers) == 1:
+        return window_start - 1
+    return 0
+
+
+def apply_page_offset(node: Any, offset: int) -> None:
+    """Recursively shift every pageNumber (pages[] entries and boundingRegions)
+    by ``offset`` in place. Only used when a window came back relative."""
+    if offset == 0:
+        return
+    if isinstance(node, dict):
+        for key, val in node.items():
+            if key in ("pageNumber", "page_number"):
+                try:
+                    node[key] = int(val) + offset
+                except (TypeError, ValueError):
+                    pass
+            else:
+                apply_page_offset(val, offset)
+    elif isinstance(node, list):
+        for item in node:
+            apply_page_offset(item, offset)
+
+
+def stitch_window_results(window_results: list[Record]) -> Record:
+    """Merge per-window DI results (in window order) into one build_chunks-
+    compatible dict: ``content`` strings are joined and the ``pages`` /
+    ``paragraphs`` / ``tables`` / ``figures`` arrays are concatenated after any
+    page-offset fix. Span offsets are NOT rewritten (build_chunks ignores them).
+    """
+    stitched: Record = {key: [] for key in STITCH_LIST_KEYS}
+    contents: list[str] = []
+    for entry in window_results:
+        result = entry["result"]
+        offset = int(entry.get("page_offset") or 0)
+        if offset:
+            apply_page_offset(result, offset)
+        for key in STITCH_SCALAR_KEYS:
+            if key not in stitched and result.get(key) is not None:
+                stitched[key] = result[key]
+        content = str(result.get("content") or "")
+        if content.strip():
+            contents.append(content)
+        for key in STITCH_LIST_KEYS:
+            stitched[key].extend(result.get(key) or [])
+    stitched["content"] = "\n\n".join(contents)
+    return stitched
+
+
+def analyze_pdf_windowed(
+    client: Any,
+    pdf_bytes: bytes,
+    *,
+    settings: DocumentIntelligenceSettings,
+    args: argparse.Namespace,
+    paper_id: str,
+    page_count: int,
+) -> tuple[Record, list[Record]]:
+    """Analyze the PDF one page window at a time and stitch the results.
+
+    A window that still fails after retries is logged and skipped (partial
+    coverage beats nothing). Raises only when EVERY window failed.
+    Returns (stitched_result, window_meta).
+    """
+    windows = plan_page_windows(page_count, args.page_window, args.max_pages)
+    print(
+        f"  {paper_id}: {page_count} pages -> {len(windows)} windows of "
+        f"{args.page_window} pages"
+        + (f" (capped at --max-pages {args.max_pages})" if args.max_pages else ""),
+        file=sys.stderr,
+    )
+    window_results: list[Record] = []
+    window_meta: list[Record] = []
+    for start, end in windows:
+        pages = f"{start}-{end}"
+        try:
+            result = analyze_window_with_retries(
+                client,
+                pdf_bytes,
+                pages=pages,
+                settings=settings,
+                features=args.feature,
+                content_format=args.content_format,
+                attempts=args.di_retries,
+                base_delay_seconds=args.retry_base_seconds,
+                paper_id=paper_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - skip the window, keep going.
+            print(
+                f"  {paper_id}: window {pages} failed after retries "
+                f"({exc.__class__.__name__}: {exc}); skipping window",
+                file=sys.stderr,
+            )
+            window_meta.append(
+                {
+                    "pages": pages,
+                    "status": "failed",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+            continue
+        offset = window_page_offset(result, start)
+        window_results.append(
+            {"start": start, "pages": pages, "result": result, "page_offset": offset}
+        )
+        window_meta.append(
+            {
+                "pages": pages,
+                "status": "ok",
+                "page_offset": offset,
+                "paragraphs": len(result.get("paragraphs") or []),
+                "tables": len(result.get("tables") or []),
+                "figures": len(result.get("figures") or []),
+            }
+        )
+        print(
+            f"  {paper_id}: window {pages} ok "
+            f"(paragraphs={len(result.get('paragraphs') or [])}, "
+            f"offset={offset})",
+            file=sys.stderr,
+        )
+    if not window_results:
+        raise RuntimeError(
+            f"all {len(windows)} page windows failed for {paper_id}"
+        )
+    stitched = stitch_window_results(window_results)
+    stitched["page_windows"] = window_meta
+    return stitched, window_meta
+
+
+def is_transient_window_error(exc: Exception) -> bool:
+    """Extend the shared transient check: DI long-running-operation failures
+    surface as e.g. "(InternalServerError) An unexpected error occurred." with
+    no space in the code and no HTTP 5xx status on the polling response, so the
+    box-run marker list misses them."""
+    if is_transient_document_intelligence_error(exc):
+        return True
+    compact = str(exc).lower().replace(" ", "")
+    return "internalservererror" in compact or "timeout" in compact
+
+
+def analyze_window_with_retries(
+    client: Any,
+    pdf_bytes: bytes,
+    *,
+    pages: str,
+    settings: DocumentIntelligenceSettings,
+    features: list[str],
+    content_format: str,
+    attempts: int,
+    base_delay_seconds: float,
+    paper_id: str,
+) -> Record:
+    """Same retry policy as ``analyze_pdf_bytes_with_retries`` but restricted
+    to a page range (that helper does not take ``pages``)."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return analyze_pdf_bytes(
+                client,
+                pdf_bytes,
+                model=settings.model,
+                features=features,
+                content_format=content_format,
+                pages=pages,
+            )
+        except Exception as exc:  # noqa: BLE001 - SDK error classes vary.
+            last_error = exc
+            if attempt >= attempts or not is_transient_window_error(exc):
+                raise
+            delay = base_delay_seconds * (2 ** (attempt - 1))
+            delay += random.uniform(0, max(base_delay_seconds, 0.1))
+            print(
+                f"  {paper_id}: transient DI error on window {pages} attempt "
+                f"{attempt}/{attempts}: {exc}; retrying in {delay:.1f}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Document Intelligence analysis was not attempted")
+
+
 def process_paper(
     record: Record,
     *,
@@ -308,26 +544,51 @@ def process_paper(
         manifest["pdf_path"] = relative_or_absolute(pdf_path)
         pdf_bytes = pdf_path.read_bytes()
 
-        result = analyze_pdf_bytes_with_retries(
-            client,
-            pdf_bytes,
-            settings=settings,
-            features=args.feature,
-            content_format=args.content_format,
-            attempts=args.di_retries,
-            base_delay_seconds=args.retry_base_seconds,
-            paper_id=paper_id,
+        page_count: Optional[int] = None
+        if args.page_window > 0:
+            page_count = count_pdf_pages(pdf_bytes)
+            if page_count is not None:
+                manifest["page_count"] = page_count
+
+        use_windows = (
+            args.page_window > 0
+            and page_count is not None
+            and (
+                page_count > args.page_window
+                or (args.max_pages > 0 and page_count > args.max_pages)
+            )
         )
-        write_json(
-            raw_path,
-            {
-                "paper": record,
-                "document_intelligence": result,
-                "processed_at": time.time(),
-                "pdf_path": relative_or_absolute(pdf_path),
-                "pdf_url": record.get("pdf_url") or "",
-            },
-        )
+        window_meta: list[Record] = []
+        if use_windows:
+            result, window_meta = analyze_pdf_windowed(
+                client,
+                pdf_bytes,
+                settings=settings,
+                args=args,
+                paper_id=paper_id,
+                page_count=page_count,
+            )
+        else:
+            result = analyze_pdf_bytes_with_retries(
+                client,
+                pdf_bytes,
+                settings=settings,
+                features=args.feature,
+                content_format=args.content_format,
+                attempts=args.di_retries,
+                base_delay_seconds=args.retry_base_seconds,
+                paper_id=paper_id,
+            )
+        raw_payload: Record = {
+            "paper": record,
+            "document_intelligence": result,
+            "processed_at": time.time(),
+            "pdf_path": relative_or_absolute(pdf_path),
+            "pdf_url": record.get("pdf_url") or "",
+        }
+        if window_meta:
+            raw_payload["page_windows"] = window_meta
+        write_json(raw_path, raw_payload)
         chunks = build_chunks(
             record,
             result,
@@ -343,6 +604,15 @@ def process_paper(
                 "elapsed_seconds": round(time.time() - started, 3),
             }
         )
+        if window_meta:
+            manifest["page_windows"] = [
+                entry["pages"] for entry in window_meta if entry["status"] == "ok"
+            ]
+            skipped = [
+                entry["pages"] for entry in window_meta if entry["status"] != "ok"
+            ]
+            if skipped:
+                manifest["skipped_windows"] = skipped
         with manifest_lock:
             append_jsonl(manifest_path, manifest)
         print(f"  {paper_id}: ok chunks={len(chunks)}", file=sys.stderr)
@@ -428,6 +698,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=80.0,
         help="Skip PDFs larger than this many MiB.",
+    )
+    parser.add_argument(
+        "--page-window",
+        type=int,
+        default=0,
+        help="Analyze giant PDFs in windows of this many pages (0 = disabled). "
+        "Triggers when the local pypdf page count exceeds the window; failed "
+        "windows are skipped so partial coverage still yields chunks.",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=0,
+        help="With --page-window, stop after this many pages (0 = no cap).",
     )
     parser.add_argument("--max-chars", type=int, default=1800)
     parser.add_argument("--overlap-chars", type=int, default=250)
