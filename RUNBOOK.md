@@ -183,6 +183,59 @@ uv run python -m littraceqa.compare_runs `
     --pred-b runs\validation_full_index.jsonl
 ```
 
+## 6b. Test-day PDF staging + figure vision pass
+
+After the first RAG pass, stage the PDFs of every predicted paper so the
+vision pass (`littraceqa.azure.figure_answer`) can render figure pages.
+Do NOT rely on direct downloads: OpenReview (and several publisher sites)
+block scripted PDF fetches — the Box shared folder is the reliable source.
+
+```powershell
+# Collect all paper_ids referenced by the predictions (gold_papers + evidence),
+# locate each paper's zip via artifacts\docint\_box_archive_manifest.jsonl,
+# download each needed archive once into artifacts\box_tmp, extract only the
+# matching PDFs into artifacts\pdf_cache, and delete the zip. Cached PDFs are
+# skipped, so re-runs are cheap.
+uv run --extra azure python -m littraceqa.azure.extract_pdfs_from_box `
+    --from-predictions runs\test_full_index.jsonl
+
+# Preview first (no downloads, no writes): reports cache state and which
+# archives would be fetched. Exit 1 means some paper is not in the manifest.
+uv run --extra azure python -m littraceqa.azure.extract_pdfs_from_box `
+    --from-predictions runs\test_full_index.jsonl --dry-run
+```
+
+A full archive is ~5-15 GiB, so budget disk (`--reserve-gb`, default 20) and
+time; the download resumes a partial `.part` file across retries. Individual
+paper_ids can also be staged with `--paper-id` / `--paper-id-file`.
+
+Then run the vision second pass over the figure-primary questions (it reads
+PDFs from `artifacts\pdf_cache` first and only falls back to `pdf_url`
+downloads, which is why the Box staging above comes first):
+
+```powershell
+uv run --extra azure python -m littraceqa.azure.figure_answer `
+    --predictions runs\test_full_index.jsonl `
+    --inputs data\test_inputs.jsonl `
+    --output runs\test_full_index_vision.jsonl
+```
+
+On test day pass the organizers' options file explicitly (see "Test-day
+options"); the auto-join only fires for the default validation inputs.
+
+The vision pass also tops up short `multi_paper` figure-question paper lists
+(`--compare-expand`, on by default): the vision model reports the comparison
+methods it sees on the rendered pages, those names plus citation-dense
+baseline excerpts from the submitted papers' local chunk files are fed through
+`run_rag`'s P3 resolution ladder (bibliography-title matching, search-score
+floors), and any corpus-resolved comparison-group papers are appended to
+`gold_papers` (never removed, capped at 4, enumeration questions skipped).
+This recovers comparison-group papers whose names never appeared in the
+retrieved text context that run_rag's own compare-expand pass saw (e.g. the
+TCM/ECM cluster on q_031). It needs the `AZURE_SEARCH_*` env vars; if the
+search client cannot be built the pass logs a warning and skips expansion.
+Disable with `--no-compare-expand`.
+
 ## 7. Mandatory final gate: gold-free submission lint
 
 Before every submission (dev or hidden test), lint the prediction file. It
