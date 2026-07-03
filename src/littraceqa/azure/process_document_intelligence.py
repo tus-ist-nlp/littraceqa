@@ -726,8 +726,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--content-format",
-        default="markdown",
-        help="Passed as output_content_format when supported by the SDK/API.",
+        default="",
+        help=(
+            "Passed as output_content_format when non-empty. Default off: the "
+            "chunker only uses structured fields (paragraphs/tables/figures), "
+            "and Azure's markdown mode began returning InternalServerError "
+            "service-side on 2026-07-03."
+        ),
     )
     parser.add_argument("--force-analyze", action="store_true")
     parser.add_argument("--force-chunks", action="store_true")

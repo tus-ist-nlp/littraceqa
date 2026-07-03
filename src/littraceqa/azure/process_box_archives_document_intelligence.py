@@ -517,7 +517,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-chars", type=int, default=1800)
     parser.add_argument("--overlap-chars", type=int, default=250)
     parser.add_argument("--feature", action="append", default=[])
-    parser.add_argument("--content-format", default="markdown")
+    parser.add_argument(
+        "--content-format",
+        default="",
+        help="Passed as output_content_format when non-empty (markdown mode broke service-side 2026-07-03; the chunker does not need it).",
+    )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--di-retries", type=int, default=3)
     parser.add_argument("--retry-base-seconds", type=float, default=8.0)
