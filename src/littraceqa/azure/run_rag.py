@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -259,6 +260,11 @@ def evidence_from_citations(
     primary_type = str(sample.get("primary_evidence_type") or "")
     evidence: list[Record] = []
     seen: set[tuple[str, str, str, str]] = set()
+    # For citation_context/equation_algorithm questions the gold locus is
+    # almost always a single equation/ablation location: additional citations
+    # must share the FIRST citation's paper and page (off-page results-table
+    # citations only dilute precision).
+    first_locus: Optional[tuple[str, str]] = None
     for item in llm_evidence:
         if not isinstance(item, dict):
             continue
@@ -298,6 +304,12 @@ def evidence_from_citations(
         pages = fanout_pages(chunk, matched_text)
         if not pages:
             pages = [page]
+        if primary_type in RELABEL_PRIMARY_TYPES:
+            locus = (paper_id, str(pages[0]))
+            if first_locus is None:
+                first_locus = locus
+            elif locus != first_locus:
+                continue
         emit_pairs: list[tuple[str, Any]] = [(etype, pages[0]) for etype in emit_types]
         if len(pages) > 1:
             emit_pairs.append((emit_types[0], pages[1]))
@@ -388,6 +400,12 @@ def fanout_pages(chunk: Record, matched_text: str = "") -> list[Any]:
             position_page = pages[min(len(pages) - 1, index * len(pages) // len(content_norm))]
             if str(position_page) != str(primary):
                 extra = position_page
+            else:
+                # The quote localizes to the primary page itself: emitting the
+                # later page too would just be a precision-diluting twin. The
+                # unconditional extra page is kept only when there is no quote
+                # to localize.
+                return result
     result.append(extra)
     return result
 
@@ -463,6 +481,33 @@ def answer_match_values(answer: Record, options: Optional[dict[str, str]]) -> li
         seen_norms.add(norm)
         filtered.append(value)
     return filtered
+
+
+def _numeric_table_cell_values(answer: Record) -> list[str]:
+    """Numeric-looking string cells of answer.table.rows ('37.55', '96.23').
+
+    Row-key/name cells are excluded on purpose: method names occur in every
+    table of a paper and would defeat value-based disambiguation.
+    """
+    table = answer.get("table") if isinstance(answer.get("table"), dict) else {}
+    rows = (table or {}).get("rows")
+    values: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(rows, list):
+        return values
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for cell in row.values():
+            if not isinstance(cell, str):
+                continue
+            norm = _norm_match_text(cell)
+            if not norm or norm in seen:
+                continue
+            if re.fullmatch(r"[\d.,%±\s+-]+", norm) and len(norm) >= 2:
+                seen.add(norm)
+                values.append(cell)
+    return values
 
 
 def _content_contains_value(content_norm: str, content_norm_nc: str, value: str) -> bool:
@@ -556,6 +601,7 @@ def build_reanchor_candidates(
             if page is None or str(page).strip() == "":
                 continue
             cited_pages.add((str(item.get("paper_id") or ""), str(page)))
+        same_page: list[tuple[Record, str]] = []
         for paper_id in submitted_paper_ids:
             for chunk in tf_by_paper.get(paper_id, []):
                 if str(chunk.get("source_type") or "") != primary:
@@ -565,7 +611,37 @@ def build_reanchor_candidates(
                 if chunk_locator.get("page") is not None:
                     chunk_pages.add(str(chunk_locator.get("page")))
                 if any((paper_id, page) in cited_pages for page in chunk_pages):
-                    candidates.append((chunk, ""))
+                    same_page.append((chunk, ""))
+        # Multiple table/figure chunks share the cited page (Tables 1+2 both
+        # on p7): prefer the chunk(s) actually containing a predicted table
+        # cell value; fall back to all same-page chunks only when no chunk
+        # contains any value.
+        cell_values = _numeric_table_cell_values(answer)
+        if cell_values and len(same_page) > 1:
+            value_filtered: list[tuple[Record, str]] = []
+            for chunk, matched in same_page:
+                content_norm = _norm_match_text(chunk.get("content"))
+                content_norm_nc = _strip_thousands(content_norm)
+                if any(
+                    _content_contains_value(content_norm, content_norm_nc, value)
+                    for value in cell_values
+                ):
+                    value_filtered.append((chunk, matched))
+            if value_filtered:
+                same_page = value_filtered
+        # Multi-paper questions: one same-page chunk per paper, so one page's
+        # tables cannot fill every priority evidence slot.
+        if str(sample.get("task_family") or "") == "multi_paper":
+            per_paper_seen: set[str] = set()
+            capped_same_page: list[tuple[Record, str]] = []
+            for chunk, matched in same_page:
+                paper_id = str(chunk.get("paper_id") or "")
+                if paper_id in per_paper_seen:
+                    continue
+                per_paper_seen.add(paper_id)
+                capped_same_page.append((chunk, matched))
+            same_page = capped_same_page
+        candidates.extend(same_page)
 
     items: list[Record] = []
     for chunk, matched in candidates:
@@ -584,13 +660,28 @@ def merge_evidence_items(
     priority: list[Record],
     llm_items: list[Record],
     cap: int = EVIDENCE_CAP,
+    primary_type: str = "",
 ) -> list[Record]:
     """P1 merge: re-anchor/lookup items first, then LLM citations.
 
     Dedupes by the official coarse key and caps at ``cap``; when LLM
     citations exist, one slot is always reserved so they are never all
-    dropped.
+    dropped. For figure-primary questions where a figure item was re-anchored,
+    at most ONE text_span LLM citation is kept (fan-out twins of the same
+    quote on adjacent pages only dilute precision next to the gold figure).
     """
+    if primary_type == "figure" and any(
+        str(item.get("source_type") or "") == "figure" for item in priority
+    ):
+        kept: list[Record] = []
+        text_spans = 0
+        for item in llm_items:
+            if str(item.get("source_type") or "") == "text_span":
+                text_spans += 1
+                if text_spans > 1:
+                    continue
+            kept.append(item)
+        llm_items = kept
     merged: list[Record] = []
     seen: set[tuple[str, str, str, str]] = set()
 
@@ -647,9 +738,42 @@ _ORDINAL_WORDS = {
 _MATH_CHARS = "=≈≤≥±∑∏∫∇∂√·×→↦"
 
 
+def _merge_overlapping_texts(texts: list[str], min_overlap: int = 40) -> str:
+    """Concatenate chunk texts, dropping the duplicated suffix/prefix overlap
+    DI chunking leaves between consecutive chunks (a reference entry repeated
+    at a chunk boundary would otherwise be counted twice)."""
+    merged = ""
+    for text in texts:
+        text = str(text or "")
+        if not merged:
+            merged = text
+            continue
+        overlap = 0
+        for size in range(min(len(merged), len(text)), min_overlap - 1, -1):
+            if merged.endswith(text[:size]):
+                overlap = size
+                break
+        merged = merged + ("" if overlap else "\n") + text[overlap:]
+    return merged
+
+
 def detect_lookup_request(question: str) -> Optional[Record]:
-    """Detect 'Nth/last reference' and 'Equation (N)' question patterns."""
+    """Detect 'Nth/last reference', 'Equation (N)' and 'how many references
+    ... <Surname>' question patterns."""
     q = str(question or "").lower()
+    if re.search(r"\bhow many references\b", q) and re.search(
+        r"\b(?:include|includes|list|lists|cite|cites|mention|mentions|by|with)\b", q
+    ):
+        # 'How many references ... include <Surname> as an author?' -> count
+        # over the local References region; retrieval routinely surfaces only
+        # part of a split reference list, which misleads the count.
+        surname = re.search(
+            r"\b(?:include|includes|list|lists|cite|cites|mention|mentions|by|with)\s+"
+            r"([A-Z][a-z][A-Za-z'’-]+)",
+            str(question or ""),
+        )
+        if surname:
+            return {"kind": "reference_count", "surname": surname.group(1)}
     if re.search(r"\b(?:last|final)\s+(?:cited\s+|listed\s+)?reference\b", q):
         return {"kind": "reference", "last": True, "number": None}
     match = re.search(r"\b(\d+)\s*(?:st|nd|rd|th)\s+(?:cited\s+|listed\s+)?reference\b", q)
@@ -773,6 +897,49 @@ def perform_local_lookup(
         chunks = load_paper_chunks(paper_id, chunks_dir)
         if not chunks:
             return None
+        if request["kind"] == "reference_count":
+            # Inject EVERY References-region chunk containing the queried
+            # surname: DI chunking splits reference lists mid-region, so a
+            # single retrieved chunk shows a misleadingly partial list.
+            surname = str(request.get("surname") or "")
+            if not surname:
+                return None
+            surname_re = re.compile(
+                r"(?<![A-Za-z])" + re.escape(surname) + r"(?![a-z])"
+            )
+            matching = [
+                chunk
+                for chunk in _reference_chunks_extended(chunks)
+                if surname_re.search(str(chunk.get("content") or ""))
+            ]
+            if not matching:
+                return None
+            chunk = matching[0]
+            locator = parse_locator(chunk)
+            page = locator.get("page")
+            if page is None or str(page).strip() == "":
+                return None
+            # Consecutive DI chunks overlap: merge before showing, otherwise
+            # a boundary-straddling entry is shown (and counted) twice.
+            snippet = compact_text(
+                _merge_overlapping_texts(
+                    [str(item.get("content") or "") for item in matching[:3]]
+                ),
+                max_chars=4500,
+            )
+            header = (
+                f"[LOOKUP] paper_id={paper_id} source_type=citation_context page={page} "
+                f"(locally verified References-region excerpt: ALL reference entries "
+                f"mentioning '{surname}' are shown below; count them here; "
+                "authoritative for this question)"
+            )
+            return {
+                "paper_id": paper_id,
+                "evidence_type": "citation_context",
+                "snippet": snippet,
+                "chunk": chunk,
+                "context_block": header + "\n" + compact_text(snippet, max_chars=5000),
+            }
         if request["kind"] == "reference":
             found = find_reference_entry(
                 chunks, request.get("number"), bool(request.get("last"))
@@ -841,6 +1008,9 @@ ENTITY_STOPWORDS = {
     # Common datasets/benchmarks with camel-case spellings.
     "IMAGENET", "WIKITEXT", "TRIVIAQA", "NATURALQ", "TRUTHFULQA", "WEBQA",
     "COMMONSENSEQA",
+    # Benchmark/backbone names: they resolve to whichever unrelated paper
+    # happens to title-match ('LLaVA' -> LLaVA-MoD) and burn boost slots.
+    "POPE", "LLAVA", "QWEN", "GEMMA", "LLAMA", "VICUNA",
 }
 
 # BM25 acceptance floors, calibrated on the live index (see Stage A2 probes):
@@ -888,13 +1058,26 @@ def extract_entity_candidates(
     CamelCase tokens (SecEmb, sCM, SimLingo), ALLCAPS tokens (IMM, ORION),
     hyphenated method names (D-FINE). Generic ML acronyms are filtered.
     """
-    question = str(question or "")
+    # NFKC folds superscripts and friends so 'D²PO' tokenizes as 'D2PO' and
+    # resolves to its paper instead of silently producing no candidate.
+    question = unicodedata.normalize("NFKC", str(question or ""))
     ordered: list[Record] = []
     seen: set[str] = set()
 
     def add(text: str, is_title: bool) -> None:
         text = re.sub(r"\s+", " ", str(text or "")).strip().strip(".,;:")
         if not text or text.upper() in ENTITY_STOPWORDS:
+            return
+        # Hyphenated dataset/backbone variants ('CIFAR-10', 'LLaVA-1.5'):
+        # test the head token against the stopword list too.
+        if "-" in text and text.split("-", 1)[0].upper() in ENTITY_STOPWORDS:
+            return
+        # Backbone-model names ('Gemma2-9B-Instruct', 'Llama-3-8B-Chat') are
+        # never paper-identifying entities: a parameter-size segment or an
+        # -Instruct/-Chat suffix marks them.
+        if not is_title and re.search(
+            r"-\d+(?:\.\d+)?[BbMm](?![A-Za-z0-9])|-(?:Instruct|Chat)(?![A-Za-z0-9])", text
+        ):
             return
         key = text.lower()
         if key in seen:
@@ -970,6 +1153,16 @@ def keyword_search(
     return records
 
 
+def _paper_metadata_token_match(paper_id: str, token_re: "re.Pattern[str]") -> bool:
+    """True when the entity token appears in the paper's OWN title/abstract
+    (local metadata chunk). A method's own paper names its acronym there
+    ('Mixture of Decoding (MoD)'); a merely-citing hub never does."""
+    for chunk in load_paper_chunks(paper_id):
+        if str(chunk.get("source_type") or "") == "metadata":
+            return bool(token_re.search(str(chunk.get("content") or "")))
+    return False
+
+
 def _paper_info(hit: Record) -> Record:
     return {
         "paper_id": str(hit.get("paper_id") or ""),
@@ -1021,7 +1214,9 @@ def resolve_entity_papers(
                 and _titles_equivalent(name, title)
             ):
                 seen.add(paper_id)
-                title_accepts.append(_paper_info(hit))
+                info = _paper_info(hit)
+                info["resolved_via"] = "title"
+                title_accepts.append(info)
         if title_accepts and not short_acronym:
             return title_accepts[:max_papers]
         if candidate.get("is_title"):
@@ -1030,22 +1225,50 @@ def resolve_entity_papers(
             return title_accepts[:max_papers]
 
         contextual = f"{name} {question}".strip()
-        content_token_papers: list[str] = []  # token-verified, any score
-        content_accepts: list[Record] = []  # token-verified AND above floor
+        content_first_hit: dict[str, Record] = {}  # best-ranked token-verified hit
+        content_counts: dict[str, int] = {}  # token-verified hits per paper (top-20)
         for hit in keyword_search(search_client, contextual, fields=["content"], top=20, select=select):
             if not token_re.search(str(hit.get("content") or "")):
                 continue
             paper_id = str(hit.get("paper_id") or "")
-            if not paper_id or paper_id in content_token_papers:
+            if not paper_id:
                 continue
-            content_token_papers.append(paper_id)
-            if float(hit.get("search_score") or 0.0) >= CONTENT_CONTEXT_SCORE_FLOOR:
-                content_accepts.append(_paper_info(hit))
+            content_counts[paper_id] = content_counts.get(paper_id, 0) + 1
+            content_first_hit.setdefault(paper_id, hit)
+        content_token_papers = list(content_first_hit)  # rank order preserved
+        content_accepts: list[Record] = []  # token-verified AND above floor
+        for paper_id in content_token_papers:
+            hit = content_first_hit[paper_id]
+            if float(hit.get("search_score") or 0.0) < CONTENT_CONTEXT_SCORE_FLOOR:
+                continue
+            # A method's OWN paper names its acronym in its title/abstract
+            # (strong signal, checked against the local metadata chunk) and
+            # token-matches the contextual search across many chunks; a
+            # merely-citing paper does neither, matching only in 1-2
+            # appendix/comparison-table chunks, and must not be accepted on a
+            # single such hit.
+            own_paper = _paper_metadata_token_match(paper_id, token_re)
+            if not own_paper and content_counts.get(paper_id, 0) < 2:
+                continue
+            info = _paper_info(hit)
+            info["resolved_via"] = "abstract" if own_paper else "content"
+            content_accepts.append(info)
         if title_accepts:
             confirmed = [
                 paper for paper in title_accepts if paper["paper_id"] in content_token_papers
             ]
             if confirmed:
+                if (
+                    short_acronym
+                    and content_accepts
+                    and content_accepts[0]["paper_id"]
+                    not in {paper["paper_id"] for paper in confirmed}
+                ):
+                    # Short acronym whose STRONGEST content evidence points at
+                    # a different paper than the merely-confirmed title match
+                    # (hyphen compounds like 'OW-VAP' token-verify 'VAP'):
+                    # trust the content evidence.
+                    return content_accepts[:1]
                 return confirmed[:max_papers]
         if content_accepts:
             return content_accepts[:1]
@@ -1056,7 +1279,9 @@ def resolve_entity_papers(
                 if score < ABSTRACT_TOKEN_SCORE_FLOOR:
                     break
                 if token_re.search(str(hit.get("abstract") or "")):
-                    return [_paper_info(hit)]
+                    info = _paper_info(hit)
+                    info["resolved_via"] = "abstract"
+                    return [info]
         return []
     except Exception:  # noqa: BLE001 - entity resolution is best effort.
         return []
@@ -1087,44 +1312,104 @@ def entity_boost_hits(
     openai_client: Any,
     openai_settings: OpenAISettings,
     args: argparse.Namespace,
-) -> list[Record]:
+) -> tuple[list[Record], list[Record]]:
     """P4: chunks of question-named papers, fetched by scoped hybrid search.
 
     Entities are resolved to papers via title/abstract search; for each
-    resolved paper the question is re-searched WITHIN that paper so its most
-    relevant chunks land at the very top of the result list (strong rank
-    boost into rank_papers and build_context). Never raises.
+    resolved paper the question is re-searched WITHIN that paper. Returns
+    (prepend_hits, append_hits): only title/abstract-verified resolutions get
+    the strong prepend (rank boost into rank_papers and build_context);
+    content-rung resolutions are appended after the organic results so a
+    citing 'hub' paper can never displace organically-retrieved evidence.
+    Never raises.
     """
     try:
         question = str(sample.get("question") or "")
         candidates = extract_entity_candidates(question, options)
         if not candidates:
-            return []
+            return [], []
         resolved: dict[str, Record] = {}
         for candidate in candidates:
             for paper in resolve_entity_papers(search_client, candidate, question):
                 resolved.setdefault(paper["paper_id"], paper)
-            if len(resolved) >= ENTITY_PAPER_CAP:
-                break
-        hits: list[Record] = []
-        for paper_id in list(resolved)[:ENTITY_PAPER_CAP]:
+        if not resolved:
+            return [], []
+        strong_ids = [
+            paper_id
+            for paper_id, paper in resolved.items()
+            if str(paper.get("resolved_via") or "title") != "content"
+        ]
+        content_ids = [
+            paper_id
+            for paper_id, paper in resolved.items()
+            if str(paper.get("resolved_via") or "") == "content"
+        ]
+        # With >=3 confidently (title/abstract) resolved papers, generic
+        # contextual-content resolutions are junk-prone slot fillers ('IPC'
+        # -> an unrelated dataset-distillation paper): skip them entirely.
+        if len(strong_ids) >= 3:
+            content_ids = []
+        boosted_ids = (strong_ids + content_ids)[:ENTITY_PAPER_CAP]
+        # Paper-fair share: with 3+ resolved papers, shrink the per-paper
+        # scoped fetch so boosted papers cannot monopolize the context.
+        per_paper = (
+            ENTITY_SCOPED_CHUNKS
+            if len(boosted_ids) < 3
+            else max(2, 10 // len(boosted_ids))
+        )
+        scoped_by_paper: dict[str, list[Record]] = {}
+        for paper_id in boosted_ids:
             try:
-                scoped = search_chunks(
+                scoped_by_paper[paper_id] = search_chunks(
                     search_client,
                     openai_client,
                     openai_settings,
                     query=question,
-                    top_chunks=ENTITY_SCOPED_CHUNKS,
+                    top_chunks=per_paper,
                     vector_k=20,
                     query_type="hybrid",
                     filter_expr=f"paper_id eq '{_escape_odata(paper_id)}'",
                 )
             except Exception:  # noqa: BLE001 - one bad scope must not kill the boost.
+                scoped_by_paper[paper_id] = []
+
+        def interleave(paper_ids: list[str]) -> list[Record]:
+            # Round-robin: every resolved paper lands its top scoped chunk in
+            # context before any paper gets its 2nd..Nth chunk.
+            out: list[Record] = []
+            for index in range(per_paper):
+                for paper_id in paper_ids:
+                    scoped = scoped_by_paper.get(paper_id) or []
+                    if index < len(scoped):
+                        out.append(scoped[index])
+            return out
+
+        strong_set = set(strong_ids)
+        prepend_hits = interleave([pid for pid in boosted_ids if pid in strong_set])
+        append_hits = interleave([pid for pid in boosted_ids if pid not in strong_set])
+        if len(boosted_ids) < 3:
+            # 1-2 verified papers cannot flood the pool the way 4 could, and
+            # their DEEP scoped chunks (an appendix table holding the asked
+            # value is often scoped rank 4-5) are exactly what the boost is
+            # for: keep the full scoped set prepended.
+            return prepend_hits, append_hits
+        # 3+ boosted papers: cap the prepended share of the context (~1/3 of
+        # the char budget) so mid-rank organic evidence can never be wholly
+        # evicted; overflow chunks stay available at the tail instead of
+        # being dropped.
+        budget = max(0, int(getattr(args, "context_chars", 18000) or 18000)) // 3
+        capped: list[Record] = []
+        used = 0
+        for hit in prepend_hits:
+            size = len(str(hit.get("content") or ""))
+            if capped and used + size > budget:
+                append_hits.append(hit)
                 continue
-            hits.extend(scoped)
-        return hits
+            capped.append(hit)
+            used += size
+        return capped, append_hits
     except Exception:  # noqa: BLE001 - the boost is best effort.
-        return []
+        return [], []
 
 
 _REF_DENSITY_RE = re.compile(r",\s*20\d\d[a-z]?\.|arXiv|\bIn Proceedings\b|\bIn International\b")
@@ -1813,7 +2098,14 @@ def run_corpus_enumeration(
                     break
         boost_hits: list[Record] = []
         for candidate in qualifying:
-            boost_hits.extend(candidate["best_hits"])
+            # Metadata chunks carry no citable evidence (title/abstract are
+            # already in the verification prompt); boosting them evicts the
+            # figure-mention/body spans the answer LLM actually needs.
+            boost_hits.extend(
+                hit
+                for hit in candidate["best_hits"]
+                if str(hit.get("source_type") or "") != "metadata"
+            )
         papers = [
             {
                 "paper_id": candidate["paper_id"],
@@ -1956,10 +2248,20 @@ def answer_rules(sample: Record, options: Optional[dict[str, str]]) -> str:
             '(e.g. "14.70"), never a bare number. Also fill answer.table.schema.'
         )
         rules.append(
-            "- Row-key cells: use the minimal method/entity name exactly as printed in the source table, "
-            "preferring the paper's official spelling over the question's spelling when they differ. "
+            "- Row-key cells: when the question itself names the methods/entities, key each row by the "
+            "QUESTION's spelling of that name and emit exactly ONE row per method named in the question; "
+            "use the paper's printed spelling only when the question's spelling appears nowhere in the "
+            "sources. Never key a row by a descriptive phrase from a sentence "
+            '(not "inference scaling" or "our search framework" - use the method\'s proper name, e.g. "SANA-1.5"). '
             'Drop trailing parenthetical qualifiers (write "ECM-XL", not "ECM-XL (100k iterations)") '
             "UNLESS the question itself spells the name with that qualifier."
+        )
+        rules.append(
+            "- Include only rows for the methods the question asks about; never substitute or add other "
+            "methods (e.g. baseline rows quoted from another paper's comparison table). If a "
+            "question-named method's value is not visible in the context, still emit its row with the "
+            "best supported value from that method's OWN paper, or an empty string if none is visible - "
+            "do not replace it with a different method."
         )
         rules.append(
             "- If the question asks about multiple conditions/settings/datasets, output a separate row "
@@ -2424,7 +2726,7 @@ def run_one(
     # P4: papers named in the question (or in title-like MC options) are
     # force-retrieved and their chunks prepended (strong rank boost).
     if getattr(args, "entity_search", True):
-        entity_hits = entity_boost_hits(
+        entity_prepend, entity_append = entity_boost_hits(
             sample,
             options,
             search_client=search_client,
@@ -2432,8 +2734,12 @@ def run_one(
             openai_settings=openai_settings,
             args=args,
         )
-        if entity_hits:
-            results = merge_hit_lists(entity_hits, results)
+        if entity_prepend:
+            results = merge_hit_lists(entity_prepend, results)
+        if entity_append:
+            # Content-rung resolutions: available to rank_papers/build_context
+            # but never ahead of the organic results.
+            results = merge_hit_lists(results, entity_append)
 
     # P6: bounded corpus enumeration (wide filtered searches + one batched
     # LLM verification call). The qualifying papers' best chunks are boosted
@@ -2506,21 +2812,23 @@ def run_one(
     else:
         papers = candidates[:final_k]
 
-    # P6: enumeration verdict overrides the normal paper set when at least
-    # ENUM_MIN_QUALIFYING candidates qualified; otherwise the (few) qualifying
-    # papers are appended to the normal-path result.
+    # P6: the enumeration verdict is a UNION with the normal paper set, never
+    # a replacement: the answer-grounded LLM picks are kept first (the
+    # verifier judges from title/abstract/snippet and cannot check
+    # figure-level conditions), then the qualifying enum papers are appended
+    # up to ENUM_SUBMIT_CAP.
     enum_applied = False
     if enum_papers is not None:
+        existing_ids = {str(paper.get("paper_id") or "") for paper in papers}
+        for paper in enum_papers:
+            paper_id = str(paper.get("paper_id") or "")
+            if paper_id and paper_id not in existing_ids:
+                papers.append(paper)
+                existing_ids.add(paper_id)
+        papers = papers[:ENUM_SUBMIT_CAP]
         if len(enum_papers) >= ENUM_MIN_QUALIFYING:
-            papers = enum_papers[:ENUM_SUBMIT_CAP]
+            # A confident enum verdict still suppresses P3 expansion below.
             enum_applied = True
-        else:
-            existing_ids = {str(paper.get("paper_id") or "") for paper in papers}
-            for paper in enum_papers:
-                if str(paper.get("paper_id") or "") not in existing_ids:
-                    papers.append(paper)
-                    existing_ids.add(str(paper.get("paper_id") or ""))
-            papers = papers[:ENUM_SUBMIT_CAP]
 
     # P3: multi_paper gold sets are almost always the 4 co-compared methods;
     # top up a short submission with corpus-resolved comparison-group papers
@@ -2612,7 +2920,23 @@ def run_one(
         priority: list[Record] = []
         if lookup and str(lookup.get("paper_id") or "") in selected_paper_ids:
             try:
-                priority.extend(lookup_evidence_items(lookup))
+                lookup_items = lookup_evidence_items(lookup)
+                priority.extend(lookup_items)
+                if lookup_items:
+                    # The lookup item is locally VERIFIED: same-paper LLM
+                    # citations pointing at other pages are companion noise
+                    # that only dilutes precision next to it.
+                    lookup_paper = str(lookup.get("paper_id") or "")
+                    lookup_pages = {
+                        str((item.get("locator") or {}).get("page"))
+                        for item in lookup_items
+                    }
+                    llm_evidence = [
+                        item
+                        for item in llm_evidence
+                        if str(item.get("paper_id") or "") != lookup_paper
+                        or str((item.get("locator") or {}).get("page")) in lookup_pages
+                    ]
             except Exception:  # noqa: BLE001 - re-anchoring is best effort.
                 pass
         try:
@@ -2628,7 +2952,12 @@ def run_one(
             )
         except Exception:  # noqa: BLE001 - re-anchoring is best effort.
             pass
-        evidence = merge_evidence_items(priority, llm_evidence, cap=EVIDENCE_CAP)
+        evidence = merge_evidence_items(
+            priority,
+            llm_evidence,
+            cap=EVIDENCE_CAP,
+            primary_type=str(sample.get("primary_evidence_type") or ""),
+        )
         if not evidence:
             evidence = evidence_from_results(
                 results,
