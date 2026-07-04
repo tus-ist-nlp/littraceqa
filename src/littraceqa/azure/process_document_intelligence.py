@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import io
 import json
 import os
 import re
@@ -111,13 +110,18 @@ def analyze_pdf(
     if content_format:
         kwargs["output_content_format"] = content_format
 
-    with pdf_path.open("rb") as handle:
-        try:
-            poller = client.begin_analyze_document(model, body=handle, **kwargs)
-        except TypeError:
-            kwargs.pop("output_content_format", None)
-            handle.seek(0)
-            poller = client.begin_analyze_document(model, body=handle, **kwargs)
+    # Positional bytes + explicit content_type: streamed body= uploads began
+    # timing out service-side for multi-MB PDFs on 2026-07-03.
+    data = pdf_path.read_bytes()
+    try:
+        poller = client.begin_analyze_document(
+            model, data, content_type="application/pdf", **kwargs
+        )
+    except TypeError:
+        kwargs.pop("output_content_format", None)
+        poller = client.begin_analyze_document(
+            model, data, content_type="application/pdf", **kwargs
+        )
     result = poller.result()
     return to_plain_json(result)
 
@@ -140,13 +144,17 @@ def analyze_pdf_bytes(
         # Restrict analysis to a page range, e.g. "1-40" (1-based, inclusive).
         kwargs["pages"] = pages
 
-    body = io.BytesIO(pdf_bytes)
+    # Positional bytes + explicit content_type: streamed body= uploads began
+    # timing out service-side for multi-MB PDFs on 2026-07-03.
     try:
-        poller = client.begin_analyze_document(model, body=body, **kwargs)
+        poller = client.begin_analyze_document(
+            model, pdf_bytes, content_type="application/pdf", **kwargs
+        )
     except TypeError:
         kwargs.pop("output_content_format", None)
-        body.seek(0)
-        poller = client.begin_analyze_document(model, body=body, **kwargs)
+        poller = client.begin_analyze_document(
+            model, pdf_bytes, content_type="application/pdf", **kwargs
+        )
     result = poller.result()
     return to_plain_json(result)
 
