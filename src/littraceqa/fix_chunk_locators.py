@@ -296,9 +296,20 @@ def plan_paper(paper_id: str, chunks: list[Record]) -> tuple[list[Record], ScanS
     ]
     stats.table_chunks += len(all_table_indices)
     # Skip new-chunker output (locator carries "caption"): its table_id was
-    # already read from the DI caption and must not be re-aligned.
+    # already read from the DI caption and must not be re-aligned. Also skip
+    # uncaptioned tables (fragments, ToC/author-block detections): assigning a
+    # printed label to them creates duplicate or phantom coarse keys — audit
+    # found all four corpus-wide fixer corruptions came from this path.
+    def _is_uncaptioned(chunk: Record) -> bool:
+        loc_id = str(parse_locator(chunk).get("table_id") or "")
+        first_line = str(chunk.get("content") or "").split("\n", 1)[0]
+        return "(uncaptioned)" in loc_id or "(uncaptioned)" in first_line
+
     table_indices = [
-        index for index in all_table_indices if "caption" not in parse_locator(fixed[index])
+        index
+        for index in all_table_indices
+        if "caption" not in parse_locator(fixed[index])
+        and not _is_uncaptioned(fixed[index])
     ]
     if table_indices:
         captions = collect_table_captions(fixed)
@@ -306,12 +317,25 @@ def plan_paper(paper_id: str, chunks: list[Record]) -> tuple[list[Record], ScanS
         if conflict:
             stats.table_conflicts += 1
             stats.conflict_paper_ids.append(paper_id)
+        # Labels already held by tables outside the mapping (per page): never
+        # reassign a printed label away from — or duplicate it against — an
+        # unmapped chunk on another page.
+        owned: dict[str, set[str]] = {}
+        for idx2 in all_table_indices:
+            if idx2 in mapping:
+                continue
+            loc2 = parse_locator(fixed[idx2])
+            nid2 = normalize_object_id(str(loc2.get("table_id") or ""), "table")
+            owned.setdefault(nid2, set()).add(str(loc2.get("page") or ""))
         for index, label in mapping.items():
             chunk = fixed[index]
             locator = parse_locator(chunk)
             new_id = f"Table {label}"
             old_id = str(locator.get("table_id") or "")
             if normalize_object_id(new_id, "table") == normalize_object_id(old_id, "table"):
+                continue
+            page_here = str(locator.get("page") or "")
+            if any(pg != page_here for pg in owned.get(normalize_object_id(new_id, "table"), set())):
                 continue
             locator["table_id"] = new_id
             updated = with_locator(chunk, locator)
