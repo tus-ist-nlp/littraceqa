@@ -59,16 +59,16 @@ from ..common import (
     write_jsonl,
 )
 from .process_box_archives_document_intelligence import (
+    PDF_MAGIC,
     analyze_pdf_bytes_with_retries,
     is_transient_document_intelligence_error,
 )
-from .process_document_intelligence import analyze_pdf_bytes, build_chunks, value
+from .process_document_intelligence import build_chunks, value
 
 
 DEFAULT_BOX_MANIFEST = ROOT / "artifacts" / "docint" / "_box_archive_manifest.jsonl"
 MANIFEST_NAME = "_reanalyze_manifest.jsonl"
 
-PDF_MAGIC = b"%PDF-"
 RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 DEFAULT_USER_AGENT = (
@@ -97,7 +97,13 @@ class DownloadPacer:
 
 
 def parse_paper_id_file(path: Path) -> list[str]:
-    """Read paper ids, one per line; blank lines and ``#`` comments are ignored."""
+    """Read paper ids, one per line; blank lines and ``#`` comments (including
+    trailing ones) are ignored.
+
+    Deliberately NOT shared with ``extract_pdfs_from_box.collect_target_ids``
+    or ``build_azure_search_index.read_paper_id_file``: each accepts a
+    different documented line format (TSV fields / whole-line comments only).
+    """
     ids: list[str] = []
     with path.open(encoding="utf-8") as handle:
         for line in handle:
@@ -482,34 +488,62 @@ def analyze_window_with_retries(
     base_delay_seconds: float,
     paper_id: str,
 ) -> Record:
-    """Same retry policy as ``analyze_pdf_bytes_with_retries`` but restricted
-    to a page range (that helper does not take ``pages``)."""
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return analyze_pdf_bytes(
-                client,
-                pdf_bytes,
-                model=settings.model,
-                features=features,
-                content_format=content_format,
-                pages=pages,
-            )
-        except Exception as exc:  # noqa: BLE001 - SDK error classes vary.
-            last_error = exc
-            if attempt >= attempts or not is_transient_window_error(exc):
-                raise
-            delay = base_delay_seconds * (2 ** (attempt - 1))
-            delay += random.uniform(0, max(base_delay_seconds, 0.1))
-            print(
-                f"  {paper_id}: transient DI error on window {pages} attempt "
-                f"{attempt}/{attempts}: {exc}; retrying in {delay:.1f}s",
-                file=sys.stderr,
-            )
-            time.sleep(delay)
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("Document Intelligence analysis was not attempted")
+    """``analyze_pdf_bytes_with_retries`` restricted to a page range and using
+    the wider transient-error test above."""
+    return analyze_pdf_bytes_with_retries(
+        client,
+        pdf_bytes,
+        settings=settings,
+        features=features,
+        content_format=content_format,
+        attempts=attempts,
+        base_delay_seconds=base_delay_seconds,
+        paper_id=paper_id,
+        pages=pages,
+        is_transient=is_transient_window_error,
+    )
+
+
+def _analyze_pdf(
+    pdf_bytes: bytes,
+    *,
+    page_count: Optional[int],
+    client: Any,
+    settings: DocumentIntelligenceSettings,
+    args: argparse.Namespace,
+    paper_id: str,
+) -> tuple[Record, list[Record]]:
+    """Analyze the whole PDF, or window-by-window when ``--page-window`` is on
+    and the (known) page count exceeds the window size or the ``--max-pages``
+    cap. Returns (result, window_meta); window_meta is [] for whole-PDF runs."""
+    use_windows = (
+        args.page_window > 0
+        and page_count is not None
+        and (
+            page_count > args.page_window
+            or (args.max_pages > 0 and page_count > args.max_pages)
+        )
+    )
+    if use_windows:
+        return analyze_pdf_windowed(
+            client,
+            pdf_bytes,
+            settings=settings,
+            args=args,
+            paper_id=paper_id,
+            page_count=page_count,
+        )
+    result = analyze_pdf_bytes_with_retries(
+        client,
+        pdf_bytes,
+        settings=settings,
+        features=args.feature,
+        content_format=args.content_format,
+        attempts=args.di_retries,
+        base_delay_seconds=args.retry_base_seconds,
+        paper_id=paper_id,
+    )
+    return result, []
 
 
 def process_paper(
@@ -544,41 +578,21 @@ def process_paper(
         manifest["pdf_path"] = relative_or_absolute(pdf_path)
         pdf_bytes = pdf_path.read_bytes()
 
+        # Count pages up front so a failed analysis still logs page_count.
         page_count: Optional[int] = None
         if args.page_window > 0:
             page_count = count_pdf_pages(pdf_bytes)
             if page_count is not None:
                 manifest["page_count"] = page_count
 
-        use_windows = (
-            args.page_window > 0
-            and page_count is not None
-            and (
-                page_count > args.page_window
-                or (args.max_pages > 0 and page_count > args.max_pages)
-            )
+        result, window_meta = _analyze_pdf(
+            pdf_bytes,
+            page_count=page_count,
+            client=client,
+            settings=settings,
+            args=args,
+            paper_id=paper_id,
         )
-        window_meta: list[Record] = []
-        if use_windows:
-            result, window_meta = analyze_pdf_windowed(
-                client,
-                pdf_bytes,
-                settings=settings,
-                args=args,
-                paper_id=paper_id,
-                page_count=page_count,
-            )
-        else:
-            result = analyze_pdf_bytes_with_retries(
-                client,
-                pdf_bytes,
-                settings=settings,
-                features=args.feature,
-                content_format=args.content_format,
-                attempts=args.di_retries,
-                base_delay_seconds=args.retry_base_seconds,
-                paper_id=paper_id,
-            )
         raw_payload: Record = {
             "paper": record,
             "document_intelligence": result,

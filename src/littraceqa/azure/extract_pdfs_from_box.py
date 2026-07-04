@@ -35,22 +35,23 @@ import requests
 
 from .process_box_archives_document_intelligence import (
     DEFAULT_BOX_SHARED_URL,
+    PDF_MAGIC,
     BoxArchive,
     download_archive,
     fetch_box_archives,
     parse_shared_name,
 )
-from ..common import DEFAULT_METADATA, ROOT, Record, load_metadata, read_jsonl
+from ..common import DEFAULT_METADATA, ROOT, load_metadata, read_jsonl
 from ..extract_pdf_archives import build_alias_map, infer_paper_id
 
 DEFAULT_MANIFEST = ROOT / "artifacts" / "docint" / "_box_archive_manifest.jsonl"
 DEFAULT_PDF_CACHE = ROOT / "artifacts" / "pdf_cache"
 DEFAULT_TEMP_DIR = ROOT / "artifacts" / "box_tmp"
 
-PDF_MAGIC = b"%PDF-"
-
 
 def log(message: str) -> None:
+    """Report to stdout on purpose: the staging report IS this module's
+    output (unlike the DI pipelines, which log progress to stderr)."""
     print(message, flush=True)
 
 
@@ -232,17 +233,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    args = build_parser().parse_args(argv)
-    started = time.time()
+def _plan_archives(
+    args: argparse.Namespace, target_set: set[str]
+) -> tuple[set[str], dict[str, list[str]], list[str]]:
+    """Report cache state and map each still-needed paper to its zip archive.
 
-    targets = collect_target_ids(args)
-    if not targets:
-        log("no target paper_ids: pass --paper-id / --paper-id-file / --from-predictions")
-        return 2
-    target_set = set(targets)
-    log(f"targets: {len(target_set)} paper_ids")
-
+    Returns (remaining paper_ids, archive name -> planned paper_ids,
+    paper_ids absent from the manifest)."""
     manifest_map = load_manifest_archives(args.manifest)
     log(f"manifest: {len(manifest_map)} papers located in {args.manifest}")
 
@@ -260,10 +257,99 @@ def main(argv: Optional[list[str]] = None) -> int:
             + (" ..." if len(plan[name]) > 8 else ""))
     if unlocated:
         log(f"NOT in manifest ({len(unlocated)}): {', '.join(unlocated)}")
+    return remaining, plan, unlocated
+
+
+def _extract_from_archive(
+    zf: zipfile.ZipFile,
+    *,
+    name: str,
+    alias_map: dict[str, str],
+    target_set: set[str],
+    remaining: set[str],
+    pdf_cache_dir: Path,
+    stats: dict[str, int],
+    failures: list[str],
+) -> None:
+    """Extract every still-needed PDF member of one open zip archive.
+
+    Mutates ``remaining``, ``stats`` and ``failures`` in place."""
+    for info in zf.infolist():
+        if info.is_dir() or not info.filename.lower().endswith(".pdf"):
+            continue
+        paper_id = infer_paper_id(info.filename, alias_map)
+        # Extract anything we still need that happens to be in
+        # this zip, not just the manifest-planned members.
+        if not paper_id or paper_id not in target_set:
+            continue
+        stats["matched"] += 1
+        dest = pdf_cache_dir / f"{paper_id}.pdf"
+        if is_valid_pdf(dest):
+            stats["skipped"] += 1
+            remaining.discard(paper_id)
+            continue
+        member_name = PurePosixPath(info.filename).name
+        try:
+            size = extract_member_atomic(zf, info, dest)
+            stats["extracted"] += 1
+            remaining.discard(paper_id)
+            log(f"  ok {paper_id} <- {member_name} ({size} bytes)")
+        except Exception as exc:  # noqa: BLE001 - keep going.
+            stats["failed"] += 1
+            failures.append(f"{paper_id} ({name}/{member_name}): {exc}")
+            log(f"  FAIL {paper_id} <- {member_name}: {exc}")
+
+
+def _print_summary(
+    args: argparse.Namespace,
+    *,
+    target_set: set[str],
+    per_archive: dict[str, dict[str, int]],
+    failures: list[str],
+    started: float,
+) -> int:
+    """Final per-archive and overall report; exit code 1 when any target PDF
+    is still missing from the cache."""
+    valid = sorted(pid for pid in target_set if is_valid_pdf(args.pdf_cache_dir / f"{pid}.pdf"))
+    missing = sorted(target_set - set(valid))
+    log("")
+    log("==== SUMMARY ====")
+    for name in sorted(per_archive):
+        s = per_archive[name]
+        log(
+            f"{name}: matched={s['matched']} extracted={s['extracted']} "
+            f"skipped={s['skipped']} failed={s['failed']}"
+        )
+    log(f"valid PDFs in {args.pdf_cache_dir}: {len(valid)}/{len(target_set)}")
+    if failures:
+        log("extraction failures:")
+        for line in failures:
+            log(f"  {line}")
+    if missing:
+        log("missing paper_ids:")
+        for pid in missing:
+            log(f"  {pid}")
+    log(f"elapsed: {time.time() - started:.0f}s")
+    return 1 if missing else 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    started = time.time()
+
+    targets = collect_target_ids(args)
+    if not targets:
+        log("no target paper_ids: pass --paper-id / --paper-id-file / --from-predictions")
+        return 2
+    target_set = set(targets)
+    log(f"targets: {len(target_set)} paper_ids")
+
+    remaining, plan, unlocated = _plan_archives(args, target_set)
+    cached = len(target_set) - len(remaining)
 
     if args.dry_run:
         log(
-            f"dry-run: {len(already)} cached, {len(remaining) - len(unlocated)} to extract "
+            f"dry-run: {cached} cached, {len(remaining) - len(unlocated)} to extract "
             f"from {len(plan)} archives, {len(unlocated)} unlocated; nothing downloaded"
         )
         return 0 if not unlocated else 1
@@ -313,30 +399,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         log(f"[{name}] downloaded in {time.time() - t0:.0f}s -> {archive_path}")
         try:
             with zipfile.ZipFile(archive_path) as zf:
-                for info in zf.infolist():
-                    if info.is_dir() or not info.filename.lower().endswith(".pdf"):
-                        continue
-                    paper_id = infer_paper_id(info.filename, alias_map)
-                    # Extract anything we still need that happens to be in
-                    # this zip, not just the manifest-planned members.
-                    if not paper_id or paper_id not in target_set:
-                        continue
-                    stats["matched"] += 1
-                    dest = args.pdf_cache_dir / f"{paper_id}.pdf"
-                    if is_valid_pdf(dest):
-                        stats["skipped"] += 1
-                        remaining.discard(paper_id)
-                        continue
-                    member_name = PurePosixPath(info.filename).name
-                    try:
-                        size = extract_member_atomic(zf, info, dest)
-                        stats["extracted"] += 1
-                        remaining.discard(paper_id)
-                        log(f"  ok {paper_id} <- {member_name} ({size} bytes)")
-                    except Exception as exc:  # noqa: BLE001 - keep going.
-                        stats["failed"] += 1
-                        failures.append(f"{paper_id} ({name}/{member_name}): {exc}")
-                        log(f"  FAIL {paper_id} <- {member_name}: {exc}")
+                _extract_from_archive(
+                    zf,
+                    name=name,
+                    alias_map=alias_map,
+                    target_set=target_set,
+                    remaining=remaining,
+                    pdf_cache_dir=args.pdf_cache_dir,
+                    stats=stats,
+                    failures=failures,
+                )
         finally:
             archive_path.unlink(missing_ok=True)
             log(f"[{name}] deleted zip")
@@ -345,27 +417,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"skipped={stats['skipped']} failed={stats['failed']}"
         )
 
-    valid = sorted(pid for pid in target_set if is_valid_pdf(args.pdf_cache_dir / f"{pid}.pdf"))
-    missing = sorted(target_set - set(valid))
-    log("")
-    log("==== SUMMARY ====")
-    for name in sorted(per_archive):
-        s = per_archive[name]
-        log(
-            f"{name}: matched={s['matched']} extracted={s['extracted']} "
-            f"skipped={s['skipped']} failed={s['failed']}"
-        )
-    log(f"valid PDFs in {args.pdf_cache_dir}: {len(valid)}/{len(target_set)}")
-    if failures:
-        log("extraction failures:")
-        for line in failures:
-            log(f"  {line}")
-    if missing:
-        log("missing paper_ids:")
-        for pid in missing:
-            log(f"  {pid}")
-    log(f"elapsed: {time.time() - started:.0f}s")
-    return 1 if missing else 0
+    return _print_summary(
+        args,
+        target_set=target_set,
+        per_archive=per_archive,
+        failures=failures,
+        started=started,
+    )
 
 
 if __name__ == "__main__":

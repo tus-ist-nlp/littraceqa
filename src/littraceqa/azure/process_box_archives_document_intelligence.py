@@ -21,7 +21,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -50,6 +50,10 @@ from .process_document_intelligence import (
 
 
 DEFAULT_BOX_SHARED_URL = "https://tus.box.com/s/uelrgaeuiof6392jrkneanthiflr4z5e"
+
+# Shared by reanalyze_papers / extract_pdfs_from_box; the exact sniffing rules
+# differ per call site (strict prefix vs anywhere in the first 1 KiB).
+PDF_MAGIC = b"%PDF-"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,7 +192,7 @@ def load_pdf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, max_pdf_byt
         )
     with archive.open(info, "r") as handle:
         data = handle.read()
-    if not data.startswith(b"%PDF-"):
+    if not data.startswith(PDF_MAGIC):
         raise ValueError("zip member does not start with %PDF-")
     return data
 
@@ -228,7 +232,17 @@ def analyze_pdf_bytes_with_retries(
     attempts: int,
     base_delay_seconds: float,
     paper_id: str,
+    pages: Optional[str] = None,
+    is_transient: Callable[[Exception], bool] = is_transient_document_intelligence_error,
 ) -> Record:
+    """Analyze PDF bytes, retrying transient DI errors with exponential
+    backoff plus jitter.
+
+    ``pages`` restricts analysis to a 1-based inclusive range (e.g. "1-40");
+    ``is_transient`` lets callers widen the retryable-error test (see
+    ``reanalyze_papers.is_transient_window_error``).
+    """
+    window_label = f"window {pages} " if pages else ""
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -238,16 +252,17 @@ def analyze_pdf_bytes_with_retries(
                 model=settings.model,
                 features=features,
                 content_format=content_format,
+                pages=pages,
             )
         except Exception as exc:  # noqa: BLE001 - SDK error classes vary by version.
             last_error = exc
-            if attempt >= attempts or not is_transient_document_intelligence_error(exc):
+            if attempt >= attempts or not is_transient(exc):
                 raise
             delay = base_delay_seconds * (2 ** (attempt - 1))
             delay += random.uniform(0, max(base_delay_seconds, 0.1))
             print(
-                f"  {paper_id}: transient DI error on attempt {attempt}/{attempts}: "
-                f"{exc}; retrying in {delay:.1f}s",
+                f"  {paper_id}: transient DI error on {window_label}attempt "
+                f"{attempt}/{attempts}: {exc}; retrying in {delay:.1f}s",
                 file=sys.stderr,
             )
             time.sleep(delay)

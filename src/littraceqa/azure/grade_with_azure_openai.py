@@ -127,13 +127,14 @@ Record JSON:
 """
 
 
-def chat_json(
+def _judge_chat_json(
     client: Any,
     settings: OpenAISettings,
     prompt: str,
     *,
     max_tokens: int,
 ) -> Record:
+    """One judge call returning parsed JSON (distinct from run_rag.chat_json)."""
     kwargs: Record = {
         "model": settings.chat_deployment,
         "messages": [
@@ -357,7 +358,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     max_evidence_items=args.max_evidence_items,
                     max_evidence_text_chars=args.max_evidence_text_chars,
                 )
-                raw = chat_json(
+                raw = _judge_chat_json(
                     client,
                     settings,
                     prompt,

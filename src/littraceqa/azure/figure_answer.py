@@ -787,6 +787,66 @@ def mangled_table_signals(row: Record) -> list[str]:
     return signals
 
 
+def _log_dry_run_plan(
+    query_id: Any,
+    candidates: list[tuple[str, int]],
+    metadata_by_id: dict[str, Record],
+    pdf_cache_dir: Path,
+) -> None:
+    """Report which pages/PDFs the vision pass would use, without downloading."""
+    for paper_id, page in candidates:
+        pdf_url = str(metadata_by_id.get(paper_id, {}).get("pdf_url") or "")
+        cached = (pdf_cache_dir / f"{paper_id}.pdf").exists()
+        log(
+            f"DRY {query_id}: paper={paper_id} page={page} "
+            f"pdf={'cached' if cached else pdf_url or 'NO pdf_url'}"
+        )
+
+
+def _render_candidate_images(
+    query_id: Any,
+    paper_ids: list[str],
+    candidates: list[tuple[str, int]],
+    figure_index: dict[str, list[Record]],
+    *,
+    session: requests.Session,
+    metadata_by_id: dict[str, Record],
+    pdf_cache_dir: Path,
+) -> dict[tuple[str, int], bytes]:
+    """Fetch each candidate paper's PDF and render its candidate pages to PNGs.
+
+    Fetch/render failures are logged and skipped; the caller drops candidates
+    that have no image."""
+    images: dict[tuple[str, int], bytes] = {}
+    for paper_id in paper_ids:
+        pages = sorted({page for pid, page in candidates if pid == paper_id})
+        if not pages:
+            continue
+        pdf_url = str(metadata_by_id.get(paper_id, {}).get("pdf_url") or "")
+        if not pdf_url:
+            log(f"WARN {query_id}: no pdf_url for {paper_id}")
+            continue
+        pdf_path = fetch_pdf(session, paper_id, pdf_url, pdf_cache_dir)
+        if pdf_path is None:
+            log(f"WARN {query_id}: could not fetch PDF for {paper_id}")
+            continue
+        # Pages that hold exactly one figure get the high-resolution render:
+        # the whole page is the target figure, so the pixels are well spent.
+        page_scales: dict[int, float] = {}
+        for page in pages:
+            figures_on_page = [
+                figure
+                for figure in figure_index.get(paper_id, [])
+                if int(figure["page"]) == page
+            ]
+            page_scales[page] = (
+                RENDER_SCALE_SINGLE_FIGURE if len(figures_on_page) == 1 else RENDER_SCALE
+            )
+        for page, png in render_pages(pdf_path, page_scales).items():
+            images[(paper_id, page)] = png
+    return images
+
+
 def revise_row(
     row: Record,
     sample: Record,
@@ -813,42 +873,18 @@ def revise_row(
         return False
 
     if args.dry_run:
-        for paper_id, page in candidates:
-            pdf_url = str(metadata_by_id.get(paper_id, {}).get("pdf_url") or "")
-            cached = (args.pdf_cache_dir / f"{paper_id}.pdf").exists()
-            log(
-                f"DRY {query_id}: paper={paper_id} page={page} "
-                f"pdf={'cached' if cached else pdf_url or 'NO pdf_url'}"
-            )
+        _log_dry_run_plan(query_id, candidates, metadata_by_id, args.pdf_cache_dir)
         return False
 
-    images: dict[tuple[str, int], bytes] = {}
-    for paper_id in paper_ids:
-        pages = sorted({page for pid, page in candidates if pid == paper_id})
-        if not pages:
-            continue
-        pdf_url = str(metadata_by_id.get(paper_id, {}).get("pdf_url") or "")
-        if not pdf_url:
-            log(f"WARN {query_id}: no pdf_url for {paper_id}")
-            continue
-        pdf_path = fetch_pdf(session, paper_id, pdf_url, args.pdf_cache_dir)
-        if pdf_path is None:
-            log(f"WARN {query_id}: could not fetch PDF for {paper_id}")
-            continue
-        # Pages that hold exactly one figure get the high-resolution render:
-        # the whole page is the target figure, so the pixels are well spent.
-        page_scales: dict[int, float] = {}
-        for page in pages:
-            figures_on_page = [
-                figure
-                for figure in figure_index.get(paper_id, [])
-                if int(figure["page"]) == page
-            ]
-            page_scales[page] = (
-                RENDER_SCALE_SINGLE_FIGURE if len(figures_on_page) == 1 else RENDER_SCALE
-            )
-        for page, png in render_pages(pdf_path, page_scales).items():
-            images[(paper_id, page)] = png
+    images = _render_candidate_images(
+        query_id,
+        paper_ids,
+        candidates,
+        figure_index,
+        session=session,
+        metadata_by_id=metadata_by_id,
+        pdf_cache_dir=args.pdf_cache_dir,
+    )
     if not images:
         log(f"KEEP {query_id}: no pages could be rendered")
         return False
@@ -975,6 +1011,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _sample_selected(
+    sample: Optional[Record],
+    evidence_type: str,
+    query_id: str,
+    wanted_ids: Optional[set[str]],
+) -> bool:
+    """True when the row's question has the given primary evidence type and
+    survives the --query-id filter (wanted_ids None means no filter)."""
+    return (
+        sample is not None
+        and str(sample.get("primary_evidence_type") or "") == evidence_type
+        and (wanted_ids is None or query_id in wanted_ids)
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.max_pages < 1:
@@ -1024,12 +1075,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for row in rows:
         query_id = str(row.get("query_id") or "")
         sample = samples_by_id.get(query_id)
-        eligible = (
-            sample is not None
-            and str(sample.get("primary_evidence_type") or "") == "figure"
-            and (wanted_ids is None or query_id in wanted_ids)
-        )
-        if eligible:
+        if _sample_selected(sample, "figure", query_id, wanted_ids):
             examined += 1
             try:
                 options = options_for_sample(sample, options_map)
@@ -1047,12 +1093,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     revised += 1
             except Exception as exc:  # noqa: BLE001 - keep the original row.
                 log(f"KEEP {query_id}: unexpected error: {exc.__class__.__name__}: {exc}")
-        elif (
-            args.also_tables
-            and sample is not None
-            and str(sample.get("primary_evidence_type") or "") == "table"
-            and (wanted_ids is None or query_id in wanted_ids)
-        ):
+        elif args.also_tables and _sample_selected(sample, "table", query_id, wanted_ids):
             # Skeleton: detect OCR-mangled table answers; the vision table
             # re-read itself is not implemented yet, rows pass through as-is.
             signals = mangled_table_signals(row)

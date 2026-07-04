@@ -96,36 +96,6 @@ def to_plain_json(obj: Any) -> Any:
     return obj
 
 
-def analyze_pdf(
-    client: Any,
-    pdf_path: Path,
-    *,
-    model: str,
-    features: list[str],
-    content_format: str,
-) -> Record:
-    kwargs: Record = {}
-    if features:
-        kwargs["features"] = features
-    if content_format:
-        kwargs["output_content_format"] = content_format
-
-    # Positional bytes + explicit content_type: streamed body= uploads began
-    # timing out service-side for multi-MB PDFs on 2026-07-03.
-    data = pdf_path.read_bytes()
-    try:
-        poller = client.begin_analyze_document(
-            model, data, content_type="application/pdf", **kwargs
-        )
-    except TypeError:
-        kwargs.pop("output_content_format", None)
-        poller = client.begin_analyze_document(
-            model, data, content_type="application/pdf", **kwargs
-        )
-    result = poller.result()
-    return to_plain_json(result)
-
-
 def analyze_pdf_bytes(
     client: Any,
     pdf_bytes: bytes,
@@ -135,6 +105,7 @@ def analyze_pdf_bytes(
     content_format: str,
     pages: Optional[str] = None,
 ) -> Record:
+    """Run one Document Intelligence analysis over in-memory PDF bytes."""
     kwargs: Record = {}
     if features:
         kwargs["features"] = features
@@ -157,6 +128,24 @@ def analyze_pdf_bytes(
         )
     result = poller.result()
     return to_plain_json(result)
+
+
+def analyze_pdf(
+    client: Any,
+    pdf_path: Path,
+    *,
+    model: str,
+    features: list[str],
+    content_format: str,
+) -> Record:
+    """File-path convenience wrapper around ``analyze_pdf_bytes``."""
+    return analyze_pdf_bytes(
+        client,
+        pdf_path.read_bytes(),
+        model=model,
+        features=features,
+        content_format=content_format,
+    )
 
 
 def get_pages(item: Any) -> set[int]:

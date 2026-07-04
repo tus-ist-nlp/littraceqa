@@ -23,11 +23,14 @@ from .azure_config import (
     load_environment,
 )
 from ..common import (
+    DEFAULT_CHUNKS_DIR,
     DEFAULT_METADATA,
     ROOT,
     Record,
+    SEMANTIC_CONFIGURATION_NAME,
     clean_text,
     compact_text,
+    parse_locator_json,
     read_jsonl,
     retry_chat_completion,
     try_parse_json_object,
@@ -37,6 +40,12 @@ from ..common import (
 from ..fix_chunk_locators import normalize_object_id
 
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Index fields fetched for every chunk hit (everything the evidence/locator
+# and context builders need).
 SEARCH_SELECT = [
     "id",
     "paper_id",
@@ -56,15 +65,30 @@ SEARCH_SELECT = [
     "content",
 ]
 
-SEMANTIC_CONFIGURATION_NAME = "littraceqa-semantic"
+# Primary evidence labels that are noisy in the dataset; see
+# evidence_from_citations for the both-labels emission strategy.
 RELABEL_PRIMARY_TYPES = {"citation_context", "equation_algorithm"}
 SINGLE_PAPER_FAMILY = "hidden_source_single_paper"
+
+# Submitted evidence caps: extra items dilute evaluator precision, so 4 slots
+# normally and 2 for the blind retrieval-order fallback.
 EVIDENCE_CAP = 4
 FALLBACK_EVIDENCE_CAP = 2
+# evidence_text_or_value cap; the evaluator keys on locators, not text.
+EVIDENCE_SNIPPET_CHARS = 300
 
-# Local chunk JSONL files: the source of truth for which evidence keys
-# (paper_id, source_type, page, table/figure id) are actually achievable.
-DEFAULT_CHUNKS_DIR = ROOT / "artifacts" / "docint" / "chunks"
+# Reciprocal-rank-fusion damping (the k in 1/(k+rank)); 60 is the standard
+# value from the original RRF paper.
+RRF_RANK_OFFSET = 60
+
+# Default context budget in characters; also the base of the P4 prepend cap.
+DEFAULT_CONTEXT_CHARS = 18000
+# A truncated tail block shorter than this is a header plus noise: drop it.
+CONTEXT_MIN_TAIL_CHARS = 500
+
+# NOTE: DEFAULT_CHUNKS_DIR (imported above) points at the local chunk JSONL
+# files - the source of truth for which evidence keys (paper_id, source_type,
+# page, table/figure id) are actually achievable.
 
 _CHUNK_CACHE: dict[str, Optional[list[Record]]] = {}
 _CHUNK_CACHE_LOCK = threading.Lock()
@@ -75,7 +99,13 @@ Use only the retrieved context. Copy exact values verbatim from the source; neve
 Return JSON only. Do not include markdown."""
 
 
+# ---------------------------------------------------------------------------
+# Retrieval primitives (embedding, hybrid/keyword search, paper ranking)
+# ---------------------------------------------------------------------------
+
+
 def embedding_kwargs(settings: OpenAISettings, text: str) -> Record:
+    """Kwargs for a single-text embeddings.create call."""
     kwargs: Record = {
         "model": settings.embedding_deployment,
         "input": [text],
@@ -86,6 +116,7 @@ def embedding_kwargs(settings: OpenAISettings, text: str) -> Record:
 
 
 def embed_query(client: Any, settings: OpenAISettings, query: str) -> list[float]:
+    """Embed one query string, validating the returned dimensionality."""
     response = client.embeddings.create(**embedding_kwargs(settings, query))
     vector = list(response.data[0].embedding)
     if len(vector) != settings.embedding_dimensions:
@@ -102,6 +133,31 @@ def parse_search_fields(raw: Optional[str]) -> Optional[list[str]]:
         return None
     fields = [field.strip() for field in raw.split(",") if field.strip()]
     return fields or None
+
+
+def _escape_odata(value: str) -> str:
+    """Escape a string for use inside an OData filter literal."""
+    return str(value).replace("'", "''")
+
+
+def build_filter_expression(venue: Optional[str], year: Optional[int]) -> Optional[str]:
+    """OData filter for validated venue/year restrictions; None when neither."""
+    parts: list[str] = []
+    if venue:
+        parts.append(f"venue eq '{_escape_odata(venue)}'")
+    if year is not None:
+        parts.append(f"year eq {year}")
+    return " and ".join(parts) if parts else None
+
+
+def _materialize_hits(results: Any) -> list[Record]:
+    """Turn SDK result iterables into plain dicts with a float search_score."""
+    records: list[Record] = []
+    for result in results:
+        item = dict(result)
+        item["search_score"] = float(item.pop("@search.score", 0.0) or 0.0)
+        records.append(item)
+    return records
 
 
 def search_chunks(
@@ -139,50 +195,92 @@ def search_chunks(
     if query_type == "semantic":
         kwargs["query_type"] = "semantic"
         kwargs["semantic_configuration_name"] = SEMANTIC_CONFIGURATION_NAME
-    results = search_client.search(**kwargs)
-    records: list[Record] = []
-    for result in results:
-        item = dict(result)
-        item["search_score"] = float(item.pop("@search.score", 0.0) or 0.0)
-        records.append(item)
-    return records
+    return _materialize_hits(search_client.search(**kwargs))
 
 
-def rank_papers(results: list[Record], top_papers: int) -> list[Record]:
-    """Aggregate chunk hits to papers with summed reciprocal-rank fusion."""
-    by_paper: dict[str, Record] = {}
-    for rank, result in enumerate(results, start=1):
-        paper_id = str(result.get("paper_id") or "")
+def keyword_search(
+    search_client: Any,
+    query: str,
+    *,
+    fields: list[str],
+    top: int,
+    filter_expr: Optional[str] = None,
+    select: Optional[list[str]] = None,
+) -> list[Record]:
+    """Keyword-only (BM25) search; no embedding call."""
+    kwargs: Record = {
+        "search_text": query,
+        "search_fields": fields,
+        "top": top,
+        "select": select or SEARCH_SELECT,
+    }
+    if filter_expr:
+        kwargs["filter"] = filter_expr
+    return _materialize_hits(search_client.search(**kwargs))
+
+
+def _rrf_accumulate(by_paper: dict[str, Record], hits: list[Record]) -> None:
+    """Fold one ranked hit list into a paper-level RRF aggregate in place."""
+    for rank, hit in enumerate(hits, start=1):
+        paper_id = str(hit.get("paper_id") or "")
         if not paper_id:
             continue
         paper = by_paper.setdefault(
             paper_id,
             {
                 "paper_id": paper_id,
-                "title": result.get("title") or "",
-                "venue": result.get("venue") or "",
-                "year": result.get("year"),
+                "title": hit.get("title") or "",
+                "venue": hit.get("venue") or "",
+                "year": hit.get("year"),
                 "score": 0.0,
                 "best_rank": rank,
             },
         )
-        paper["score"] = float(paper["score"]) + 1.0 / (60 + rank)
+        paper["score"] = float(paper["score"]) + 1.0 / (RRF_RANK_OFFSET + rank)
         paper["best_rank"] = min(int(paper["best_rank"]), rank)
-    ranked = sorted(
+
+
+def _rrf_ranked(by_paper: dict[str, Record]) -> list[Record]:
+    """Order an RRF aggregate by (score desc, best rank asc)."""
+    return sorted(
         by_paper.values(),
         key=lambda item: (-float(item["score"]), int(item["best_rank"])),
     )
-    return ranked[:top_papers]
+
+
+def rank_papers(results: list[Record], top_papers: int) -> list[Record]:
+    """Aggregate chunk hits to papers with summed reciprocal-rank fusion."""
+    by_paper: dict[str, Record] = {}
+    _rrf_accumulate(by_paper, results)
+    return _rrf_ranked(by_paper)[:top_papers]
+
+
+def _chunk_key(hit: Record) -> str:
+    """Stable chunk identity for deduping hits across searches."""
+    return str(hit.get("id") or f"{hit.get('paper_id')}::{hit.get('chunk_id')}")
+
+
+def merge_hit_lists(primary: list[Record], secondary: list[Record]) -> list[Record]:
+    """Concatenate hit lists, deduping by chunk identity (primary wins)."""
+    merged: list[Record] = []
+    seen: set[str] = set()
+    for hit in [*primary, *secondary]:
+        key = _chunk_key(hit)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(hit)
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Locators and evaluator evidence keys
+# ---------------------------------------------------------------------------
 
 
 def parse_locator(result: Record) -> Record:
-    raw = result.get("locator_json") or "{}"
-    try:
-        locator = json.loads(raw)
-    except json.JSONDecodeError:
-        locator = {}
-    if not isinstance(locator, dict):
-        locator = {}
+    """Chunk locator dict, falling back to page_numbers/section fields."""
+    locator = parse_locator_json(result.get("locator_json"))
     pages = result.get("page_numbers") or []
     if pages and "page" not in locator:
         locator["page"] = pages[0]
@@ -206,7 +304,44 @@ def evaluator_evidence_key(
     return (paper_id.strip(), source_type.strip(), page, object_id)
 
 
+def _page_missing(page: Any) -> bool:
+    """True when a locator has no usable page (evaluate.py drops such items)."""
+    return page is None or str(page).strip() == ""
+
+
+def _evidence_item(
+    paper_id: str,
+    source_type: str,
+    page: Any,
+    chunk_locator: Record,
+    text: str,
+) -> Record:
+    """One submission evidence item; carries table_id/figure_id when present."""
+    locator: Record = {"page": page}
+    if source_type == "table":
+        object_id = str(chunk_locator.get("table_id") or "")
+        if object_id:
+            locator["table_id"] = object_id
+    elif source_type == "figure":
+        object_id = str(chunk_locator.get("figure_id") or "")
+        if object_id:
+            locator["figure_id"] = object_id
+    return {
+        "evidence_id": "ev_000",  # renumbered by merge_evidence_items
+        "paper_id": paper_id,
+        "source_type": source_type,
+        "evidence_text_or_value": text,
+        "locator": locator,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Evidence building (retrieval-order fallback and LLM citation mapping)
+# ---------------------------------------------------------------------------
+
+
 def evidence_from_results(results: list[Record], selected_paper_ids: set[str], limit: int) -> list[Record]:
+    """Blind fallback: first deduped, page-bearing hits of the selected papers."""
     evidence: list[Record] = []
     seen: set[tuple[str, str, str, str]] = set()
     candidates = [
@@ -224,8 +359,7 @@ def evidence_from_results(results: list[Record], selected_paper_ids: set[str], l
         if source_type == "metadata":
             source_type = "text_span"
         locator = parse_locator(result)
-        page = locator.get("page")
-        if page is None or str(page).strip() == "":
+        if _page_missing(locator.get("page")):
             # evaluate.py silently drops page-less items; never waste a slot.
             continue
         key = evaluator_evidence_key(paper_id, source_type, locator)
@@ -237,7 +371,9 @@ def evidence_from_results(results: list[Record], selected_paper_ids: set[str], l
                 "evidence_id": f"ev_{len(evidence) + 1:03d}",
                 "paper_id": paper_id,
                 "source_type": source_type,
-                "evidence_text_or_value": compact_text(result.get("content"), max_chars=300),
+                "evidence_text_or_value": compact_text(
+                    result.get("content"), max_chars=EVIDENCE_SNIPPET_CHARS
+                ),
                 "locator": locator,
             }
         )
@@ -281,8 +417,7 @@ def evidence_from_citations(
         if source_type == "metadata":
             source_type = "text_span"
         chunk_locator = parse_locator(chunk)
-        page = chunk_locator.get("page")
-        if page is None or str(page).strip() == "":
+        if _page_missing(chunk_locator.get("page")):
             continue
         if primary_type in RELABEL_PRIMARY_TYPES and source_type == "text_span":
             # Primary labels are noisy (~3/7 citation-labeled questions actually
@@ -293,17 +428,16 @@ def evidence_from_citations(
             emit_types = [source_type]
         quote = item.get("quote")
         if isinstance(quote, str) and quote.strip():
-            text = compact_text(quote, max_chars=300)
+            text = compact_text(quote, max_chars=EVIDENCE_SNIPPET_CHARS)
             matched_text = quote
         else:
-            text = compact_text(chunk.get("content"), max_chars=300)
+            text = compact_text(chunk.get("content"), max_chars=EVIDENCE_SNIPPET_CHARS)
             matched_text = ""
         # P2: a chunk spanning multiple pages fans out to ONE extra page item
         # (gold pages often land on the chunk's later page); the extra page is
-        # emitted for the primary emit type only.
+        # emitted for the primary emit type only. Never empty here: the page
+        # check above guarantees fanout_pages finds a primary page.
         pages = fanout_pages(chunk, matched_text)
-        if not pages:
-            pages = [page]
         if primary_type in RELABEL_PRIMARY_TYPES:
             locus = (paper_id, str(pages[0]))
             if first_locus is None:
@@ -314,28 +448,13 @@ def evidence_from_citations(
         if len(pages) > 1:
             emit_pairs.append((emit_types[0], pages[1]))
         for emit_type, page_value in emit_pairs:
-            locator: Record = {"page": page_value}
-            if emit_type == "table":
-                object_id = str(chunk_locator.get("table_id") or "")
-                if object_id:
-                    locator["table_id"] = object_id
-            elif emit_type == "figure":
-                object_id = str(chunk_locator.get("figure_id") or "")
-                if object_id:
-                    locator["figure_id"] = object_id
-            key = evaluator_evidence_key(paper_id, emit_type, locator)
+            candidate = _evidence_item(paper_id, emit_type, page_value, chunk_locator, text)
+            key = evaluator_evidence_key(paper_id, emit_type, candidate["locator"])
             if key in seen:
                 continue
             seen.add(key)
-            evidence.append(
-                {
-                    "evidence_id": f"ev_{len(evidence) + 1:03d}",
-                    "paper_id": paper_id,
-                    "source_type": emit_type,
-                    "evidence_text_or_value": text,
-                    "locator": locator,
-                }
-            )
+            candidate["evidence_id"] = f"ev_{len(evidence) + 1:03d}"
+            evidence.append(candidate)
             if len(evidence) >= cap:
                 break
         if len(evidence) >= cap:
@@ -344,7 +463,8 @@ def evidence_from_citations(
 
 
 # ---------------------------------------------------------------------------
-# P1/P2/P5: local chunk-file evidence re-anchoring and lookup helpers
+# P1/P2: local chunk-file re-anchoring, page fan-out and evidence merge
+# (chunk-loading helpers here are shared with the P5 lookup below)
 # ---------------------------------------------------------------------------
 
 
@@ -385,7 +505,7 @@ def fanout_pages(chunk: Record, matched_text: str = "") -> list[Any]:
     pages = [p for p in (chunk.get("page_numbers") or []) if p is not None]
     if primary is None:
         primary = pages[0] if pages else None
-    if primary is None or str(primary).strip() == "":
+    if _page_missing(primary):
         return []
     result: list[Any] = [primary]
     extra_candidates = [p for p in pages if str(p) != str(primary)]
@@ -408,31 +528,6 @@ def fanout_pages(chunk: Record, matched_text: str = "") -> list[Any]:
                 return result
     result.append(extra)
     return result
-
-
-def _evidence_item(
-    paper_id: str,
-    source_type: str,
-    page: Any,
-    chunk_locator: Record,
-    text: str,
-) -> Record:
-    locator: Record = {"page": page}
-    if source_type == "table":
-        object_id = str(chunk_locator.get("table_id") or "")
-        if object_id:
-            locator["table_id"] = object_id
-    elif source_type == "figure":
-        object_id = str(chunk_locator.get("figure_id") or "")
-        if object_id:
-            locator["figure_id"] = object_id
-    return {
-        "evidence_id": "ev_000",  # renumbered by merge_evidence_items
-        "paper_id": paper_id,
-        "source_type": source_type,
-        "evidence_text_or_value": text,
-        "locator": locator,
-    }
 
 
 _TABLE_REF_RE = re.compile(r"\btable\s*(\d+[a-z]?)\b", re.IGNORECASE)
@@ -598,7 +693,7 @@ def build_reanchor_candidates(
                 continue
             locator = item.get("locator") if isinstance(item.get("locator"), dict) else {}
             page = (locator or {}).get("page")
-            if page is None or str(page).strip() == "":
+            if _page_missing(page):
                 continue
             cited_pages.add((str(item.get("paper_id") or ""), str(page)))
         same_page: list[tuple[Record, str]] = []
@@ -648,7 +743,7 @@ def build_reanchor_candidates(
         source_type = str(chunk.get("source_type") or "")
         chunk_locator = parse_locator(chunk)
         pages = fanout_pages(chunk, matched)
-        text = compact_text(chunk.get("content"), max_chars=300)
+        text = compact_text(chunk.get("content"), max_chars=EVIDENCE_SNIPPET_CHARS)
         for page in pages:
             items.append(
                 _evidence_item(str(chunk.get("paper_id") or ""), source_type, page, chunk_locator, text)
@@ -687,8 +782,7 @@ def merge_evidence_items(
 
     def try_add(item: Record) -> None:
         locator = item.get("locator") if isinstance(item.get("locator"), dict) else {}
-        page = (locator or {}).get("page")
-        if page is None or str(page).strip() == "":
+        if _page_missing((locator or {}).get("page")):
             return
         key = evaluator_evidence_key(
             str(item.get("paper_id") or ""),
@@ -721,6 +815,14 @@ def merge_evidence_items(
 # ---------------------------------------------------------------------------
 # P5: reference/equation local lookup
 # ---------------------------------------------------------------------------
+
+# A single bibliography entry fits well inside 600 chars; the cap stops a
+# missing next-entry marker from swallowing the rest of the chunk.
+REFERENCE_ENTRY_MAX_CHARS = 600
+# Injected excerpt budgets: the whole matching References region for counting
+# questions, a tight window for single reference/equation lookups.
+REFERENCE_COUNT_SNIPPET_CHARS = 4500
+LOOKUP_SNIPPET_CHARS = 1500
 
 _ORDINAL_WORDS = {
     "first": 1,
@@ -828,7 +930,7 @@ def _extract_reference_entry(content: str, number: int) -> tuple[str, int]:
             if index + 1 < len(matches)
             else len(content)
         )
-        end = min(end, match.start() + 600)
+        end = min(end, match.start() + REFERENCE_ENTRY_MAX_CHARS)
         entry = content[match.start() : end].strip()
         if entry:
             return entry, match.start()
@@ -917,7 +1019,7 @@ def perform_local_lookup(
             chunk = matching[0]
             locator = parse_locator(chunk)
             page = locator.get("page")
-            if page is None or str(page).strip() == "":
+            if _page_missing(page):
                 return None
             # Consecutive DI chunks overlap: merge before showing, otherwise
             # a boundary-straddling entry is shown (and counted) twice.
@@ -925,7 +1027,7 @@ def perform_local_lookup(
                 _merge_overlapping_texts(
                     [str(item.get("content") or "") for item in matching[:3]]
                 ),
-                max_chars=4500,
+                max_chars=REFERENCE_COUNT_SNIPPET_CHARS,
             )
             header = (
                 f"[LOOKUP] paper_id={paper_id} source_type=citation_context page={page} "
@@ -938,7 +1040,8 @@ def perform_local_lookup(
                 "evidence_type": "citation_context",
                 "snippet": snippet,
                 "chunk": chunk,
-                "context_block": header + "\n" + compact_text(snippet, max_chars=5000),
+                # snippet is already compact_text output, safe to embed as-is.
+                "context_block": header + "\n" + snippet,
             }
         if request["kind"] == "reference":
             found = find_reference_entry(
@@ -953,7 +1056,7 @@ def perform_local_lookup(
         chunk, snippet = found
         locator = parse_locator(chunk)
         page = locator.get("page")
-        if page is None or str(page).strip() == "":
+        if _page_missing(page):
             return None
         header = (
             f"[LOOKUP] paper_id={paper_id} source_type={evidence_type} page={page} "
@@ -964,17 +1067,19 @@ def perform_local_lookup(
             "evidence_type": evidence_type,
             "snippet": snippet,
             "chunk": chunk,
-            "context_block": header + "\n" + compact_text(snippet, max_chars=1500),
+            "context_block": header + "\n" + compact_text(snippet, max_chars=LOOKUP_SNIPPET_CHARS),
         }
     except Exception:  # noqa: BLE001 - lookup must never break the run.
         return None
 
 
 def lookup_evidence_items(lookup: Record) -> list[Record]:
+    """Evidence items for a P5 lookup result, with P2 page fan-out."""
     chunk = lookup.get("chunk") or {}
     chunk_locator = parse_locator(chunk)
+    # The snippet head is enough to localize the excerpt within the chunk.
     pages = fanout_pages(chunk, str(lookup.get("snippet") or "")[:120])
-    text = compact_text(lookup.get("snippet"), max_chars=300)
+    text = compact_text(lookup.get("snippet"), max_chars=EVIDENCE_SNIPPET_CHARS)
     return [
         _evidence_item(
             str(lookup.get("paper_id") or ""),
@@ -988,7 +1093,7 @@ def lookup_evidence_items(lookup: Record) -> list[Record]:
 
 
 # ---------------------------------------------------------------------------
-# P4: entity title search / P3: comparison-group expansion / P6: enumeration
+# P4: entity title/abstract search and scoped boost
 # ---------------------------------------------------------------------------
 
 # Generic ML/CS acronyms and dataset names that must never be treated as a
@@ -1021,14 +1126,12 @@ TITLE_STRONG_SCORE_FLOOR = 15.0
 ABSTRACT_TOKEN_SCORE_FLOOR = 8.0
 CONTENT_CONTEXT_SCORE_FLOOR = 25.0
 
+# At most this many entity candidates are extracted per question, and at most
+# this many resolved papers get a scoped per-paper search.
 ENTITY_CANDIDATE_CAP = 6
 ENTITY_PAPER_CAP = 4
+# Scoped chunks fetched per boosted paper (before the 3+-papers fair share).
 ENTITY_SCOPED_CHUNKS = 5
-COMPARISON_TARGET_PAPERS = 4
-COMPARISON_EXCERPT_CAP = 8
-ENUM_CANDIDATE_CAP = 20
-ENUM_SUBMIT_CAP = 8
-ENUM_MIN_QUALIFYING = 2
 
 _QUOTED_ENTITY_RE = re.compile(r'["“]([^"”“]{2,90})["”]')
 _HYPHEN_ENTITY_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b")
@@ -1125,32 +1228,6 @@ def _titles_equivalent(query_title: str, hit_title: str) -> bool:
     if not a or not b or min(len(a), len(b)) < 15:
         return False
     return a == b or a.startswith(b) or b.startswith(a)
-
-
-def keyword_search(
-    search_client: Any,
-    query: str,
-    *,
-    fields: list[str],
-    top: int,
-    filter_expr: Optional[str] = None,
-    select: Optional[list[str]] = None,
-) -> list[Record]:
-    """Keyword-only (BM25) search; no embedding call."""
-    kwargs: Record = {
-        "search_text": query,
-        "search_fields": fields,
-        "top": top,
-        "select": select or SEARCH_SELECT,
-    }
-    if filter_expr:
-        kwargs["filter"] = filter_expr
-    records: list[Record] = []
-    for result in search_client.search(**kwargs):
-        item = dict(result)
-        item["search_score"] = float(item.pop("@search.score", 0.0) or 0.0)
-        records.append(item)
-    return records
 
 
 def _paper_metadata_token_match(paper_id: str, token_re: "re.Pattern[str]") -> bool:
@@ -1287,23 +1364,6 @@ def resolve_entity_papers(
         return []
 
 
-def _escape_odata(value: str) -> str:
-    return str(value).replace("'", "''")
-
-
-def merge_hit_lists(primary: list[Record], secondary: list[Record]) -> list[Record]:
-    """Concatenate hit lists, deduping by chunk identity (primary wins)."""
-    merged: list[Record] = []
-    seen: set[str] = set()
-    for hit in [*primary, *secondary]:
-        key = str(hit.get("id") or f"{hit.get('paper_id')}::{hit.get('chunk_id')}")
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(hit)
-    return merged
-
-
 def entity_boost_hits(
     sample: Record,
     options: Optional[dict[str, str]],
@@ -1397,7 +1457,10 @@ def entity_boost_hits(
         # the char budget) so mid-rank organic evidence can never be wholly
         # evicted; overflow chunks stay available at the tail instead of
         # being dropped.
-        budget = max(0, int(getattr(args, "context_chars", 18000) or 18000)) // 3
+        budget = (
+            max(0, int(getattr(args, "context_chars", DEFAULT_CONTEXT_CHARS) or DEFAULT_CONTEXT_CHARS))
+            // 3
+        )
         capped: list[Record] = []
         used = 0
         for hit in prepend_hits:
@@ -1411,6 +1474,28 @@ def entity_boost_hits(
     except Exception:  # noqa: BLE001 - the boost is best effort.
         return [], []
 
+
+# ---------------------------------------------------------------------------
+# P3: comparison-group expansion (forward extraction + citing-hub mediation)
+# ---------------------------------------------------------------------------
+
+# Multi-paper gold sets almost always hold the 4 co-compared methods; expand
+# short submissions toward this size, with a cap on hub excerpts per pass.
+COMPARISON_TARGET_PAPERS = 4
+COMPARISON_EXCERPT_CAP = 8
+
+# Both P3 extraction prompts say "at most 12 entries"; the resolver slices
+# to the same bound.
+METHOD_ENTRY_CAP = 12
+
+# Reverse-citation hub mining: quoted-title BM25 search depth, and how many
+# hubs are excerpted per expansion pass.
+HUB_TITLE_SEARCH_TOP = 50
+HUB_CAP = 5
+
+# max_tokens for the two P3 JSON extraction calls (12 short entries fit).
+EXPAND_MAX_TOKENS = 500
+HUB_EXTRACT_MAX_TOKENS = 600
 
 _REF_DENSITY_RE = re.compile(r",\s*20\d\d[a-z]?\.|arXiv|\bIn Proceedings\b|\bIn International\b")
 
@@ -1498,7 +1583,7 @@ def _reverse_citing_hubs(
             continue
         query = '"' + title.replace('"', " ").strip() + '"'
         for hit in keyword_search(
-            search_client, query, fields=["content"], top=50, select=SEARCH_SELECT
+            search_client, query, fields=["content"], top=HUB_TITLE_SEARCH_TOP, select=SEARCH_SELECT
         ):
             content = str(hit.get("content") or "")
             if not phrase_re.search(content.lower()):
@@ -1619,7 +1704,8 @@ def _hub_comparison_excerpts(
         if not chunks:
             continue
         reference_ids = {id(chunk) for chunk in _reference_chunks_extended(chunks)}
-        scored: list[tuple[int, int, Record]] = []
+        # (score, chunk order, chunk, offset of the first alias/surname match)
+        scored: list[tuple[int, int, Record, int]] = []
         for order, chunk in enumerate(chunks):
             if id(chunk) in reference_ids:
                 continue
@@ -1714,7 +1800,7 @@ def _resolve_method_entries(
     baselines like iCT/CTM) simply fail to resolve and drop out.
     """
     resolutions: list[tuple[int, int, Record]] = []
-    for order, method in enumerate(methods[:12]):
+    for order, method in enumerate(methods[:METHOD_ENTRY_CAP]):
         if not isinstance(method, dict):
             continue
         name = str(method.get("name") or "").strip()
@@ -1797,7 +1883,7 @@ def _extract_hub_cocompared_methods(
         "model": openai_settings.chat_deployment,
         "messages": [{"role": "user", "content": "\n\n".join(prompt_parts)}],
         "temperature": 0,
-        "max_tokens": 600,
+        "max_tokens": HUB_EXTRACT_MAX_TOKENS,
         "response_format": {"type": "json_object"},
     }
     response = retry_chat_completion(openai_client, kwargs)
@@ -1861,7 +1947,7 @@ def expand_comparison_group(
             "model": openai_settings.chat_deployment,
             "messages": [{"role": "user", "content": "\n\n".join(prompt_parts)}],
             "temperature": 0,
-            "max_tokens": 500,
+            "max_tokens": EXPAND_MAX_TOKENS,
             "response_format": {"type": "json_object"},
         }
         response = retry_chat_completion(openai_client, kwargs)
@@ -1892,7 +1978,7 @@ def expand_comparison_group(
             titles = [str(paper.get("title") or "") for paper in group]
             hub_ids = _reverse_citing_hubs(
                 search_client, [title for title in titles if title], existing_ids
-            )[:5]
+            )[:HUB_CAP]
             excerpts = _hub_comparison_excerpts(group, hub_ids, chunks_dir)
             if excerpts:
                 hub_methods = _extract_hub_cocompared_methods(
@@ -1924,6 +2010,25 @@ def expand_comparison_group(
     except Exception:  # noqa: BLE001 - expansion is best effort.
         return []
 
+
+# ---------------------------------------------------------------------------
+# P6: bounded venue/corpus enumeration
+# ---------------------------------------------------------------------------
+
+# Candidate pool fed to the batched verification call, the submission cap,
+# and the minimum qualifying count for a verdict confident enough to
+# suppress P3 expansion.
+ENUM_CANDIDATE_CAP = 20
+ENUM_SUBMIT_CAP = 8
+ENUM_MIN_QUALIFYING = 2
+
+# Wide-search sizes: enumeration recall needs a much deeper pool than normal
+# retrieval; figure-caption searches stay narrower.
+ENUM_WIDE_TOP = 60
+ENUM_FIGURE_TOP = 30
+
+# max_tokens for the batched verification call (a short paper_ids array).
+ENUM_VERIFY_MAX_TOKENS = 400
 
 # Plural 'papers' is required on purpose: singular phrasings like 'Which
 # paper reports the highest BLEU?' are selection questions, not enumeration,
@@ -1999,8 +2104,8 @@ def run_corpus_enumeration(
                     openai_client,
                     openai_settings,
                     query=search_query,
-                    top_chunks=60,
-                    vector_k=60,
+                    top_chunks=ENUM_WIDE_TOP,
+                    vector_k=ENUM_WIDE_TOP,
                     query_type=args.query_type,
                     filter_expr=filter_expr,
                     search_fields=parse_search_fields(args.search_fields),
@@ -2013,41 +2118,29 @@ def run_corpus_enumeration(
                     openai_client,
                     openai_settings,
                     query=search_query,
-                    top_chunks=30,
-                    vector_k=30,
+                    top_chunks=ENUM_FIGURE_TOP,
+                    vector_k=ENUM_FIGURE_TOP,
                     query_type="hybrid",
                     filter_expr=figure_filter,
                 )
             )
 
         # Paper-level RRF aggregation across all lists; remember each paper's
-        # best-ranked chunk as its representative snippet.
+        # first two hits (encounter order) as its representative snippets.
         agg: dict[str, Record] = {}
+        best_hits: dict[str, list[Record]] = {}
         for hits in hit_lists:
-            for rank, hit in enumerate(hits, start=1):
+            _rrf_accumulate(agg, hits)
+            for hit in hits:
                 paper_id = str(hit.get("paper_id") or "")
                 if not paper_id:
                     continue
-                entry = agg.setdefault(
-                    paper_id,
-                    {
-                        "paper_id": paper_id,
-                        "title": hit.get("title") or "",
-                        "venue": hit.get("venue") or "",
-                        "year": hit.get("year"),
-                        "score": 0.0,
-                        "best_rank": rank,
-                        "best_hits": [],
-                    },
-                )
-                entry["score"] = float(entry["score"]) + 1.0 / (60 + rank)
-                entry["best_rank"] = min(int(entry["best_rank"]), rank)
-                if len(entry["best_hits"]) < 2:
-                    entry["best_hits"].append(hit)
-        candidates = sorted(
-            agg.values(),
-            key=lambda item: (-float(item["score"]), int(item["best_rank"])),
-        )[:ENUM_CANDIDATE_CAP]
+                kept = best_hits.setdefault(paper_id, [])
+                if len(kept) < 2:
+                    kept.append(hit)
+        for paper_id, entry in agg.items():
+            entry["best_hits"] = best_hits.get(paper_id, [])
+        candidates = _rrf_ranked(agg)[:ENUM_CANDIDATE_CAP]
         if not candidates:
             return None
 
@@ -2079,7 +2172,7 @@ def run_corpus_enumeration(
             "model": openai_settings.chat_deployment,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 400,
+            "max_tokens": ENUM_VERIFY_MAX_TOKENS,
             "response_format": {"type": "json_object"},
         }
         response = retry_chat_completion(openai_client, kwargs)
@@ -2122,6 +2215,11 @@ def run_corpus_enumeration(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Context rendering and answer prompts
+# ---------------------------------------------------------------------------
+
+
 def build_context(
     results: list[Record],
     selected_paper_ids: set[str],
@@ -2158,7 +2256,7 @@ def build_context(
         block = f"{header}\n{content}"
         if used_chars + len(block) > context_chars:
             remaining = context_chars - used_chars
-            if remaining < 500:
+            if remaining < CONTEXT_MIN_TAIL_CHARS:
                 label_index -= 1
                 break
             block = block[:remaining].rstrip()
@@ -2170,7 +2268,22 @@ def build_context(
     return "\n\n".join(parts), context_map
 
 
+# figure_answer keeps its own byte-identical COPY of this rule (it does not
+# import this constant) so both answer paths stay extractive. The exact bytes
+# are part of the tuned prompt: any edit here must be mirrored in
+# figure_answer.FREEFORM_RULE or the two prompts will drift.
+FREEFORM_RULE = (
+    '- For "freeform": output ONLY the shortest verbatim value/name/phrase exactly as printed in the source. '
+    "Preserve the printed formatting exactly (answer 14.70, not 14.7). "
+    "Always emit the value as a quoted JSON string, never a bare JSON number, so trailing zeros survive. "
+    "No sentence, no explanation, no trailing period, no units unless printed as part of the value. "
+    'Examples: an F1 score question -> "14.70"; an author-name question -> "Jane Smith"; '
+    'a hardware question -> "a single NVIDIA A100 GPU".'
+)
+
+
 def answer_schema_instruction(answer_types: list[str]) -> str:
+    """JSON shape line of the answer prompt, matching the answer types."""
     pieces = [
         '"paper_ids": array of paper_id strings for ONLY the papers that answer the question',
         '"evidence": array of {"context_id": "C3", "quote": "short verbatim supporting snippet"}',
@@ -2188,11 +2301,13 @@ def answer_schema_instruction(answer_types: list[str]) -> str:
 
 
 def render_options(options: dict[str, str]) -> str:
+    """Multiple-choice options block of the answer prompt."""
     lines = [f"{key}: {text}" for key, text in options.items()]
     return "Options:\n" + "\n".join(lines)
 
 
 def render_table_schema(table_schema: list[Record]) -> str:
+    """Required-columns block of the answer prompt for table questions."""
     lines: list[str] = []
     for column in table_schema:
         if not isinstance(column, dict):
@@ -2207,6 +2322,7 @@ def render_table_schema(table_schema: list[Record]) -> str:
 
 
 def answer_rules(sample: Record, options: Optional[dict[str, str]]) -> str:
+    """Rules block of the answer prompt, tuned per answer type/task family."""
     answer_types = sample.get("answer_types") or []
     task_family = str(sample.get("task_family") or "")
     rules: list[str] = []
@@ -2225,14 +2341,7 @@ def answer_rules(sample: Record, options: Optional[dict[str, str]]) -> str:
         "using their [C#] ids, each with a short verbatim quote."
     )
     if "freeform" in answer_types:
-        rules.append(
-            '- For "freeform": output ONLY the shortest verbatim value/name/phrase exactly as printed in the source. '
-            "Preserve the printed formatting exactly (answer 14.70, not 14.7). "
-            "Always emit the value as a quoted JSON string, never a bare JSON number, so trailing zeros survive. "
-            "No sentence, no explanation, no trailing period, no units unless printed as part of the value. "
-            'Examples: an F1 score question -> "14.70"; an author-name question -> "Jane Smith"; '
-            'a hardware question -> "a single NVIDIA A100 GPU".'
-        )
+        rules.append(FREEFORM_RULE)
     if "multiple_choice" in answer_types:
         if options:
             rules.append(
@@ -2274,6 +2383,7 @@ def answer_rules(sample: Record, options: Optional[dict[str, str]]) -> str:
 
 
 def user_prompt(sample: Record, context: str, options: Optional[dict[str, str]]) -> str:
+    """Assemble the full user message for the answering call."""
     answer_types = sample.get("answer_types") or []
     sections = [
         f"Question:\n{sample.get('question')}",
@@ -2296,6 +2406,11 @@ def user_prompt(sample: Record, context: str, options: Optional[dict[str, str]])
     return "\n\n".join(sections) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Chat plumbing (JSON-mode calls with length and parse retries)
+# ---------------------------------------------------------------------------
+
+
 def call_chat_model(
     client: Any,
     settings: OpenAISettings,
@@ -2303,6 +2418,7 @@ def call_chat_model(
     *,
     max_tokens: int,
 ) -> tuple[str, str]:
+    """One JSON-mode chat call; returns (content, finish_reason)."""
     kwargs: Record = {
         "model": settings.chat_deployment,
         "messages": messages,
@@ -2324,6 +2440,7 @@ def call_chat_with_length_retry(
     *,
     max_tokens: int,
 ) -> str:
+    """Retry once with a doubled token budget when the answer was truncated."""
     content, finish_reason = call_chat_model(client, settings, messages, max_tokens=max_tokens)
     if finish_reason == "length":
         content, _ = call_chat_model(client, settings, messages, max_tokens=max_tokens * 2)
@@ -2340,6 +2457,11 @@ def chat_json(
     max_tokens: int,
     failure_writer: Callable[[Record], None],
 ) -> Record:
+    """Answering call returning a parsed JSON payload ({} on double failure).
+
+    Unparseable responses are logged via ``failure_writer`` and retried once
+    with an explicit corrective message.
+    """
     messages: list[Record] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt(sample, context, options)},
@@ -2367,6 +2489,14 @@ def chat_json(
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Query decomposition and multi-query retrieval
+# ---------------------------------------------------------------------------
+
+# max_tokens for the decomposition pre-pass (4 short subqueries + flags).
+DECOMPOSE_MAX_TOKENS = 300
+
+
 def decompose_query(
     client: Any,
     settings: OpenAISettings,
@@ -2392,7 +2522,7 @@ def decompose_query(
             "model": settings.chat_deployment,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 300,
+            "max_tokens": DECOMPOSE_MAX_TOKENS,
             "response_format": {"type": "json_object"},
         }
         response = retry_chat_completion(client, kwargs)
@@ -2424,16 +2554,6 @@ def decompose_query(
         }
     except Exception:  # noqa: BLE001 - decomposition must never break the run.
         return None
-
-
-def build_filter_expression(venue: Optional[str], year: Optional[int]) -> Optional[str]:
-    parts: list[str] = []
-    if venue:
-        escaped = venue.replace("'", "''")
-        parts.append(f"venue eq '{escaped}'")
-    if year is not None:
-        parts.append(f"year eq {year}")
-    return " and ".join(parts) if parts else None
 
 
 def search_with_decomposition(
@@ -2476,7 +2596,7 @@ def search_with_decomposition(
                 search_fields=parse_search_fields(args.search_fields),
             )
             for position, hit in enumerate(hits, start=1):
-                chunk_key = str(hit.get("id") or f"{hit.get('paper_id')}::{hit.get('chunk_id')}")
+                chunk_key = _chunk_key(hit)
                 existing = merged.get(chunk_key)
                 if existing is None or position < existing[0]:
                     merged[chunk_key] = (position, hit)
@@ -2491,7 +2611,13 @@ def search_with_decomposition(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Answer normalization and submission building
+# ---------------------------------------------------------------------------
+
+
 def paper_submission(papers: list[Record]) -> list[Record]:
+    """Project ranked paper records onto the submission's gold_papers shape."""
     return [
         {
             "paper_id": paper["paper_id"],
@@ -2569,6 +2695,7 @@ def normalize_choice(
 
 
 def normalize_paper_ids(value: Any) -> list[str]:
+    """Coerce the model's paper_ids field (string or list) to a string list."""
     if isinstance(value, str):
         return [value]
     if isinstance(value, list):
@@ -2592,6 +2719,7 @@ def strip_matched_quotes(text: str) -> str:
 
 
 def freeform_text(llm_payload: Record) -> str:
+    """Free-form answer text from the payload, tolerating shape drift."""
     raw = llm_payload.get("freeform")
     if raw is None or raw == "":
         raw = llm_payload.get("answer")
@@ -2642,6 +2770,7 @@ def build_answer(
     llm_payload: Record,
     options: Optional[dict[str, str]] = None,
 ) -> Record:
+    """Normalize the LLM payload into the submission's answer object."""
     answer_types = set(sample.get("answer_types") or [])
     answer: Record = {}
     text = _normalize_plus_minus(strip_matched_quotes(freeform_text(llm_payload)))
@@ -2676,9 +2805,15 @@ def build_answer(
 
 
 def final_paper_count(sample: Record, args: argparse.Namespace) -> int:
+    """Fallback submission size when the LLM returns no usable paper subset."""
     if str(sample.get("task_family") or "") == SINGLE_PAPER_FAMILY:
         return max(1, args.papers_single)
     return max(1, args.papers_multi)
+
+
+# ---------------------------------------------------------------------------
+# Per-question orchestration
+# ---------------------------------------------------------------------------
 
 
 def run_one(
@@ -2692,6 +2827,13 @@ def run_one(
     venues: set[str],
     failure_writer: Callable[[Record], None],
 ) -> Record:
+    """Produce one prediction row: retrieve, boost, answer, build evidence.
+
+    Pass order (see the inline P# comments): retrieval (optionally decomposed)
+    -> P4 entity boost -> P6 enumeration -> candidate ranking/context -> P5
+    lookup -> answer LLM -> paper-set assembly (P6 union, P3 expansion, P5
+    retry) -> evidence assembly (P1/P2 re-anchoring, lookup items, citations).
+    """
     query = str(sample.get("question") or "")
     task_family = str(sample.get("task_family") or "")
     decompose_enabled = args.decompose == "on" or (
@@ -2973,6 +3115,11 @@ def run_one(
     }
 
 
+# ---------------------------------------------------------------------------
+# Input/output helpers (options join, resume, provenance)
+# ---------------------------------------------------------------------------
+
+
 def extract_options(record: Record) -> Optional[dict[str, str]]:
     """Accept a top-level "options" object or the gold answer.multiple_choice.options shape."""
     options = record.get("options")
@@ -3028,7 +3175,24 @@ def options_for_sample(sample: Record, options_map: dict[str, Record]) -> Option
     return entry.get("options")
 
 
+def default_validation_options(input_path: Path) -> Optional[Path]:
+    """Default --options-file: the validation gold rows, ONLY for the default
+    validation input.
+
+    Any other input (e.g. the hidden test set) must opt in explicitly,
+    otherwise a query_id collision would silently attach the WRONG options.
+    figure_answer duplicates this guard inline; changes here must be mirrored
+    there.
+    """
+    default_options = ROOT / "data" / "validation.jsonl"
+    default_input = ROOT / "data" / "validation_inputs.jsonl"
+    if default_options.exists() and input_path.resolve() == default_input.resolve():
+        return default_options
+    return None
+
+
 def load_venues(path: Path) -> set[str]:
+    """Known venue strings from the metadata file (decomposition validation)."""
     try:
         return {
             str(record.get("venue")).strip()
@@ -3040,6 +3204,7 @@ def load_venues(path: Path) -> set[str]:
 
 
 def git_sha() -> Optional[str]:
+    """Current commit hash for run provenance; None outside a git checkout."""
     try:
         completed = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -3062,6 +3227,7 @@ def write_run_meta(
     openai_settings: OpenAISettings,
     search_client: Any,
 ) -> None:
+    """Write <output>.meta.json capturing args, code and index provenance."""
     document_count: Optional[int] = None
     try:
         document_count = int(search_client.get_document_count())
@@ -3084,6 +3250,7 @@ def write_run_meta(
 
 
 def answer_is_empty(answer: Any) -> bool:
+    """True when no answer field carries usable content."""
     if not isinstance(answer, dict) or not answer:
         return True
     freeform = answer.get("freeform")
@@ -3131,6 +3298,11 @@ def load_resume_rows(path: Path) -> list[Record]:
     return list(kept.values())
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate LitTraceQA predictions with Azure Search + AOAI RAG.",
@@ -3168,7 +3340,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--papers-single", type=int, default=1, help="Submitted papers for hidden_source_single_paper.")
     parser.add_argument("--papers-multi", type=int, default=4, help="Submitted papers for multi_paper.")
     parser.add_argument("--evidence-limit", type=int, default=8)
-    parser.add_argument("--context-chars", type=int, default=18000)
+    parser.add_argument("--context-chars", type=int, default=DEFAULT_CONTEXT_CHARS)
     parser.add_argument("--max-answer-tokens", type=int, default=1200)
     parser.add_argument(
         "--decompose",
@@ -3240,6 +3412,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """Run predictions over the input questions with a thread-pool of workers."""
     args = build_parser().parse_args(argv)
     load_environment(args.env_file)
     search_settings = SearchSettings.from_env()
@@ -3250,13 +3423,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     openai_client = build_openai_client(openai_settings, max_retries=6)
 
     if args.options_file is None:
-        default_options = ROOT / "data" / "validation.jsonl"
-        default_input = ROOT / "data" / "validation_inputs.jsonl"
-        # Only join validation options onto the validation inputs; any other
-        # input (e.g. the hidden test set) must opt in explicitly, otherwise a
-        # query_id collision would silently attach the WRONG options.
-        if default_options.exists() and args.input.resolve() == default_input.resolve():
-            args.options_file = default_options
+        args.options_file = default_validation_options(args.input)
     options_map = load_options_map(args.options_file)
 
     venues: set[str] = set()

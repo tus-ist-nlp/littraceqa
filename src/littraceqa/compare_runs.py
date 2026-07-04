@@ -89,10 +89,6 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def format_value(value: Optional[float]) -> str:
-    return f"{value:.3f}" if value is not None else "  n/a"
-
-
 def report(
     gold_by_id: dict[str, Record],
     scores_a: dict[str, dict[str, float]],

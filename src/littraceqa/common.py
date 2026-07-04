@@ -15,9 +15,24 @@ from typing import Any, Iterable, TypeVar
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_METADATA = ROOT / "data" / "paper_metadata.jsonl"
 
+# Canonical location of the Document Intelligence chunk JSONL output
+# (imported by run_rag; other stages currently keep their own copies).
+DEFAULT_CHUNKS_DIR = ROOT / "artifacts" / "docint" / "chunks"
+
+# Azure AI Search semantic configuration name that run_rag --query-type
+# semantic queries by. build_azure_search_index does NOT import this: it
+# defines its own SEMANTIC_CONFIGURATION literal with the same value, so the
+# two copies must be updated together.
+SEMANTIC_CONFIGURATION_NAME = "littraceqa-semantic"
+
 
 Record = dict[str, Any]
 T = TypeVar("T")
+
+
+def temp_sibling(path: Path) -> Path:
+    """Unique temp name in the SAME directory, so os.replace stays atomic."""
+    return path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
 
 
 def read_jsonl(path: Path) -> list[Record]:
@@ -39,9 +54,7 @@ def read_jsonl(path: Path) -> list[Record]:
 
 def write_jsonl(path: Path, records: Iterable[Record]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
+    temp_path = temp_sibling(path)
     with temp_path.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -56,9 +69,7 @@ def append_jsonl(path: Path, record: Record) -> None:
 
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
+    temp_path = temp_sibling(path)
     with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False)
     temp_path.replace(path)
@@ -73,12 +84,13 @@ def load_metadata(path: Path = DEFAULT_METADATA) -> list[Record]:
     return read_jsonl(path)
 
 
-def load_metadata_by_id(path: Path = DEFAULT_METADATA) -> dict[str, Record]:
-    return {
-        str(record["paper_id"]): record
-        for record in load_metadata(path)
-        if record.get("paper_id")
-    }
+def parse_locator_json(raw: Any) -> Record:
+    """Bare locator_json parser: JSON-decode failures and non-objects -> {}."""
+    try:
+        locator = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return locator if isinstance(locator, dict) else {}
 
 
 def clean_text(value: Any) -> str:

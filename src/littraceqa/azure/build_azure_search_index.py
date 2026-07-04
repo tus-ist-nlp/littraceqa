@@ -26,7 +26,7 @@ from .azure_config import (
     build_search_index_client,
     load_environment,
 )
-from ..common import ROOT, Record, batched, read_json, write_json
+from ..common import ROOT, Record, _retry_after_seconds, batched, read_json, write_json
 
 
 VECTOR_FIELD = "content_vector"
@@ -52,25 +52,16 @@ FACET_PAGE_SIZE = 1000
 DEFAULT_CHECKPOINT = ROOT / "artifacts" / "docint" / "index_upload_checkpoint.json"
 
 
-def create_index(index_client: Any, settings: SearchSettings, embedding_dimensions: int) -> None:
-    from azure.core.exceptions import HttpResponseError
+def _index_fields(embedding_dimensions: int) -> list[Any]:
+    """Declarative field schema for the chunk index."""
     from azure.search.documents.indexes.models import (
-        HnswAlgorithmConfiguration,
-        HnswParameters,
         SearchField,
         SearchFieldDataType,
-        SearchIndex,
         SearchableField,
-        SemanticConfiguration,
-        SemanticField,
-        SemanticPrioritizedFields,
-        SemanticSearch,
         SimpleField,
-        VectorSearch,
-        VectorSearchProfile,
     )
 
-    fields = [
+    return [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
         SimpleField(
             name="paper_id",
@@ -142,7 +133,17 @@ def create_index(index_client: Any, settings: SearchSettings, embedding_dimensio
         ),
     ]
 
-    vector_search = VectorSearch(
+
+def _vector_search_config() -> Any:
+    """HNSW/cosine vector search configuration."""
+    from azure.search.documents.indexes.models import (
+        HnswAlgorithmConfiguration,
+        HnswParameters,
+        VectorSearch,
+        VectorSearchProfile,
+    )
+
+    return VectorSearch(
         algorithms=[
             HnswAlgorithmConfiguration(
                 name=VECTOR_ALGORITHM,
@@ -156,7 +157,18 @@ def create_index(index_client: Any, settings: SearchSettings, embedding_dimensio
             )
         ],
     )
-    semantic_search = SemanticSearch(
+
+
+def _semantic_search_config() -> Any:
+    """Semantic ranking configuration (title/content/section fields)."""
+    from azure.search.documents.indexes.models import (
+        SemanticConfiguration,
+        SemanticField,
+        SemanticPrioritizedFields,
+        SemanticSearch,
+    )
+
+    return SemanticSearch(
         configurations=[
             SemanticConfiguration(
                 name=SEMANTIC_CONFIGURATION,
@@ -169,11 +181,17 @@ def create_index(index_client: Any, settings: SearchSettings, embedding_dimensio
         ],
         default_configuration_name=SEMANTIC_CONFIGURATION,
     )
+
+
+def create_index(index_client: Any, settings: SearchSettings, embedding_dimensions: int) -> None:
+    from azure.core.exceptions import HttpResponseError
+    from azure.search.documents.indexes.models import SearchIndex
+
     index = SearchIndex(
         name=settings.index_name,
-        fields=fields,
-        vector_search=vector_search,
-        semantic_search=semantic_search,
+        fields=_index_fields(embedding_dimensions),
+        vector_search=_vector_search_config(),
+        semantic_search=_semantic_search_config(),
     )
     try:
         index_client.create_or_update_index(index)
@@ -222,21 +240,6 @@ def embed_texts(client: Any, settings: OpenAISettings, texts: list[str]) -> list
                 "Fix AZURE_OPENAI_EMBEDDING_DIMENSIONS or your embedding deployment."
             )
     return vectors
-
-
-def retry_after_seconds(exc: Exception) -> Optional[float]:
-    """Extract a Retry-After header value (seconds) from an SDK exception."""
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        return None
-    value = headers.get("retry-after") or headers.get("Retry-After")
-    if not value:
-        return None
-    try:
-        return max(float(value), 0.0)
-    except (TypeError, ValueError):
-        return None
 
 
 def request_status_code(exc: Exception) -> Optional[int]:
@@ -297,9 +300,10 @@ def embed_texts_with_retry(
     last_error: Optional[Exception] = None
     max_chars = MAX_EMBED_CHARS
     permanent_retried = False
-    attempt = 0
-    while attempt < attempts:
-        attempt += 1
+    # Counts TRANSIENT failures only; context-length re-truncations and the
+    # one permanent-4xx halving retry do not consume the ``attempts`` budget.
+    transient_failures = 0
+    while transient_failures < attempts:
         try:
             return embed_texts(client, settings, texts)
         except ValueError:
@@ -309,8 +313,8 @@ def embed_texts_with_retry(
             if is_context_length_error(exc) and max_chars > MIN_EMBED_CHARS:
                 # Token-dense text (tables, OCR mojibake) can exceed the
                 # 8,192-token limit well under MAX_EMBED_CHARS. A 400 is not
-                # transient, so halve the batch's texts and retry without
-                # consuming a transient attempt (bounded by MIN_EMBED_CHARS).
+                # transient, so halve the batch's texts and retry (bounded by
+                # MIN_EMBED_CHARS).
                 max_chars = max(max_chars // 2, MIN_EMBED_CHARS)
                 texts = [text[:max_chars] for text in texts]
                 print(
@@ -319,12 +323,11 @@ def embed_texts_with_retry(
                     f"{max_chars} chars and retrying",
                     file=sys.stderr,
                 )
-                attempt -= 1
                 continue
             if is_permanent_request_error(exc):
-                # A permanent 4xx fails identically on every retry, so do not
-                # burn the transient budget. Retry once with halved content
-                # (covers borderline payload issues), then skip the batch.
+                # A permanent 4xx fails identically on every retry. Retry once
+                # with halved content (covers borderline payload issues), then
+                # skip the batch.
                 if not permanent_retried:
                     permanent_retried = True
                     texts = [text[: max(len(text) // 2, 1)] or " " for text in texts]
@@ -334,7 +337,6 @@ def embed_texts_with_retry(
                         f"retrying once with content halved",
                         file=sys.stderr,
                     )
-                    attempt -= 1
                     continue
                 print(
                     f"WARN embedding batch of {len(texts)} text(s) still rejected "
@@ -343,14 +345,14 @@ def embed_texts_with_retry(
                     file=sys.stderr,
                 )
                 return None
-            if attempt >= attempts:
+            transient_failures += 1
+            if transient_failures >= attempts:
                 break
-            wait = retry_after_seconds(exc)
+            wait = _retry_after_seconds(exc)  # already capped at 120s
             if wait is None:
                 wait = delay
-            wait = min(wait, 120.0)
             print(
-                f"WARN embedding attempt {attempt}/{attempts} failed "
+                f"WARN embedding attempt {transient_failures}/{attempts} failed "
                 f"({type(exc).__name__}: {exc}); retrying in {wait:.1f}s",
                 file=sys.stderr,
             )
@@ -689,6 +691,63 @@ def upload_documents_with_retry(
     return uploaded, failures
 
 
+def _flush_paper_buffer(
+    buffer: list[tuple[str, list[Record], bool]],
+    *,
+    search_client: Any,
+    openai_client: Any,
+    openai_settings: OpenAISettings,
+    embedding_batch_size: int,
+    embed_workers: int,
+    upload_batch_size: int,
+    checkpoint_path: Path,
+    completed_paper_ids: set[str],
+    omit_fields: Optional[set[str]],
+    uploaded_before: int,
+) -> tuple[int, dict[str, str]]:
+    """Embed and upload one buffered group of papers, then checkpoint.
+
+    Returns (uploaded_count, failures) for this buffer. ``completed_paper_ids``
+    is updated in place with the papers that fully uploaded; ``uploaded_before``
+    is only used for the cumulative progress line.
+    """
+    chunks = [chunk for _, paper_chunks, _ in buffer for chunk in paper_chunks]
+    vectors = embed_chunks(
+        openai_client,
+        openai_settings,
+        chunks,
+        batch_size=embedding_batch_size,
+        workers=embed_workers,
+    )
+    docs: list[Record] = []
+    embed_failures: dict[str, str] = {}
+    for chunk, vector in zip(chunks, vectors):
+        if vector is None:
+            key = str(chunk.get("id") or "")
+            embed_failures[key] = "embedding skipped after permanent 4xx error"
+            print(f"EMBED SKIP key={key}", file=sys.stderr)
+            continue
+        docs.append(search_document(chunk, vector, omit_fields=omit_fields))
+    batch_uploaded, failures = upload_documents_with_retry(
+        search_client, docs, batch_size=upload_batch_size
+    )
+    key_to_paper = {doc["id"]: doc["paper_id"] for doc in docs}
+    # Only upload failures block a paper's checkpoint; embed-skipped
+    # chunks are permanent, so re-running them on --resume is pointless.
+    failed_papers = {key_to_paper[key] for key in failures if key in key_to_paper}
+    for paper_id, _, complete in buffer:
+        if complete and paper_id not in failed_papers:
+            completed_paper_ids.add(paper_id)
+    save_checkpoint(checkpoint_path, completed_paper_ids)
+    print(
+        f"progress: uploaded={uploaded_before + batch_uploaded} "
+        f"papers_checkpointed={len(completed_paper_ids)}",
+        file=sys.stderr,
+    )
+    failures.update(embed_failures)
+    return batch_uploaded, failures
+
+
 def upload_stream(
     *,
     search_client: Any,
@@ -715,60 +774,39 @@ def upload_stream(
     failures do block the checkpoint so --resume retries those papers.
     """
     uploaded = 0
+    all_failures: dict[str, str] = {}
     buffer: list[tuple[str, list[Record], bool]] = []
     buffer_chunks = 0
     flush_threshold = embedding_batch_size * max(embed_workers, 1)
 
-    def flush() -> dict[str, str]:
+    def flush() -> None:
         nonlocal uploaded, buffer, buffer_chunks
         if not buffer:
-            return {}
-        chunks = [chunk for _, paper_chunks, _ in buffer for chunk in paper_chunks]
-        vectors = embed_chunks(
-            openai_client,
-            openai_settings,
-            chunks,
-            batch_size=embedding_batch_size,
-            workers=embed_workers,
-        )
-        docs: list[Record] = []
-        embed_failures: dict[str, str] = {}
-        for chunk, vector in zip(chunks, vectors):
-            if vector is None:
-                key = str(chunk.get("id") or "")
-                embed_failures[key] = "embedding skipped after permanent 4xx error"
-                print(f"EMBED SKIP key={key}", file=sys.stderr)
-                continue
-            docs.append(search_document(chunk, vector, omit_fields=omit_fields))
-        batch_uploaded, failures = upload_documents_with_retry(
-            search_client, docs, batch_size=upload_batch_size
+            return
+        batch_uploaded, failures = _flush_paper_buffer(
+            buffer,
+            search_client=search_client,
+            openai_client=openai_client,
+            openai_settings=openai_settings,
+            embedding_batch_size=embedding_batch_size,
+            embed_workers=embed_workers,
+            upload_batch_size=upload_batch_size,
+            checkpoint_path=checkpoint_path,
+            completed_paper_ids=completed_paper_ids,
+            omit_fields=omit_fields,
+            uploaded_before=uploaded,
         )
         uploaded += batch_uploaded
-        key_to_paper = {doc["id"]: doc["paper_id"] for doc in docs}
-        # Only upload failures block a paper's checkpoint; embed-skipped
-        # chunks are permanent, so re-running them on --resume is pointless.
-        failed_papers = {key_to_paper[key] for key in failures if key in key_to_paper}
-        for paper_id, _, complete in buffer:
-            if complete and paper_id not in failed_papers:
-                completed_paper_ids.add(paper_id)
-        save_checkpoint(checkpoint_path, completed_paper_ids)
-        print(
-            f"progress: uploaded={uploaded} "
-            f"papers_checkpointed={len(completed_paper_ids)}",
-            file=sys.stderr,
-        )
+        all_failures.update(failures)
         buffer = []
         buffer_chunks = 0
-        failures.update(embed_failures)
-        return failures
 
-    all_failures: dict[str, str] = {}
     for paper_id, paper_chunks, complete in iter_paper_groups(records, limit=limit):
         buffer.append((paper_id, paper_chunks, complete))
         buffer_chunks += len(paper_chunks)
         if buffer_chunks >= flush_threshold:
-            all_failures.update(flush())
-    all_failures.update(flush())
+            flush()
+    flush()
     return uploaded, all_failures
 
 

@@ -24,7 +24,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from .common import ROOT, Record, read_jsonl
 
