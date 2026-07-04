@@ -2865,6 +2865,53 @@ def run_one(
             search_fields=parse_search_fields(args.search_fields),
         )
 
+    # EXPERIMENTAL --rewrite-prompt-file (prompt iteration; see query_lab):
+    # one extra AOAI call rewrites the question into additional search
+    # queries whose hits are APPENDED after the organic results via
+    # merge_hit_lists (concatenation dedupe, primary wins) before
+    # rank_papers. This is deliberately precision-conservative and is NOT
+    # the rank-interleaved merge used by search_with_decomposition or by
+    # query_lab.merge_query_hits: a paper surfaced only by a rewritten
+    # query enters RRF at a list position after the ~top_chunks organic
+    # hits, so query_lab recall deltas OVERSTATE the end-to-end gain of
+    # this flag. Always re-score with scripts/evaluate.py + compare_runs
+    # (RUNBOOK, "Query-rewrite experimentation"). Best effort: any failure
+    # leaves the results untouched.
+    if getattr(args, "rewrite_prompt_file", None):
+        # Lazy import: query_lab imports run_rag at module level, so the
+        # reverse import must happen at call time to avoid a cycle.
+        from . import query_lab
+
+        try:
+            rewritten, _raw, _ok = query_lab.rewrite_queries(
+                openai_client,
+                openai_settings,
+                query_lab.load_prompt_template(args.rewrite_prompt_file),
+                sample,
+            )
+            extra_hits: list[Record] = []
+            for extra_query in rewritten[1:]:  # query 0 is the original question
+                extra_hits = merge_hit_lists(
+                    extra_hits,
+                    search_chunks(
+                        search_client,
+                        openai_client,
+                        openai_settings,
+                        query=extra_query,
+                        top_chunks=args.top_chunks,
+                        vector_k=args.vector_k,
+                        query_type=args.query_type,
+                        search_fields=parse_search_fields(args.search_fields),
+                    ),
+                )
+            if extra_hits:
+                results = merge_hit_lists(results, extra_hits)
+        except Exception as exc:  # noqa: BLE001 - the rewrite must never break a run.
+            print(
+                f"WARN {sample.get('query_id')}: query rewrite failed ({exc})",
+                file=sys.stderr,
+            )
+
     # P4: papers named in the question (or in title-like MC options) are
     # force-retrieved and their chunks prepended (strong rank boost).
     if getattr(args, "entity_search", True):
@@ -3373,6 +3420,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Local chunk JSONL directory (one {paper_id}.jsonl per paper) used "
             "for evidence re-anchoring and reference/equation lookup. Missing "
             "files are tolerated (those steps just no-op)."
+        ),
+    )
+    parser.add_argument(
+        "--rewrite-prompt-file",
+        type=Path,
+        default=None,
+        help=(
+            "EXPERIMENTAL, for query-rewrite prompt iteration with "
+            "littraceqa.azure.query_lab: rewrite each question into extra "
+            "search queries via one AOAI call using this prompt template "
+            "('#' lines stripped, {question} placeholder required) and merge "
+            "those queries' hits into the candidate results before paper "
+            "ranking. Default: unset (behavior identical to before)."
         ),
     )
     parser.add_argument("--workers", type=int, default=4)
