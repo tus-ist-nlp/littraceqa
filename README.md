@@ -14,9 +14,10 @@ uv sync
 ```
 
 The base install covers the dataset scripts (`scripts/`) and the
-provider-agnostic tools (`littraceqa.fix_chunk_locators`,
-`littraceqa.validate_submission`, `littraceqa.compare_runs`). The Azure
-baseline additionally needs the optional `azure` extra:
+provider-agnostic tools (`littraceqa.extract_pdf_archives`,
+`littraceqa.fix_chunk_locators`, `littraceqa.validate_submission`,
+`littraceqa.compare_runs`). The Azure baseline additionally needs the
+optional `azure` extra:
 
 ```bash
 uv sync --extra azure
@@ -56,12 +57,21 @@ AZURE_OPENAI_ENDPOINT=
 AZURE_OPENAI_API_KEY=
 AZURE_OPENAI_CHAT_DEPLOYMENT=
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=
-AZURE_OPENAI_EMBEDDING_DIMENSIONS=1536
 ```
+
+Optional: `AZURE_OPENAI_EMBEDDING_DIMENSIONS` defaults to 1536 and only needs
+setting when your embedding deployment outputs a different dimension.
 
 If your Azure OpenAI deployment uses the newer `/openai/v1` endpoint style, set
 `AZURE_OPENAI_USE_V1=true`. Otherwise keep it `false` and set
 `AZURE_OPENAI_API_VERSION`.
+
+Validate the finished `.env` (missing required values, malformed endpoints,
+unknown variable names):
+
+```bash
+uv run --extra azure python -m littraceqa.azure.check_azure_env
+```
 
 ### 2. Prepare PDFs
 
@@ -173,3 +183,25 @@ uv run --extra azure python -m littraceqa.azure.grade_with_azure_openai \
 
 This judge is not the official metric; it is useful for seeing whether failures
 come from paper retrieval, evidence retrieval, or final answer generation.
+
+## Further tools
+
+Operational detail for these lives in `RUNBOOK.md`; one line each here:
+
+- `littraceqa.azure.reanalyze_papers` — re-run Document Intelligence on an
+  explicit set of papers via direct `pdf_url` downloads (raw JSON always
+  saved), instead of reprocessing whole Box archives.
+- `littraceqa.azure.extract_pdfs_from_box` — stage the PDFs referenced by a
+  prediction file (or `--paper-id` list) from the Box archives into
+  `artifacts/pdf_cache/`.
+- `littraceqa.azure.figure_answer` — vision second pass for figure-primary
+  questions: renders figure pages from cached PDFs and revises
+  answers/evidence.
+- `littraceqa.validate_submission` — gold-free lint of a prediction file; the
+  mandatory final gate before any submission.
+- `littraceqa.compare_runs` — per-question metric diff of two prediction files
+  using the official `scripts/evaluate.py` logic.
+
+Note: most modules accept the metadata path as `--metadata-file`, but
+`process_document_intelligence`, `process_box_archives_document_intelligence`,
+`reanalyze_papers`, and `extract_pdf_archives` call the same flag `--metadata`.

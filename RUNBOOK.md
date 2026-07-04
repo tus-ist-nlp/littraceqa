@@ -160,8 +160,9 @@ If a run is interrupted, re-run the same command with `--resume`: completed
 rows are kept, placeholder rows from per-query failures (empty answer and no
 papers) are retried, and the output file is rewritten atomically before
 appending. LLM responses that fail JSON parsing even after one retry are
-captured in `<output>_raw_failures.jsonl` next to the output — check it when
-`failed=` in the summary line is non-zero.
+captured next to the output in a file named with the `.jsonl` suffix replaced
+by `_raw_failures.jsonl` (e.g. `runs\x.jsonl` -> `runs\x_raw_failures.jsonl`)
+— check it when `failed=` in the summary line is non-zero.
 
 `--options-file` behavior in `run_rag`: the flag defaults to none. When it is
 omitted, the validation options `data\validation.jsonl` are auto-joined ONLY
