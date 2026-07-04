@@ -169,21 +169,6 @@ uv run --extra azure python -m littraceqa.azure.run_rag --limit 2 --retrieval-on
 uv run --extra azure python -m littraceqa.azure.run_rag --limit 2
 ```
 
-### 6. Semantic grading
-
-For development analysis, compare a prediction file against
-`data/validation.jsonl` with Azure OpenAI:
-
-```bash
-uv run --extra azure python -m littraceqa.azure.grade_with_azure_openai \
-  --pred runs/validation_submission.jsonl \
-  --output runs/azure_openai_grades.jsonl \
-  --report runs/azure_openai_grading_report.md
-```
-
-This judge is not the official metric; it is useful for seeing whether failures
-come from paper retrieval, evidence retrieval, or final answer generation.
-
 ## Further tools
 
 Operational detail for these lives in `RUNBOOK.md`; one line each here:
