@@ -1,0 +1,17 @@
+per_index_k: 100
+indexers:
+  - name: bm25s
+    params: {}
+  - name: faiss_specter2
+    params:
+      model: allenai/specter2_base
+      doc_adapter: proximity
+      query_adapter: adhoc_query
+      doc_adapter_id: allenai/specter2
+      query_adapter_id: allenai/specter2_adhoc_query
+fuser:
+  name: rrf
+  params: { k: 60, weights: { bm25s: 1.0, faiss_specter2: 1.0 } }
+reranker:
+  name: none
+  params: {}

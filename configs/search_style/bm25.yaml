@@ -1,0 +1,10 @@
+per_index_k: 100
+indexers:
+  - name: bm25s
+    params: {}
+fuser:
+  name: rrf
+  params: { k: 60, weights: { bm25s: 1.0 } }
+reranker:
+  name: none
+  params: {}

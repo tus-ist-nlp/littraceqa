@@ -6,5 +6,8 @@ __pycache__/
 # uv cache
 .uv/
 
+# setuptools build metadata
+*.egg-info/
+
 # Downloaded PDF cache (scripts/download_pdfs.py default --output)
 pdfs/

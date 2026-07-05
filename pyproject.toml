@@ -7,9 +7,40 @@ requires-python = ">=3.13"
 dependencies = [
     "requests>=2.31",
     "pypdf>=4.0",
+    "PyYAML>=6.0",
+    "marker-pdf>=1.10.2",
+    "torch>=2.11.0,<2.12",
+    "bm25s>=0.3.9",
+    "faiss-cpu",
+    "peft",
+    "pylate",
 ]
 
+[project.optional-dependencies]
+# 図表前処理（FigureVLMChunker）用。GPUを持つホスト（nlp-01/nlp-03等）でのみ
+# `uv sync --extra figures` でインストールする想定。通常の uv sync では入らない。
+figures = [
+    "docling",
+    "transformers>=4.45",
+    "qwen-vl-utils",
+    "accelerate",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["litqa*"]
+
 [tool.uv]
-# These scripts are run directly (uv run python scripts/...), not installed as a
-# package, so skip building/installing the project itself.
-package = false
+package = true
+# pytorch cu121 index が requests 等の無関係なパッケージも古いバージョンで
+# 提供してしまい、first-index-match だと解決不能になるため best-match にする。
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu121"
