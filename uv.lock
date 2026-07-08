@@ -1223,8 +1223,10 @@ name = "littraceqa"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "beautifulsoup4" },
     { name = "bm25s" },
     { name = "faiss-cpu" },
+    { name = "markdownify" },
     { name = "marker-pdf" },
     { name = "peft" },
     { name = "pylate" },
@@ -1250,9 +1252,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'figures'" },
+    { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "bm25s", specifier = ">=0.3.9" },
     { name = "docling", marker = "extra == 'figures'" },
     { name = "faiss-cpu" },
+    { name = "markdownify", specifier = ">=1.2.3" },
     { name = "marker-pdf", specifier = ">=1.10.2" },
     { name = "peft" },
     { name = "pylate" },

@@ -9,6 +9,8 @@ dependencies = [
     "pypdf>=4.0",
     "PyYAML>=6.0",
     "marker-pdf>=1.10.2",
+    "beautifulsoup4>=4.15.0",
+    "markdownify>=1.2.3",
     "torch>=2.11.0,<2.12",
     "bm25s>=0.3.9",
     "faiss-cpu",

@@ -61,6 +61,7 @@ from litqa.index.faiss_specter2 import Specter2FAISSIndex  # noqa: F401
 from litqa.index.siglip_image import SiglipImageIndex  # noqa: F401
 from litqa.llm.fake import FakeLLM  # noqa: F401
 from litqa.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
+from litqa.preprocess.marker_chunker import MarkerChunker  # noqa: F401
 from litqa.preprocess.pypdf_chunker import PyPDFChunker  # noqa: F401
 from litqa.retrieve.hybrid import HybridRetriever
 from litqa.retrieve.reranker import NoneReranker  # noqa: F401
