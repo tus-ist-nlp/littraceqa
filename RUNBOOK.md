@@ -296,6 +296,56 @@ schema injection, K by task_family) over prompt wording tuned until the
 55-question score moves — the latter is dev-set overfitting that will not
 transfer to the hidden test set.
 
+### Query-rewrite experimentation (query_lab)
+
+`littraceqa.azure.query_lab` is a DEV-ONLY retrieval lab for iterating on the
+query-rewrite prompt in `prompts\query_rewrite.txt`. It reads gold papers from
+`data\validation.jsonl` to compute paper recall@K (same gold-access policy as
+`compare_runs`); it is never part of the submission path.
+
+One-time reference baseline (original question, single hybrid search — later
+runs auto-compare against it):
+
+```powershell
+uv run --extra azure python -m littraceqa.azure.query_lab --name _baseline --baseline-only
+```
+
+The loop — edit the prompt, run with a fresh name, read the report:
+
+```powershell
+# 1. edit prompts\query_rewrite.txt ('#' lines are stripped; {question} required)
+# 2. run (one AOAI rewrite call + one hybrid search per query, per question)
+uv run --extra azure python -m littraceqa.azure.query_lab --name exp01
+# 3. read runs\query_lab\exp01\results.md (aggregate recall@K vs the _baseline
+#    column, then a per-question table with missing gold papers and the
+#    rewritten queries; the console prints the 5 worst questions)
+```
+
+Each run writes `rewrites.jsonl` (replayable with `--rewrites-file` to re-score
+without new AOAI calls), `results.json`, `results.md` and `meta.json` (prompt
+text + sha256) under `runs\query_lab\<name>\`. Default scope is
+`--family multi_paper`; use `--family all` / `--query-id` / `--limit` to
+narrow or widen.
+
+Handoff into the full pipeline: once a prompt wins in the lab, replay it in an
+end-to-end run — with the flag unset, `run_rag` behavior is unchanged:
+
+```powershell
+uv run --extra azure python -m littraceqa.azure.run_rag `
+    --input data\validation_inputs.jsonl `
+    --output runs\validation_rewrite_exp01.jsonl `
+    --rewrite-prompt-file prompts\query_rewrite.txt
+```
+
+Then score with `scripts\evaluate.py` / `compare_runs` as in step 6 — this
+re-scoring is **mandatory**, because the lab and the pipeline merge hits
+differently: the lab interleaves per-query hits by best rank, while
+`--rewrite-prompt-file` appends extra-query hits *after* the organic hits
+(precision-conservative), so a paper found only by a rewritten query gets a
+much weaker RRF position end-to-end. Lab recall deltas are an optimistic
+upper bound, not a prediction of the pipeline score. Mind the
+overfitting guard above: judge prompts by per-query flips, not aggregates.
+
 ### Cost
 
 The Azure AI Search service bills continuously while it exists (per partition,
