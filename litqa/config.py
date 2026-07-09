@@ -7,10 +7,8 @@ compose_config() で組み合わせる（詳細は CLAUDE.md 参照）。
 
     configs/paths/default.yaml:
       pdf_dir: /data2/littraceqa/pdfs
-      docint_chunks: /data2/littraceqa/docint_chunks
       chunks_dir: /data2/littraceqa/chunks
       index_dir: /data2/littraceqa/index
-      backup_dir: /data2/littraceqa/backup
       paper_metadata: data/paper_metadata.jsonl
 
     configs/process_style/pypdf.yaml:

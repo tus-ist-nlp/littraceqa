@@ -10,8 +10,6 @@ def _paths() -> dict:
         "pdf_dir": "/data/pdfs",
         "chunks_dir": "/data/chunks",
         "index_dir": "/data/index",
-        "docint_chunks": "/data/docint_chunks",
-        "backup_dir": "/data/backup",
         "paper_metadata": "data/paper_metadata.jsonl",
     }
 
