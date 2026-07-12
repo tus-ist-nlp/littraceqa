@@ -33,6 +33,19 @@ wheels = [
 ]
 
 [[package]]
+name = "adapters"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/51/42/d0d927317737c1dbf8e11024bdb2cb6ce4129655b547fd1a3c0619ee4c0e/adapters-1.3.0.tar.gz", hash = "sha256:36f5d24fbdd99d00c00aaa1f724b9e124fb1a9fd1dbae19dc3dd5a483d02fd5c", size = 218316, upload-time = "2026-04-26T19:49:23.45Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/93/fde7cf6813dbb655fe167dae3e19d0b3846a4ae2ef1ac8b9823ef8c34fc0/adapters-1.3.0-py3-none-any.whl", hash = "sha256:c0620b1b98df4af3876aa1e053ba43d0a19d82e62fc6a3ebc67d158183e07919", size = 295544, upload-time = "2026-04-26T19:49:21.62Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1223,12 +1236,12 @@ name = "littraceqa"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "adapters" },
     { name = "beautifulsoup4" },
     { name = "bm25s" },
     { name = "faiss-cpu" },
     { name = "markdownify" },
     { name = "marker-pdf" },
-    { name = "peft" },
     { name = "pylate" },
     { name = "pypdf" },
     { name = "pyyaml" },
@@ -1252,13 +1265,13 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'figures'" },
+    { name = "adapters", specifier = ">=1.3.0" },
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "bm25s", specifier = ">=0.3.9" },
     { name = "docling", marker = "extra == 'figures'" },
     { name = "faiss-cpu" },
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "marker-pdf", specifier = ">=1.10.2" },
-    { name = "peft" },
     { name = "pylate" },
     { name = "pypdf", specifier = ">=4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -2047,27 +2060,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a9/7b/fe3205d44d6058932bbc785f0b9da2ed35b62e17479a8a7d2baca9df1cc6/pdftext-0.6.3.tar.gz", hash = "sha256:ab5c5dfe0f1fb78de1db837ccadac1ea41b07ce1890fead973c9a84cdaf54dec", size = 21968, upload-time = "2025-06-11T14:42:09.492Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bc/b9/4437bb89f04e57f48c96492a50d6168da5e201940de6620730d390449991/pdftext-0.6.3-py3-none-any.whl", hash = "sha256:528431ed8bdce39d74372cd3d27e8544af812f1f1adc81db229cf9fb48dacacb", size = 23693, upload-time = "2025-06-11T14:42:08.157Z" },
-]
-
-[[package]]
-name = "peft"
-version = "0.19.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "accelerate" },
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "tqdm" },
-    { name = "transformers" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/86/cf/037f1e3d5186496c05513a6754639e2dab3038a05f384284d49a9bd06a2d/peft-0.19.1.tar.gz", hash = "sha256:0d97542fe96dcdaa20d3b81c06f26f988618f416a73544ab23c3618ccb674a40", size = 763738, upload-time = "2026-04-16T15:46:45.105Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e8/b6/f54d676ed93cc2dd2234c3b172ea9c8c3d7d29361e66b1b23dec57a67465/peft-0.19.1-py3-none-any.whl", hash = "sha256:2113f72a81621b5913ef28f9022204c742df111890c5f49d812716a4a301e356", size = 680692, upload-time = "2026-04-16T15:46:42.886Z" },
 ]
 
 [[package]]

@@ -8,6 +8,8 @@ indexers:
   - name: faiss_specter2
     params:
       model: allenai/specter2_base
+      batch_size: 128
+      fp16: true
       doc_adapter: proximity
       query_adapter: adhoc_query
       doc_adapter_id: allenai/specter2
