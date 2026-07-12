@@ -22,22 +22,44 @@ from dataclasses import dataclass, field
 
 
 # 1. Query -- システムへの入力1件（質問）。
+#
+# 本番の入力に実際に入っているのは query_id / question / answer_types / table_schema の
+# 4つだけで、task_family と primary_evidence_type は与えられない（手元の
+# validation_inputs.jsonl にはこの2つが入っているが、本番では欠ける）。
+# そのため両者は Optional とし、無い場合は litqa.agent.task_family で question から
+# 推定する。
 @dataclass
 class Query:
     query_id: str
-    task_family: str  # 観測値: "hidden_source_single_paper" / "multi_paper"
-    primary_evidence_type: str  # 観測値: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
     question: str
     answer_types: list[str]
+    # 回答が table 型のときだけ与えられる列定義: [{"name": ..., "type": ..., "is_row_key": bool}]
+    table_schema: list[dict] | None = None
+    # 以下2つは本番入力には無い。手元の検証データにだけ入っている。
+    task_family: str | None = None  # 観測値: "hidden_source_single_paper" / "multi_paper"
+    primary_evidence_type: str | None = None  # 観測値: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
 
     def to_dict(self) -> dict:
         return {
             "query_id": self.query_id,
-            "task_family": self.task_family,
-            "primary_evidence_type": self.primary_evidence_type,
             "question": self.question,
             "answer_types": self.answer_types,
+            "table_schema": self.table_schema,
+            "task_family": self.task_family,
+            "primary_evidence_type": self.primary_evidence_type,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Query:
+        """入力 jsonl の1レコードから Query を作る。本番に無いフィールドは None になる。"""
+        return cls(
+            query_id=d["query_id"],
+            question=d["question"],
+            answer_types=d.get("answer_types") or [],
+            table_schema=d.get("table_schema"),
+            task_family=d.get("task_family"),
+            primary_evidence_type=d.get("primary_evidence_type"),
+        )
 
 
 # 2. PaperMeta -- data/paper_metadata.jsonl の1レコード。

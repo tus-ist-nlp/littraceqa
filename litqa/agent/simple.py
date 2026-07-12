@@ -1,27 +1,34 @@
-"""1回だけ検索して gold_papers を返すシンプルなエージェント。反復なし・LLM呼び出しなし。"""
+"""1回だけ検索して gold_papers を返すシンプルなエージェント。反復なし。
+
+task_family は本番入力に無いので、llm を渡せば LLM で推定し、渡さなければ
+ヒューリスティックで推定する（litqa/agent/task_family.py 参照）。
+"""
 
 from __future__ import annotations
 
+from litqa.agent.task_family import CUTOFF_BY_TASK_FAMILY, TaskFamilyClassifier
 from litqa.contracts import Answer, Prediction, Query
+from litqa.llm.base import LLMClient
 from litqa.registry import register
 from litqa.retrieve.hybrid import HybridRetriever, to_gold_papers
-
-_CUTOFF_BY_TASK_FAMILY = {
-    "hidden_source_single_paper": 2,
-    "multi_paper": 5,
-}
 
 
 @register("agent", "simple")
 class SimpleAgent:
-    def __init__(self, retriever: HybridRetriever, top_k: int = 20):
+    def __init__(
+        self,
+        retriever: HybridRetriever,
+        top_k: int = 20,
+        llm: LLMClient | None = None,
+    ):
         self.retriever = retriever
         self.top_k = top_k
+        self.task_family = TaskFamilyClassifier(llm)
 
     def run(self, query: Query) -> Prediction:
         results = self.retriever.retrieve(query.question, self.top_k)
         paper_ids = to_gold_papers(results)
-        cutoff = _CUTOFF_BY_TASK_FAMILY.get(query.task_family)
+        cutoff = CUTOFF_BY_TASK_FAMILY.get(self.task_family.infer(query))
         if cutoff is not None:
             paper_ids = paper_ids[:cutoff]
         return Prediction(

@@ -1,2 +1,6 @@
+# 1回だけ検索して上位を返す最小構成のエージェント。
+# 本番入力には task_family が無いため、返す論文数(cutoff)は question から推定する。
+# llm を与えると LLM で推定し、与えなければヒューリスティックにフォールバックする。
+#   llm: { name: fake, params: {} }  # 実LLMクライアント実装後に有効化する
 name: simple
 params: { top_k: 20 }

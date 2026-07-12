@@ -71,16 +71,7 @@ def load_queries(path: Path) -> list[Query]:
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
-            queries.append(
-                Query(
-                    query_id=record["query_id"],
-                    task_family=record["task_family"],
-                    primary_evidence_type=record["primary_evidence_type"],
-                    question=record["question"],
-                    answer_types=record["answer_types"],
-                )
-            )
+            queries.append(Query.from_dict(json.loads(line)))
     return queries
 
 

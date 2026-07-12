@@ -7,8 +7,8 @@ LLM に提示し、質問への根拠として本当に必要な paper_id だけ
 
 from __future__ import annotations
 
-from litqa.agent.iterative import _parse_json_object
-from litqa.agent.simple import _CUTOFF_BY_TASK_FAMILY
+from litqa.agent.json_utils import parse_json_object as _parse_json_object
+from litqa.agent.task_family import CUTOFF_BY_TASK_FAMILY, TaskFamilyClassifier
 from litqa.contracts import Answer, Prediction, Query, RetrievalResult
 from litqa.llm.base import LLMClient
 from litqa.registry import register
@@ -30,6 +30,7 @@ class VerifyingAgent:
         self.llm = llm
         self.top_k = top_k
         self.max_candidates = max_candidates
+        self.task_family = TaskFamilyClassifier(llm)
 
     def run(self, query: Query) -> Prediction:
         results = self.retriever.retrieve(query.question, self.top_k)
@@ -48,7 +49,7 @@ class VerifyingAgent:
             paper_ids = [pid for pid in judged if pid in candidate_set]
 
         if not paper_ids:
-            cutoff = _CUTOFF_BY_TASK_FAMILY.get(query.task_family)
+            cutoff = CUTOFF_BY_TASK_FAMILY.get(self.task_family.infer(query))
             paper_ids = candidate_ids[:cutoff] if cutoff is not None else candidate_ids
 
         return Prediction(

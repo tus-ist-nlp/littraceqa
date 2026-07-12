@@ -2,39 +2,18 @@
 
 from __future__ import annotations
 
-import json
-import re
-
-from litqa.agent.simple import _CUTOFF_BY_TASK_FAMILY
+from litqa.agent.json_utils import parse_json_object as _parse_json_object
+from litqa.agent.task_family import (
+    CUTOFF_BY_TASK_FAMILY,
+    MULTI,
+    SUFFICIENT_COUNT_BY_TASK_FAMILY,
+    TaskFamilyClassifier,
+    is_enumeration_or_comparison as _is_enumeration_or_comparison,
+)
 from litqa.contracts import Answer, Prediction, Query, RetrievalResult
 from litqa.llm.base import LLMClient
 from litqa.registry import register
 from litqa.retrieve.hybrid import HybridRetriever, to_gold_papers
-
-_SUFFICIENT_COUNT_BY_TASK_FAMILY = {
-    "hidden_source_single_paper": 1,
-    "multi_paper": 4,
-}
-
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
-
-_ENUMERATION_PATTERNS = [
-    re.compile(r"\bwhich papers\b", re.IGNORECASE),
-    re.compile(r"\bwhat papers\b", re.IGNORECASE),
-    re.compile(r"\blist (all|the)\b", re.IGNORECASE),
-    re.compile(r"\ball (of the )?papers (that|which)\b", re.IGNORECASE),
-    re.compile(r"\bevery paper\b", re.IGNORECASE),
-    re.compile(r"\bhow many papers\b", re.IGNORECASE),
-    re.compile(r"\bcompare\b", re.IGNORECASE),
-    re.compile(r"\bcomparison (of|between)\b", re.IGNORECASE),
-    re.compile(r"\bacross (the )?(papers|studies|works)\b", re.IGNORECASE),
-    re.compile(r"\bboth .+ and .+\b", re.IGNORECASE),
-]
-
-
-def _is_enumeration_or_comparison(question: str) -> bool:
-    """質問文が列挙・比較型（複数論文にまたがりやすい）パターンかどうかを判定する。"""
-    return any(pattern.search(question) for pattern in _ENUMERATION_PATTERNS)
 
 
 def _growth_rate(prev_count: int, new_count: int) -> float:
@@ -44,26 +23,6 @@ def _growth_rate(prev_count: int, new_count: int) -> float:
             return 1.0
         return 0.0
     return (new_count - prev_count) / prev_count
-
-
-def _parse_json_object(text: str) -> dict | None:
-    """LLM の出力から JSON オブジェクトを安全に取り出す。失敗したら None。"""
-    fence_match = _JSON_FENCE_RE.search(text)
-    if fence_match:
-        candidate = fence_match.group(1)
-    else:
-        candidate = text
-    try:
-        return json.loads(candidate)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start, end = candidate.find("{"), candidate.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return None
-    try:
-        return json.loads(candidate[start : end + 1])
-    except json.JSONDecodeError:
-        return None
 
 
 @register("agent", "iterative")
@@ -91,12 +50,13 @@ class IterativeAgent:
         self.stagnation_patience = stagnation_patience
         self.dynamic_sufficiency = dynamic_sufficiency
         self.enumeration_fanout = enumeration_fanout
+        self.task_family = TaskFamilyClassifier(llm)
 
     def run(self, query: Query) -> Prediction:
         subqueries = self._decompose(query)
 
         dynamic_threshold = None
-        if self.dynamic_sufficiency and query.task_family == "multi_paper":
+        if self.dynamic_sufficiency and self.task_family.infer(query) == MULTI:
             dynamic_threshold = self._estimate_required_paper_count(query)
 
         found: dict[str, RetrievalResult] = {}
@@ -140,7 +100,7 @@ class IterativeAgent:
         cutoff = (
             dynamic_threshold
             if dynamic_threshold is not None
-            else _CUTOFF_BY_TASK_FAMILY.get(query.task_family)
+            else CUTOFF_BY_TASK_FAMILY.get(self.task_family.infer(query))
         )
         if cutoff is not None:
             paper_ids = paper_ids[:cutoff]
@@ -154,7 +114,7 @@ class IterativeAgent:
         )
 
     def _decompose(self, query: Query) -> list[str]:
-        if query.task_family != "multi_paper":
+        if self.task_family.infer(query) != MULTI:
             return [query.question]
 
         if self.enumeration_fanout and _is_enumeration_or_comparison(query.question):
@@ -204,7 +164,7 @@ class IterativeAgent:
         if override_threshold is not None:
             threshold = override_threshold
         else:
-            threshold = _SUFFICIENT_COUNT_BY_TASK_FAMILY.get(query.task_family)
+            threshold = SUFFICIENT_COUNT_BY_TASK_FAMILY.get(self.task_family.infer(query))
         if threshold is None:
             return True
         return len(found) >= threshold
