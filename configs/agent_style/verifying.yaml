@@ -1,3 +1,5 @@
+# 上位候補をLLMに判定させ、順位カットオフでなく内容ベースで最終提出論文を選ぶエージェント。
+# 実行には ANTHROPIC_API_KEY が必要（未設定なら build_pipeline の時点で落ちる）。
 name: verifying
-llm: { name: fake, params: {} }  # 実LLMクライアント実装後に差し替える
+llm: { name: claude, params: { effort: medium } }
 params: { top_k: 20, max_candidates: 15 }

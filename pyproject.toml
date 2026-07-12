@@ -12,6 +12,7 @@ dependencies = [
     "beautifulsoup4>=4.15.0",
     "markdownify>=1.2.3",
     "torch>=2.11.0,<2.12",
+    "anthropic>=0.69",
     "bm25s>=0.3.9",
     "faiss-cpu",
     # SPECTER2 のアダプタ (allenai/specter2, specter2_adhoc_query) は peft ではなく
@@ -45,6 +46,15 @@ package = true
 # pytorch cu121 index が requests 等の無関係なパッケージも古いバージョンで
 # 提供してしまい、first-index-match だと解決不能になるため best-match にする。
 index-strategy = "unsafe-best-match"
+
+# marker-pdf は anthropic>=0.46,<0.47 を固定しているが、これは marker 自身の
+# LLM補助モード(use_llm)のためだけの依存で、MarkerChunker は use_llm=false で使う
+# （configs/process_style/marker.yaml 参照）ので marker が anthropic に触ることはない。
+# 一方 litqa/llm/claude.py は Opus 4.8 / adaptive thinking / output_config を使うため
+# 新しい SDK が要る。0.46 系では動かないので、marker のピンを上書きする。
+# MarkerChunker で use_llm: true を使いたくなったら、この上書きを外して
+# marker を隔離 venv に追い出すこと（MinerU と同じ扱い）。
+override-dependencies = ["anthropic>=0.69"]
 
 [[tool.uv.index]]
 url = "https://download.pytorch.org/whl/cu121"

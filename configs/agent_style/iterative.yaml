@@ -1,3 +1,5 @@
+# 検索結果を見てから不足分を再分解し、最大 max_steps 回まで反復検索するエージェント。
+# 実行には ANTHROPIC_API_KEY が必要（未設定なら build_pipeline の時点で落ちる）。
 name: iterative
-llm: { name: fake, params: {} }  # 実LLMクライアント実装後に差し替える
+llm: { name: claude, params: { effort: medium } }
 params: { top_k: 20, max_steps: 3, use_hyde: false }

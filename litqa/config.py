@@ -50,6 +50,7 @@ import yaml
 
 from litqa import registry
 from litqa.agent.iterative import IterativeAgent  # noqa: F401
+from litqa.agent.reading import ReadingAgent  # noqa: F401
 from litqa.agent.simple import SimpleAgent  # noqa: F401
 from litqa.agent.verifying import VerifyingAgent  # noqa: F401
 from litqa.index.bm25_index import BM25Index  # noqa: F401
@@ -57,6 +58,7 @@ from litqa.index.colbert_index import ColBERTIndex  # noqa: F401
 from litqa.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: F401
 from litqa.index.faiss_specter2 import Specter2FAISSIndex  # noqa: F401
 from litqa.index.siglip_image import SiglipImageIndex  # noqa: F401
+from litqa.llm.claude import ClaudeLLM  # noqa: F401
 from litqa.llm.fake import FakeLLM  # noqa: F401
 from litqa.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
 from litqa.preprocess.marker_chunker import MarkerChunker  # noqa: F401

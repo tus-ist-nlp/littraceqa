@@ -27,6 +27,7 @@ from pathlib import Path
 import faiss
 import numpy as np
 import torch
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from litqa.contracts import Chunk, RetrievalResult
@@ -118,8 +119,14 @@ class Specter2FAISSIndex:
         self._ensure_model()
         self._model.set_active_adapters(adapter)
 
+        # 索引構築では 250万件規模を回すので、進捗が見えないと生きているのか
+        # 判断できない。クエリ1件の埋め込みでは出さない。
+        starts = range(0, len(texts), self.batch_size)
+        if len(texts) > self.batch_size:
+            starts = tqdm(starts, desc=f"{self.name} embedding", unit="batch")
+
         all_embeddings: list[np.ndarray] = []
-        for start in range(0, len(texts), self.batch_size):
+        for start in starts:
             batch = texts[start : start + self.batch_size]
             encoded = self._tokenizer(
                 batch,
