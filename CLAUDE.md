@@ -61,6 +61,8 @@ configs/
 │   └── default.yaml
 ├── process_style/
 │   ├── pypdf.yaml
+│   ├── marker.yaml
+│   ├── mineru.yaml          : MinerU。事前に scripts/run_mineru.py で変換が必要
 │   └── figure_vlm.yaml
 ├── search_style/
 │   ├── bm25.yaml            : BM25 単体
@@ -74,6 +76,21 @@ configs/
     └── verifying.yaml    : 上位候補をLLMに判定させ、順位カットオフでなく内容ベースで最終提出論文を選ぶ
 ```
 
-### 4. registry への登録確認
+### 4. 隔離 venv が必要な前処理
+MinerU は本体と依存が両立しない（transformers / torch / requires-python が衝突）。
+PDF → content_list.json の変換だけを隔離 venv で先に済ませ、本体の
+`MinerUChunker` はその成果物を読むだけにする。
+
+```
+bash scripts/setup_mineru_env.sh   # 初回のみ（.venv-mineru を作りモデルを取得）
+.venv-mineru/bin/python scripts/run_mineru.py \
+  --paths configs/paths/default.yaml --gpus 0,1,2,3
+```
+
+出力先は `pdf_dir` の兄弟 `mineru/`（`process_style` yaml にはパスを書かない方針に従い、
+`MinerUChunker` が自動導出する）。27,489件で 4GPU 約25時間。変換済みの論文は
+飛ばすので、中断しても同じコマンドで再開できる。
+
+### 5. registry への登録確認
 @register("indexer", "xxx") のデコレータが付いているか確認する。
 付いていないと config から呼び出せない。

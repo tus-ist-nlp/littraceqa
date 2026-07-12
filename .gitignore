@@ -1,5 +1,7 @@
 # uv / Python environment
 .venv/
+# MinerU 用の隔離環境（scripts/setup_mineru_env.sh が作る）
+.venv-mineru/
 __pycache__/
 *.py[cod]
 

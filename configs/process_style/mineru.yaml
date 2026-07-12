@@ -1,0 +1,8 @@
+# PDF の変換は本体の venv では動かない。先に隔離 venv で走らせておくこと:
+#   bash scripts/setup_mineru_env.sh
+#   .venv-mineru/bin/python scripts/run_mineru.py \
+#     --paths configs/paths/default.yaml --gpus 0,1,2,3
+# ここでは書き出された content_list.json を読むだけ。
+name: mineru
+params:
+  max_chars_per_chunk: 2000
