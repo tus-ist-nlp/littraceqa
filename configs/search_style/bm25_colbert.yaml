@@ -1,3 +1,6 @@
+# BM25 + ColBERT のハイブリッド。
+# ColBERT はトークン単位のマルチベクトル遅延相互作用で、語句レベルの
+# 一致に強い。BM25 と RRF 融合し、密ベクトル1本の構成と精度を比較する。
 per_index_k: 100
 indexers:
   - name: bm25s

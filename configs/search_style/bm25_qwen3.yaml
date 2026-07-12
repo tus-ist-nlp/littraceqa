@@ -1,3 +1,5 @@
+# BM25 + Qwen3-Embedding-8B のハイブリッド（デフォルト推奨）。
+# 語彙一致（疎）と密ベクトル意味検索を RRF で融合。汎用の高精度な標準構成。
 per_index_k: 100
 indexers:
   - name: bm25s
