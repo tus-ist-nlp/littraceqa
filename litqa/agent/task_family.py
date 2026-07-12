@@ -144,3 +144,30 @@ class TaskFamilyClassifier:
 def cutoff_for(query: Query, classifier: TaskFamilyClassifier) -> int | None:
     """query に対して提出する論文数の上限を返す。"""
     return CUTOFF_BY_TASK_FAMILY.get(classifier.infer(query))
+
+
+# 提出本数の決め方。比較実験では、これを揃えないと「エージェントの賢さ」ではなく
+# 「本数の決め方」の差を測ってしまう（論文集合は F1 採点なので本数がスコアを支配する）。
+#   "task_family": task_family の cutoff（single=2, multi=5）で機械的に切る
+#   "llm":         LLM が選んだ本数をそのまま採用する（max_papers で頭打ち）
+PAPER_CUTOFF_MODES = ("task_family", "llm")
+
+
+def apply_paper_cutoff(
+    paper_ids: list[str],
+    query: Query,
+    classifier: TaskFamilyClassifier,
+    mode: str,
+    max_papers: int,
+) -> list[str]:
+    """関連度順に並んだ paper_ids を、指定したモードで打ち切る。"""
+    if mode not in PAPER_CUTOFF_MODES:
+        raise ValueError(
+            f"unknown paper_cutoff: {mode!r} (expected one of {PAPER_CUTOFF_MODES})"
+        )
+    if mode == "task_family":
+        cutoff = cutoff_for(query, classifier)
+        if cutoff is not None:
+            return paper_ids[:cutoff]
+        return paper_ids[:max_papers]
+    return paper_ids[:max_papers]

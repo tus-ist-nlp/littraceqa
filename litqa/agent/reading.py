@@ -26,11 +26,7 @@ from __future__ import annotations
 
 from litqa.agent.evidence import evidence_from_result
 from litqa.agent.json_utils import parse_json_object
-from litqa.agent.task_family import (
-    CUTOFF_BY_TASK_FAMILY,
-    MULTI,
-    TaskFamilyClassifier,
-)
+from litqa.agent.task_family import MULTI, TaskFamilyClassifier, apply_paper_cutoff
 from litqa.contracts import Answer, Evidence, Prediction, Query, RetrievalResult
 from litqa.llm.base import LLMClient
 from litqa.registry import register
@@ -46,10 +42,11 @@ class ReadingAgent:
         retriever: HybridRetriever,
         llm: LLMClient,
         max_steps: int = 3,
-        top_k: int = 30,
-        max_candidates: int = 12,
+        top_k: int = 20,
+        max_candidates: int = 15,
         chunks_per_paper: int = 2,
         snippet_chars: int = 1800,
+        paper_cutoff: str = "task_family",
         max_papers: int = 10,
     ):
         self.retriever = retriever
@@ -59,6 +56,7 @@ class ReadingAgent:
         self.max_candidates = max_candidates
         self.chunks_per_paper = chunks_per_paper
         self.snippet_chars = snippet_chars
+        self.paper_cutoff = paper_cutoff
         self.max_papers = max_papers
         self.task_family = TaskFamilyClassifier(llm)
 
@@ -221,8 +219,10 @@ class ReadingAgent:
         if not paper_ids:
             return None
 
+        # 本数の打ち切りはここではやらない。paper_cutoff で一括して決める
+        # （比較実験で本数の決め方を揃えられるようにするため）。
         return {
-            "paper_ids": paper_ids[: self.max_papers],
+            "paper_ids": paper_ids,
             "evidence_chunk_ids": evidence_chunk_ids,
             "sufficient": bool(parsed.get("sufficient")),
             "missing": str(parsed.get("missing") or ""),
@@ -279,18 +279,23 @@ class ReadingAgent:
         trace: list[dict],
     ) -> Prediction:
         if verdict is None:
-            # LLM が一度も使える判定を返さなかった場合のフォールバック。
-            # 順位カットオフだけで出す（= SimpleAgent 相当）。
-            paper_ids = to_gold_papers(list(chunks.values()))
-            cutoff = CUTOFF_BY_TASK_FAMILY.get(self.task_family.infer(query))
-            if cutoff is not None:
-                paper_ids = paper_ids[:cutoff]
+            # LLM が一度も使える判定を返さなかった場合は検索の順位のまま出す。
+            ranked = to_gold_papers(list(chunks.values()))
             evidence: list[Evidence] = []
         else:
-            paper_ids = verdict["paper_ids"]
+            ranked = verdict["paper_ids"]
+
+        paper_ids = apply_paper_cutoff(
+            ranked, query, self.task_family, self.paper_cutoff, self.max_papers
+        )
+
+        if verdict is not None:
+            # 打ち切りで落ちた論文の evidence は出さない。
+            kept = set(paper_ids)
             evidence = [
                 evidence_from_result(chunks[chunk_id])
                 for chunk_id in dict.fromkeys(verdict["evidence_chunk_ids"])
+                if chunks[chunk_id].paper_id in kept
             ]
 
         return Prediction(

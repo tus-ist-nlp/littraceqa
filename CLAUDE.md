@@ -71,10 +71,48 @@ configs/
 │   ├── bm25_specter2.yaml   : BM25 + SPECTER2
 │   └── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding、ablation用）
 └── agent_style/
-    ├── simple.yaml
-    ├── iterative.yaml
-    └── verifying.yaml    : 上位候補をLLMに判定させ、順位カットオフでなく内容ベースで最終提出論文を選ぶ
+    ├── simple.yaml       : 検索して本数で切るだけ。LLM不要。素の検索性能のベースライン
+    ├── iterative.yaml    : multi_paper のときだけクエリ分解。※反復ループは空回りする（下記）
+    ├── verifying.yaml    : 上位候補をLLMに読ませ、内容ベースで論文を選ぶ（反復なし）
+    ├── reading.yaml      : 分解→読解→不足分の再検索を繰り返す本命。evidence も埋める
+    └── reading_llmcount.yaml : reading から paper_cutoff だけ変えた ablation
 ```
+
+`iterative` の反復ループは事実上回らない。停止条件が「見つかった論文の**本数**」で、
+検索が返した論文が無条件に found に入るため、top_k=20 で引いた時点で初回から
+条件を満たして打ち切られる（`_refine` は一度も呼ばれない）。中身を読んで根拠を確認し、
+足りなければ本当に検索し直すのは `reading`。`iterative` は「LLM分解あり・検証なし」の
+ベースラインとして残してある。
+
+### 3.1 比較実験の作法
+
+**共有ノブを揃えること。** `top_k` / `effort` / `paper_cutoff` / `max_papers` が
+エージェント間でズレていると、「エージェントの賢さ」ではなく予算の差を測ってしまう。
+現在は全 agent_style で `top_k: 20` / `effort: medium` / `paper_cutoff: task_family` /
+`max_papers: 10` に揃えてある。新しい agent_style を足すときもここは揃える。
+
+**提出本数は `paper_cutoff` で制御する。** 論文集合は F1 採点なので本数がスコアを支配する。
+`task_family`（single=2/multi=5 で機械的に切る）に固定して比べれば、本数を揃えた上で
+選定の質だけを比較できる。`llm`（LLMが選んだ本数をそのまま出す）はその効果を
+単独で測るための ablation。
+
+**評価は `--production-input` を付けて回す。** `data/validation_inputs.jsonl` は55件
+すべてに `task_family` が入っているが、本番入力には無い（`query_id` / `question` /
+`answer_types` / `table_schema` の4つだけ）。`task_family` は提出本数を決めるのに使うので、
+与えたまま評価すると「正解を教えてもらった状態」の点数になり本番と乖離する。
+
+差分を取ると効果が分解できる:
+
+| 比較 | 分かること |
+|---|---|
+| simple → iterative | クエリ**分解**の効果 |
+| simple → verifying | **読解・選定**の効果 |
+| verifying → reading | **反復**の効果 |
+| reading → reading_llmcount | 提出**本数をLLMに決めさせる**効果 |
+
+結果は `results/experiments.jsonl` に自動で追記される（config名 + metrics + timestamp）。
+LLM は非決定的（Opus 4.8 は temperature を受け付けない）でクエリは55件しかないので、
+数ポイントの差はノイズの可能性がある。結論を出す前に複数回まわすこと。
 
 ### 4. 隔離 venv が必要な前処理
 MinerU は本体と依存が両立しない（transformers / torch / requires-python が衝突）。

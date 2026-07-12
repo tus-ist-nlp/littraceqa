@@ -1,13 +1,14 @@
 # 検索 → 読解 → 不足分の再検索 を繰り返す本命エージェント。
-# 停止条件が「LLMが根拠として確認できた論文で足りているか」なので、反復が実際に回る。
-# 選ばれた根拠チャンクから Evidence も組み立てる。
-# 実行には ANTHROPIC_API_KEY が必要（未設定なら build_pipeline の時点で落ちる）。
+# verifying との差 = 「反復して検索し直すこと」の効果。
+# 共有ノブ(top_k / effort / paper_cutoff / max_papers)は比較のため他と揃えてある。
+# 実行には ANTHROPIC_API_KEY が必要。
 name: reading
-llm: { name: claude, params: { effort: high } }
+llm: { name: claude, params: { effort: medium } }
 params:
   max_steps: 3
-  top_k: 30 # サブクエリ1本あたりに引く chunk 数
-  max_candidates: 12 # LLM に読ませる論文数
-  chunks_per_paper: 2 # 1論文あたり何チャンク見せるか
-  snippet_chars: 1800 # 1チャンクあたりの文字数（200文字ではタイトルしか読めない）
-  max_papers: 10 # 最終提出の上限
+  top_k: 20
+  max_candidates: 15
+  chunks_per_paper: 2
+  snippet_chars: 1800 # 200文字ではタイトルしか読めない
+  paper_cutoff: task_family # 本数は simple と同条件に固定する
+  max_papers: 10

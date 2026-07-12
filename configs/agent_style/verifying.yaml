@@ -1,5 +1,11 @@
-# 上位候補をLLMに判定させ、順位カットオフでなく内容ベースで最終提出論文を選ぶエージェント。
-# 実行には ANTHROPIC_API_KEY が必要（未設定なら build_pipeline の時点で落ちる）。
+# 検索1回のまま、上位候補をLLMに読ませて内容ベースで論文を選ぶ。
+# simple との差 = 「LLMに選ばせること」の効果。
+# 共有ノブ(top_k / effort / paper_cutoff / max_papers)は比較のため他と揃えてある。
+# 実行には ANTHROPIC_API_KEY が必要。
 name: verifying
 llm: { name: claude, params: { effort: medium } }
-params: { top_k: 20, max_candidates: 15 }
+params:
+  top_k: 20
+  max_candidates: 15
+  paper_cutoff: task_family # 本数は simple と同条件に固定する
+  max_papers: 10

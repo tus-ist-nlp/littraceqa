@@ -1,14 +1,18 @@
-"""順位カットオフではなく、LLMによる内容判定で最終提出論文を選ぶエージェント。
+"""検索は1回のまま、上位候補をLLMに読ませて最終提出論文を選ぶエージェント。
 
 一次検索の recall が高くても、正解論文が固定カットオフより下位にいると
 単純な順位カットオフでは拾えない。このエージェントは上位候補をまとめて
 LLM に提示し、質問への根拠として本当に必要な paper_id だけを選ばせる。
+
+SimpleAgent との差＝「LLMに選ばせること」の効果。反復はしないので、ReadingAgent
+との差＝「反復して検索し直すこと」の効果になる。この引き算が成立するように、
+top_k と paper_cutoff は他のエージェントと揃えて使うこと。
 """
 
 from __future__ import annotations
 
 from litqa.agent.json_utils import parse_json_object as _parse_json_object
-from litqa.agent.task_family import CUTOFF_BY_TASK_FAMILY, TaskFamilyClassifier
+from litqa.agent.task_family import TaskFamilyClassifier, apply_paper_cutoff
 from litqa.contracts import Answer, Prediction, Query, RetrievalResult
 from litqa.llm.base import LLMClient
 from litqa.registry import register
@@ -25,11 +29,15 @@ class VerifyingAgent:
         llm: LLMClient,
         top_k: int = 20,
         max_candidates: int = 15,
+        paper_cutoff: str = "task_family",
+        max_papers: int = 10,
     ):
         self.retriever = retriever
         self.llm = llm
         self.top_k = top_k
         self.max_candidates = max_candidates
+        self.paper_cutoff = paper_cutoff
+        self.max_papers = max_papers
         self.task_family = TaskFamilyClassifier(llm)
 
     def run(self, query: Query) -> Prediction:
@@ -49,8 +57,12 @@ class VerifyingAgent:
             paper_ids = [pid for pid in judged if pid in candidate_set]
 
         if not paper_ids:
-            cutoff = CUTOFF_BY_TASK_FAMILY.get(self.task_family.infer(query))
-            paper_ids = candidate_ids[:cutoff] if cutoff is not None else candidate_ids
+            # LLM が使える判定を返さなかった場合は検索の順位のまま出す。
+            paper_ids = candidate_ids
+
+        paper_ids = apply_paper_cutoff(
+            paper_ids, query, self.task_family, self.paper_cutoff, self.max_papers
+        )
 
         return Prediction(
             query_id=query.query_id,
