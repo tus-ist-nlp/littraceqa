@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from litqa.config import compose_config
+from pathlib import Path
+
+import pytest
+import yaml
+
+import litqa.config as config_module
+from litqa.config import _build_component, compose_config
 
 
 def _paths() -> dict:
@@ -27,6 +33,57 @@ def _search() -> dict:
 
 def _agent() -> dict:
     return {"name": "simple", "params": {"top_k": 20}}
+
+
+def test_agent_configs_keep_twenty_retrieval_candidates_without_gold_count_hints():
+    config_root = Path(__file__).resolve().parents[1] / "configs" / "agent_style"
+    simple = yaml.safe_load((config_root / "simple.yaml").read_text(encoding="utf-8"))
+    verifying = yaml.safe_load(
+        (config_root / "verifying.yaml").read_text(encoding="utf-8")
+    )
+    iterative = yaml.safe_load(
+        (config_root / "iterative.yaml").read_text(encoding="utf-8")
+    )
+
+    assert simple["params"]["top_k"] == simple["params"]["max_papers"] == 20
+    assert verifying["params"]["top_k"] == verifying["params"]["max_papers"] == 20
+    assert iterative["params"]["top_k"] == iterative["params"]["max_papers"] == 20
+    assert iterative["params"]["sufficient_papers"] is None
+
+
+def test_optional_component_module_is_imported_only_when_built(monkeypatch):
+    imported: list[str] = []
+    sentinel = object()
+
+    monkeypatch.setattr(config_module.registry, "list_registered", lambda: [])
+    monkeypatch.setattr(
+        config_module.importlib,
+        "import_module",
+        lambda name: imported.append(name),
+    )
+    monkeypatch.setattr(
+        config_module.registry,
+        "build",
+        lambda kind, name, **kwargs: sentinel,
+    )
+
+    built = _build_component("preprocessor", "pypdf", pdf_dir="/tmp/pdfs")
+
+    assert built is sentinel
+    assert imported == ["litqa.preprocess.pypdf_chunker"]
+
+
+def test_optional_component_reports_the_missing_dependency(monkeypatch):
+    def fail_import(name: str):
+        raise ModuleNotFoundError(
+            "No module named 'pypdf'", name="pypdf"
+        )
+
+    monkeypatch.setattr(config_module.registry, "list_registered", lambda: [])
+    monkeypatch.setattr(config_module.importlib, "import_module", fail_import)
+
+    with pytest.raises(RuntimeError, match="missing dependency 'pypdf'"):
+        _build_component("preprocessor", "pypdf", pdf_dir="/tmp/pdfs")
 
 
 def test_compose_config_shape():
@@ -58,6 +115,51 @@ def test_index_dir_is_namespaced_by_process_name():
 
     index_dir = cfg["retriever"]["indexers"][0]["params"]["index_dir"]
     assert index_dir == "/data/index/pypdf/bm25s"
+
+
+def test_index_id_separates_variants_of_the_same_indexer():
+    search = _search()
+    search["indexers"] = [
+        {
+            "name": "bm25s",
+            "index_id": "bm25_first",
+            "params": {},
+        },
+        {
+            "name": "bm25s",
+            "index_id": "bm25_second",
+            "params": {},
+        },
+    ]
+
+    cfg = compose_config(
+        paths=_paths(),
+        process={"name": "pypdf", "params": {}},
+        search=search,
+        agent=_agent(),
+    )
+
+    index_dirs = [
+        item["params"]["index_dir"] for item in cfg["retriever"]["indexers"]
+    ]
+    assert index_dirs == [
+        "/data/index/pypdf/bm25_first",
+        "/data/index/pypdf/bm25_second",
+    ]
+
+
+@pytest.mark.parametrize("index_id", ["", ".", "..", "nested/path"])
+def test_index_id_must_be_path_safe(index_id: str):
+    search = _search()
+    search["indexers"][0]["index_id"] = index_id
+
+    with pytest.raises(ValueError, match="index_id"):
+        compose_config(
+            paths=_paths(),
+            process={"name": "pypdf", "params": {}},
+            search=search,
+            agent=_agent(),
+        )
 
 
 def test_same_search_style_with_different_process_style_does_not_collide():
@@ -106,3 +208,64 @@ def test_original_dicts_are_not_mutated():
 
     assert search["indexers"][0]["params"] == {}
     assert process["params"] == {}
+
+
+def test_mineru_uses_its_configured_source_path():
+    paths = _paths()
+    paths["mineru_root"] = "/shared/mineru"
+
+    cfg = compose_config(
+        paths=paths,
+        process={
+            "name": "mineru",
+            "path_key": "mineru_root",
+            "params": {"max_chars_per_chunk": 2000},
+        },
+        search=_search(),
+        agent=_agent(),
+    )
+
+    assert cfg["preprocessor"]["params"] == {
+        "max_chars_per_chunk": 2000,
+        "mineru_root": "/shared/mineru",
+    }
+    assert cfg["paths"]["chunks"] == "/data/chunks/mineru_chunks.jsonl"
+    assert cfg["retriever"]["indexers"][0]["params"]["index_dir"] == (
+        "/data/index/mineru/bm25s"
+    )
+
+
+def test_mineru_requires_an_explicit_root():
+    with pytest.raises(KeyError, match="mineru_root"):
+        compose_config(
+            paths=_paths(),
+            process={"name": "mineru", "path_key": "mineru_root", "params": {}},
+            search=_search(),
+            agent=_agent(),
+        )
+
+
+def test_mineru_v2_uses_a_separate_chunk_and_index_namespace():
+    paths = _paths()
+    paths["mineru_root"] = "/shared/mineru"
+
+    cfg = compose_config(
+        paths=paths,
+        process={
+            "name": "mineru_v2",
+            "source": "mineru",
+            "path_key": "mineru_root",
+            "params": {
+                "max_chars_per_chunk": 2000,
+                "content_version": "v2",
+            },
+        },
+        search=_search(),
+        agent=_agent(),
+    )
+
+    assert cfg["preprocessor"]["params"]["content_version"] == "v2"
+    assert cfg["paths"]["chunks"] == "/data/chunks/mineru_v2_chunks.jsonl"
+    assert cfg["retriever"]["indexers"][0]["params"]["index_dir"] == (
+        "/data/index/mineru_v2/bm25s"
+    )

@@ -5,16 +5,10 @@ from __future__ import annotations
 import json
 import re
 
-from litqa.agent.simple import _CUTOFF_BY_TASK_FAMILY
 from litqa.contracts import Answer, Prediction, Query, RetrievalResult
 from litqa.llm.base import LLMClient
 from litqa.registry import register
 from litqa.retrieve.hybrid import HybridRetriever, to_gold_papers
-
-_SUFFICIENT_COUNT_BY_TASK_FAMILY = {
-    "hidden_source_single_paper": 1,
-    "multi_paper": 4,
-}
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
@@ -81,7 +75,14 @@ class IterativeAgent:
         stagnation_patience: int = 1,
         dynamic_sufficiency: bool = False,
         enumeration_fanout: bool = False,
+        decompose_queries: bool = True,
+        sufficient_papers: int | None = None,
+        max_papers: int | None = None,
     ):
+        if sufficient_papers is not None and sufficient_papers <= 0:
+            raise ValueError("sufficient_papers must be positive or None")
+        if max_papers is not None and max_papers <= 0:
+            raise ValueError("max_papers must be positive or None")
         self.retriever = retriever
         self.llm = llm
         self.max_steps = max_steps
@@ -91,12 +92,15 @@ class IterativeAgent:
         self.stagnation_patience = stagnation_patience
         self.dynamic_sufficiency = dynamic_sufficiency
         self.enumeration_fanout = enumeration_fanout
+        self.decompose_queries = decompose_queries
+        self.sufficient_papers = sufficient_papers
+        self.max_papers = max_papers
 
     def run(self, query: Query) -> Prediction:
         subqueries = self._decompose(query)
 
         dynamic_threshold = None
-        if self.dynamic_sufficiency and query.task_family == "multi_paper":
+        if self.dynamic_sufficiency:
             dynamic_threshold = self._estimate_required_paper_count(query)
 
         found: dict[str, RetrievalResult] = {}
@@ -137,11 +141,9 @@ class IterativeAgent:
             subqueries = new_subqueries
 
         paper_ids = to_gold_papers(list(found.values()))
-        cutoff = (
-            dynamic_threshold
-            if dynamic_threshold is not None
-            else _CUTOFF_BY_TASK_FAMILY.get(query.task_family)
-        )
+        cutoff = dynamic_threshold if dynamic_threshold is not None else self.max_papers
+        if cutoff is not None and self.max_papers is not None:
+            cutoff = min(cutoff, self.max_papers)
         if cutoff is not None:
             paper_ids = paper_ids[:cutoff]
 
@@ -154,22 +156,20 @@ class IterativeAgent:
         )
 
     def _decompose(self, query: Query) -> list[str]:
-        if query.task_family != "multi_paper":
+        if not self.decompose_queries:
             return [query.question]
 
         if self.enumeration_fanout and _is_enumeration_or_comparison(query.question):
-            count_hint = "4〜6個"
+            count_hint = "4 to 6"
         else:
-            count_hint = "2〜4個"
+            count_hint = "2 to 4"
 
         prompt = (
-            "あなたは、研究に関する質問を、科学論文コーパスに対する検索用のサブクエリに"
-            "分解する作業を手伝っています。\n"
-            f"質問: {query.question}\n"
-            "この質問は複数の論文にまたがる根拠を必要とすると考えられます。\n"
-            f"回答に必要な論文をすべて検索できるように、{count_hint}の短く自己完結した"
-            "検索サブクエリに分解してください。\n"
-            '出力は JSON のみとし、{"subqueries": ["...", "..."]} の形式で答えてください。'
+            "Decompose the research question into short, self-contained search queries "
+            "for a scientific-paper corpus.\n"
+            f"Question: {query.question}\n"
+            f"Produce {count_hint} queries that collectively retrieve the necessary evidence.\n"
+            'Return JSON only: {"subqueries": ["...", "..."]}.'
         )
         try:
             response = self.llm(prompt)
@@ -186,9 +186,9 @@ class IterativeAgent:
 
     def _hyde(self, subquery: str) -> str:
         prompt = (
-            "次の検索クエリに直接答える、あるいはその根拠を含むような、科学論文の一節を"
-            f"想定して短く書いてください: {subquery}\n"
-            "前置きは付けず、本文のテキストのみを出力してください。"
+            "Write a short hypothetical scientific-paper passage that directly answers "
+            f"or contains evidence for this search query: {subquery}\n"
+            "Return only the passage text."
         )
         try:
             passage = self.llm(prompt)
@@ -201,22 +201,17 @@ class IterativeAgent:
     def _is_sufficient(
         self, query: Query, found: dict, override_threshold: int | None = None
     ) -> bool:
-        if override_threshold is not None:
-            threshold = override_threshold
-        else:
-            threshold = _SUFFICIENT_COUNT_BY_TASK_FAMILY.get(query.task_family)
+        threshold = override_threshold if override_threshold is not None else self.sufficient_papers
         if threshold is None:
-            return True
+            return False
         return len(found) >= threshold
 
     def _estimate_required_paper_count(self, query: Query) -> int | None:
         prompt = (
-            "あなたは、次の質問に完全に答えるために根拠として必要な、"
-            "重複のない論文の本数を見積もる作業をしています。\n"
-            f"質問: {query.question}\n"
-            "この質問は複数の論文の列挙・比較を必要とする可能性があります。\n"
-            "必要な論文数について、最善の整数の見積もりを答えてください（最小 1）。\n"
-            '出力は JSON のみとし、{"n_papers": <整数>} の形式で答えてください。'
+            "Estimate the number of distinct papers needed as evidence to answer the question.\n"
+            f"Question: {query.question}\n"
+            "Return the best integer estimate, with a minimum of 1.\n"
+            'Return JSON only: {"n_papers": <integer>}.'
         )
         try:
             response = self.llm(prompt)
@@ -242,15 +237,14 @@ class IterativeAgent:
         snippets = "\n".join(f"- paper {r.paper_id}: {r.text[:200]}" for r in ranked[:10])
         tried_text = "\n".join(f"- {sq}" for sq in dict.fromkeys(tried_subqueries))
         prompt = (
-            f"元の質問: {query.question}\n"
-            "これまでの検索で、以下の論文から根拠が見つかっています:\n"
+            f"Original question: {query.question}\n"
+            "Evidence has been found in these papers:\n"
             f"{snippets}\n"
-            "これまでに試した検索サブクエリ（同じ、または似たものを繰り返さないでください）:\n"
+            "Previously attempted search queries; do not repeat equivalent queries:\n"
             f"{tried_text}\n"
-            "これだけでは質問に十分答えられない可能性があります。上記と重複しない、別の観点からの"
-            "追加の検索サブクエリを提案してください。"
-            "これ以上検索する価値がなければ、空のリストを返してください。\n"
-            '出力は JSON のみとし、{"subqueries": ["...", "..."]} の形式で答えてください。'
+            "Propose non-overlapping search queries from a different angle. "
+            "Return an empty list if further retrieval is not useful.\n"
+            'Return JSON only: {"subqueries": ["...", "..."]}.'
         )
         try:
             response = self.llm(prompt)

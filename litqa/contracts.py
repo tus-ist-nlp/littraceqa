@@ -25,10 +25,13 @@ from dataclasses import dataclass, field
 @dataclass
 class Query:
     query_id: str
-    task_family: str  # 観測値: "hidden_source_single_paper" / "multi_paper"
-    primary_evidence_type: str  # 観測値: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
     question: str
     answer_types: list[str]
+    table_schema: list[dict] = field(default_factory=list)
+    multiple_choice_options: dict | list | None = None
+    # Legacy development labels are retained for input compatibility only.
+    task_family: str | None = None
+    primary_evidence_type: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +40,8 @@ class Query:
             "primary_evidence_type": self.primary_evidence_type,
             "question": self.question,
             "answer_types": self.answer_types,
+            "table_schema": self.table_schema,
+            "multiple_choice_options": self.multiple_choice_options,
         }
 
 

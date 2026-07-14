@@ -1,3 +1,9 @@
 name: iterative
-llm: { name: fake, params: {} }  # 実LLMクライアント実装後に差し替える
-params: { top_k: 20, max_steps: 3, use_hyde: false }
+llm: { name: fake, params: {} }  # Replace after implementing a production LLM client.
+params:
+  top_k: 20
+  max_steps: 3
+  use_hyde: false
+  decompose_queries: true
+  sufficient_papers: null
+  max_papers: 20

@@ -45,6 +45,7 @@ process_style と組み合わせても索引パスが衝突しないようにす
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -55,17 +56,40 @@ from litqa.agent.iterative import IterativeAgent  # noqa: F401
 from litqa.agent.simple import SimpleAgent  # noqa: F401
 from litqa.agent.verifying import VerifyingAgent  # noqa: F401
 from litqa.index.bm25_index import BM25Index  # noqa: F401
-from litqa.index.colbert_index import ColBERTIndex  # noqa: F401
-from litqa.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: F401
-from litqa.index.faiss_specter2 import Specter2FAISSIndex  # noqa: F401
-from litqa.index.siglip_image import SiglipImageIndex  # noqa: F401
+from litqa.index.bge_m3_index import BGEM3NumpyIndex  # noqa: F401
+from litqa.index.paper_bm25 import PaperBM25Index  # noqa: F401
 from litqa.llm.fake import FakeLLM  # noqa: F401
 from litqa.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
-from litqa.preprocess.marker_chunker import MarkerChunker  # noqa: F401
-from litqa.preprocess.pypdf_chunker import PyPDFChunker  # noqa: F401
+from litqa.preprocess.mineru_chunker import MinerUChunker  # noqa: F401
 from litqa.retrieve.hybrid import HybridRetriever
+from litqa.retrieve.paper_rank_rrf import PaperRankRRFFuser  # noqa: F401
 from litqa.retrieve.reranker import NoneReranker  # noqa: F401
 from litqa.retrieve.rrf import RRFFuser  # noqa: F401
+
+
+_LAZY_COMPONENT_MODULES = {
+    ("indexer", "colbert"): "litqa.index.colbert_index",
+    ("indexer", "faiss_qwen3"): "litqa.index.faiss_qwen3",
+    ("indexer", "faiss_specter2"): "litqa.index.faiss_specter2",
+    ("indexer", "siglip_image"): "litqa.index.siglip_image",
+    ("preprocessor", "marker"): "litqa.preprocess.marker_chunker",
+    ("preprocessor", "pypdf"): "litqa.preprocess.pypdf_chunker",
+}
+
+
+def _build_component(kind: str, name: str, **kwargs: Any) -> Any:
+    """Build one component, importing optional backends only when selected."""
+    key = (kind, name)
+    module_name = _LAZY_COMPONENT_MODULES.get(key)
+    if module_name is not None and key not in set(registry.list_registered()):
+        try:
+            importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            dependency = exc.name or "an optional dependency"
+            raise RuntimeError(
+                f"cannot build {kind}:{name}; missing dependency {dependency!r}"
+            ) from exc
+    return registry.build(kind, name, **kwargs)
 
 
 def load_config(path: str | Path) -> dict:
@@ -85,13 +109,27 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
     process_name = process["name"]
 
     preprocessor_params = dict(process.get("params", {}))
-    preprocessor_params.setdefault("pdf_dir", paths["pdf_dir"])
+    path_key = process.get("path_key", "pdf_dir")
+    if path_key not in paths and path_key not in preprocessor_params:
+        raise KeyError(
+            f"process '{process_name}' requires path '{path_key}' in paths or params"
+        )
+    if path_key in paths:
+        preprocessor_params.setdefault(path_key, paths[path_key])
 
     indexers = []
     for indexer in search["indexers"]:
         indexer_params = dict(indexer.get("params", {}))
+        index_id = indexer.get("index_id", indexer["name"])
+        if (
+            not isinstance(index_id, str)
+            or not index_id
+            or Path(index_id).name != index_id
+            or index_id in {".", ".."}
+        ):
+            raise ValueError("index_id must be a non-empty path-safe name")
         indexer_params.setdefault(
-            "index_dir", f"{paths['index_dir']}/{process_name}/{indexer['name']}"
+            "index_dir", f"{paths['index_dir']}/{process_name}/{index_id}"
         )
         indexers.append({"name": indexer["name"], "params": indexer_params})
 
@@ -114,10 +152,10 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
 def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
     """cfg から preprocessor, retriever, agent のインスタンスを組み立てる。"""
     indexers = [
-        registry.build("indexer", ix["name"], **ix.get("params", {}))
+        _build_component("indexer", ix["name"], **ix.get("params", {}))
         for ix in cfg["retriever"]["indexers"]
     ]
-    fuser = registry.build(
+    fuser = _build_component(
         "fuser",
         cfg["retriever"]["fuser"]["name"],
         **cfg["retriever"]["fuser"].get("params", {}),
@@ -126,7 +164,7 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
     reranker_cfg = cfg["retriever"].get("reranker")
     reranker = None
     if reranker_cfg:
-        reranker = registry.build(
+        reranker = _build_component(
             "reranker", reranker_cfg["name"], **reranker_cfg.get("params", {})
         )
 
@@ -141,9 +179,11 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
     llm_kwargs: dict[str, Any] = {}
     llm_cfg = agent_cfg.get("llm")
     if llm_cfg:
-        llm_kwargs["llm"] = registry.build("llm", llm_cfg["name"], **llm_cfg.get("params", {}))
+        llm_kwargs["llm"] = _build_component(
+            "llm", llm_cfg["name"], **llm_cfg.get("params", {})
+        )
 
-    agent = registry.build(
+    agent = _build_component(
         "agent",
         agent_cfg["name"],
         retriever=retriever,
@@ -154,7 +194,7 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
     preprocessor = None
     preprocessor_cfg = cfg.get("preprocessor")
     if preprocessor_cfg:
-        preprocessor = registry.build(
+        preprocessor = _build_component(
             "preprocessor", preprocessor_cfg["name"], **preprocessor_cfg.get("params", {})
         )
 

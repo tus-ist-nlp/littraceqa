@@ -57,7 +57,9 @@ def test_selects_low_ranked_candidate_that_llm_judges_relevant():
         }
     )
     llm = FakeLLM(responses=[json.dumps({"paper_ids": ["pTop", "pLow"]})])
-    agent = VerifyingAgent(retriever=retriever, llm=llm, top_k=20)
+    agent = VerifyingAgent(
+        retriever=retriever, llm=llm, top_k=20, max_papers=5
+    )
 
     prediction = agent.run(_query())
 
@@ -69,7 +71,9 @@ def test_ignores_hallucinated_paper_ids_not_in_candidates():
         {"What is X?": [_result_with_score("p1", 0.9), _result_with_score("p2", 0.5)]}
     )
     llm = FakeLLM(responses=[json.dumps({"paper_ids": ["p1", "pGhost"]})])
-    agent = VerifyingAgent(retriever=retriever, llm=llm, top_k=20)
+    agent = VerifyingAgent(
+        retriever=retriever, llm=llm, top_k=20, max_papers=5
+    )
 
     prediction = agent.run(_query())
 
@@ -80,18 +84,22 @@ def test_falls_back_to_rank_cutoff_when_llm_output_unparseable():
     papers = [_result_with_score(f"p{i}", 1.0 - i * 0.01) for i in range(10)]
     retriever = FakeRetriever({"What is X?": papers})
     llm = FakeLLM(responses=["not json at all"])
-    agent = VerifyingAgent(retriever=retriever, llm=llm, top_k=20)
+    agent = VerifyingAgent(
+        retriever=retriever, llm=llm, top_k=20, max_papers=5
+    )
 
     prediction = agent.run(_query("multi_paper"))
 
-    assert len(prediction.gold_papers) == 5  # multi_paper の固定カットオフ
+    assert len(prediction.gold_papers) == 5
 
 
 def test_falls_back_to_rank_cutoff_when_llm_selects_only_hallucinated_ids():
     papers = [_result_with_score(f"p{i}", 1.0 - i * 0.01) for i in range(10)]
     retriever = FakeRetriever({"What is X?": papers})
     llm = FakeLLM(responses=[json.dumps({"paper_ids": ["pGhost"]})])
-    agent = VerifyingAgent(retriever=retriever, llm=llm, top_k=20)
+    agent = VerifyingAgent(
+        retriever=retriever, llm=llm, top_k=20, max_papers=5
+    )
 
     prediction = agent.run(_query("multi_paper"))
 
@@ -101,11 +109,30 @@ def test_falls_back_to_rank_cutoff_when_llm_selects_only_hallucinated_ids():
 def test_falls_back_to_rank_cutoff_when_llm_raises():
     papers = [_result_with_score(f"p{i}", 1.0 - i * 0.01) for i in range(3)]
     retriever = FakeRetriever({"What is X?": papers})
-    agent = VerifyingAgent(retriever=retriever, llm=RaisingLLM(), top_k=20)
+    agent = VerifyingAgent(
+        retriever=retriever, llm=RaisingLLM(), top_k=20, max_papers=2
+    )
 
     prediction = agent.run(_query("hidden_source_single_paper"))
 
-    assert len(prediction.gold_papers) == 2  # hidden_source_single_paper の固定カットオフ
+    assert len(prediction.gold_papers) == 2
+
+
+def test_legacy_task_family_does_not_change_configured_cutoff():
+    papers = [_result_with_score(f"p{i}", 1.0 - i * 0.01) for i in range(6)]
+    retriever = FakeRetriever({"What is X?": papers})
+    agent = VerifyingAgent(
+        retriever=retriever,
+        llm=RaisingLLM(),
+        top_k=20,
+        max_papers=3,
+    )
+
+    single = agent.run(_query("hidden_source_single_paper"))
+    multi = agent.run(_query("multi_paper"))
+
+    assert len(single.gold_papers) == 3
+    assert len(multi.gold_papers) == 3
 
 
 def test_no_candidates_returns_empty_prediction():

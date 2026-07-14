@@ -14,6 +14,7 @@ dependencies = [
     "torch>=2.11.0,<2.12",
     "bm25s>=0.3.9",
     "faiss-cpu",
+    "sentence-transformers==5.3.0",
     "peft",
     "pylate",
 ]
@@ -40,9 +41,11 @@ include = ["litqa*"]
 
 [tool.uv]
 package = true
-# pytorch cu121 index が requests 等の無関係なパッケージも古いバージョンで
-# 提供してしまい、first-index-match だと解決不能になるため best-match にする。
-index-strategy = "unsafe-best-match"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [[tool.uv.index]]
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

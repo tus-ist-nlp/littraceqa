@@ -1,0 +1,8 @@
+name: mineru
+source: mineru
+bounded_build: true
+max_workers: 1
+path_key: mineru_root
+params:
+  max_chars_per_chunk: 2000
+  content_version: v1

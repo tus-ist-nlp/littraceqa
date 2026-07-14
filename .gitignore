@@ -6,6 +6,10 @@ __pycache__/
 # uv cache
 .uv/
 
+# Local Codex working notes
+/codex.md
+/paper_ids_200.txt
+
 # setuptools build metadata
 *.egg-info/
 

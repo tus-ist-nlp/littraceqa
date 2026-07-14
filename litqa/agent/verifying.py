@@ -8,7 +8,6 @@ LLM に提示し、質問への根拠として本当に必要な paper_id だけ
 from __future__ import annotations
 
 from litqa.agent.iterative import _parse_json_object
-from litqa.agent.simple import _CUTOFF_BY_TASK_FAMILY
 from litqa.contracts import Answer, Prediction, Query, RetrievalResult
 from litqa.llm.base import LLMClient
 from litqa.registry import register
@@ -25,11 +24,15 @@ class VerifyingAgent:
         llm: LLMClient,
         top_k: int = 20,
         max_candidates: int = 15,
+        max_papers: int | None = None,
     ):
+        if max_papers is not None and max_papers <= 0:
+            raise ValueError("max_papers must be positive or None")
         self.retriever = retriever
         self.llm = llm
         self.top_k = top_k
         self.max_candidates = max_candidates
+        self.max_papers = max_papers
 
     def run(self, query: Query) -> Prediction:
         results = self.retriever.retrieve(query.question, self.top_k)
@@ -48,8 +51,13 @@ class VerifyingAgent:
             paper_ids = [pid for pid in judged if pid in candidate_set]
 
         if not paper_ids:
-            cutoff = _CUTOFF_BY_TASK_FAMILY.get(query.task_family)
-            paper_ids = candidate_ids[:cutoff] if cutoff is not None else candidate_ids
+            paper_ids = (
+                candidate_ids[: self.max_papers]
+                if self.max_papers is not None
+                else candidate_ids
+            )
+        elif self.max_papers is not None:
+            paper_ids = paper_ids[: self.max_papers]
 
         return Prediction(
             query_id=query.query_id,
@@ -73,14 +81,13 @@ class VerifyingAgent:
             f"- {pid}: {snippets_by_paper.get(pid, '')}" for pid in candidate_ids
         )
         prompt = (
-            "あなたは、検索候補の論文一覧から、質問への回答の根拠として本当に必要な論文だけを"
-            "選び出す作業をしています。\n"
-            f"質問: {query.question}\n"
-            "検索候補（関連度が高い順）:\n"
+            "Select only the papers that are necessary evidence for answering the question.\n"
+            f"Question: {query.question}\n"
+            "Candidates in retrieval order:\n"
             f"{listing}\n"
-            "この中から、質問に答えるために根拠として必要な論文の paper_id だけを、"
-            "過不足なく選んでください。候補一覧に無い paper_id を作り出さないでください。\n"
-            '出力は JSON のみとし、{"paper_ids": ["...", "..."]} の形式で答えてください。'
+            "Return the paper_id values needed to answer the question. "
+            "Never invent an ID outside the candidate list.\n"
+            'Return JSON only: {"paper_ids": ["...", "..."]}.'
         )
         try:
             response = self.llm(prompt)

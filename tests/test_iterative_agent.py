@@ -63,7 +63,14 @@ def _query(task_family: str, question: str = "What is X?") -> Query:
 def test_single_paper_skips_decompose_and_stops_after_first_hit():
     retriever = FakeRetriever({"What is X?": [_result("p1")]})
     llm = FakeLLM(responses=["should not be used"])
-    agent = IterativeAgent(retriever=retriever, llm=llm, max_steps=3, top_k=20)
+    agent = IterativeAgent(
+        retriever=retriever,
+        llm=llm,
+        max_steps=3,
+        top_k=20,
+        decompose_queries=False,
+        sufficient_papers=1,
+    )
 
     prediction = agent.run(_query("hidden_source_single_paper"))
 
@@ -86,7 +93,14 @@ def test_multi_paper_iterates_until_sufficient():
             json.dumps({"subqueries": ["q3"]}),
         ]
     )
-    agent = IterativeAgent(retriever=retriever, llm=llm, max_steps=3, top_k=20)
+    agent = IterativeAgent(
+        retriever=retriever,
+        llm=llm,
+        max_steps=3,
+        top_k=20,
+        sufficient_papers=4,
+        max_papers=5,
+    )
 
     prediction = agent.run(_query("multi_paper"))
 
@@ -131,18 +145,24 @@ def test_stops_when_no_new_papers_found():
 
 
 @pytest.mark.parametrize(
-    "task_family,cutoff",
+    "task_family,max_papers",
     [("hidden_source_single_paper", 2), ("multi_paper", 5)],
 )
-def test_cutoff_by_task_family(task_family, cutoff):
+def test_cutoff_is_configured_independently_of_legacy_task_family(task_family, max_papers):
     papers = [_result(f"p{i}") for i in range(10)]
     retriever = FakeRetriever({"What is X?": papers})
     llm = FakeLLM(responses=[json.dumps({"subqueries": []})])
-    agent = IterativeAgent(retriever=retriever, llm=llm, max_steps=1, top_k=20)
+    agent = IterativeAgent(
+        retriever=retriever,
+        llm=llm,
+        max_steps=1,
+        top_k=20,
+        max_papers=max_papers,
+    )
 
     prediction = agent.run(_query(task_family))
 
-    assert len(prediction.gold_papers) == cutoff
+    assert len(prediction.gold_papers) == max_papers
 
 
 def test_stagnation_patience_tolerates_one_zero_growth_step():
@@ -166,6 +186,7 @@ def test_stagnation_patience_tolerates_one_zero_growth_step():
         max_steps=3,
         top_k=20,
         stagnation_patience=2,
+        sufficient_papers=4,
     )
 
     prediction = agent.run(_query("multi_paper"))
@@ -263,7 +284,11 @@ def test_dynamic_sufficiency_overrides_fixed_threshold():
         ]
     )
     agent = IterativeAgent(
-        retriever=retriever, llm=llm, max_steps=3, top_k=20, dynamic_sufficiency=True
+        retriever=retriever,
+        llm=llm,
+        max_steps=3,
+        top_k=20,
+        dynamic_sufficiency=True,
     )
 
     prediction = agent.run(_query("multi_paper"))
@@ -273,11 +298,7 @@ def test_dynamic_sufficiency_overrides_fixed_threshold():
     assert {g["paper_id"] for g in prediction.gold_papers} == {"p1", "p2"}
 
 
-def test_dynamic_sufficiency_estimate_also_raises_final_cutoff():
-    """見積もり本数が固定カットオフ(multi_paper=5)を超える場合、最終提出も見積もりに従うべき
-
-    (以前は反復停止の判定にしか使われず、最終提出は固定5件で切り捨てられていた)。
-    """
+def test_dynamic_sufficiency_estimate_uses_configured_maximum():
     retriever = FakeRetriever({"q1": [_result(f"p{i}") for i in range(6)]})
     llm = FakeLLM(
         responses=[
@@ -286,7 +307,12 @@ def test_dynamic_sufficiency_estimate_also_raises_final_cutoff():
         ]
     )
     agent = IterativeAgent(
-        retriever=retriever, llm=llm, max_steps=3, top_k=20, dynamic_sufficiency=True
+        retriever=retriever,
+        llm=llm,
+        max_steps=3,
+        top_k=20,
+        dynamic_sufficiency=True,
+        max_papers=6,
     )
 
     prediction = agent.run(_query("multi_paper"))
@@ -294,7 +320,7 @@ def test_dynamic_sufficiency_estimate_also_raises_final_cutoff():
     assert len(prediction.gold_papers) == 6
 
 
-def test_dynamic_sufficiency_falls_back_to_fixed_dict_on_unparseable_estimate():
+def test_dynamic_sufficiency_falls_back_to_configured_threshold():
     retriever = FakeRetriever(
         {
             "q1": [_result("p1")],
@@ -309,13 +335,46 @@ def test_dynamic_sufficiency_falls_back_to_fixed_dict_on_unparseable_estimate():
         ]
     )
     agent = IterativeAgent(
-        retriever=retriever, llm=llm, max_steps=3, top_k=20, dynamic_sufficiency=True
+        retriever=retriever,
+        llm=llm,
+        max_steps=3,
+        top_k=20,
+        dynamic_sufficiency=True,
+        sufficient_papers=4,
     )
 
     prediction = agent.run(_query("multi_paper"))
 
-    # 固定辞書(multi_paper=4)にフォールバックしたため、2件では不十分と判定して refine まで呼ばれる
+    # The configured threshold keeps two papers from ending the search early.
     assert len(llm.calls) == 3
+    assert {g["paper_id"] for g in prediction.gold_papers} == {"p1", "p2"}
+
+
+def test_no_fixed_sufficiency_threshold_uses_stagnation_instead():
+    retriever = FakeRetriever(
+        {
+            "q1": [_result("p1")],
+            "q2": [_result("p2")],
+        }
+    )
+    llm = FakeLLM(
+        responses=[
+            json.dumps({"subqueries": ["q1"]}),
+            json.dumps({"subqueries": ["q2"]}),
+            json.dumps({"subqueries": []}),
+        ]
+    )
+    agent = IterativeAgent(
+        retriever=retriever,
+        llm=llm,
+        max_steps=3,
+        top_k=20,
+        sufficient_papers=None,
+    )
+
+    prediction = agent.run(_query("multi_paper"))
+
+    assert len(prediction.trace) == 2
     assert {g["paper_id"] for g in prediction.gold_papers} == {"p1", "p2"}
 
 
@@ -342,7 +401,7 @@ def test_enumeration_fanout_widens_subquery_count_hint_in_prompt():
 
     agent.run(_query("multi_paper", question="Which papers propose contrastive pretraining?"))
 
-    assert "4〜6" in llm.calls[0]
+    assert "4 to 6" in llm.calls[0]
 
 
 def test_enumeration_fanout_off_by_default_keeps_original_hint():
@@ -352,4 +411,4 @@ def test_enumeration_fanout_off_by_default_keeps_original_hint():
 
     agent.run(_query("multi_paper", question="Which papers propose contrastive pretraining?"))
 
-    assert "2〜4" in llm.calls[0]
+    assert "2 to 4" in llm.calls[0]

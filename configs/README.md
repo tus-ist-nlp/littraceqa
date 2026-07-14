@@ -1,83 +1,94 @@
 # configs/ の使い方
 
-## コンセプト
+## 構成
 
-前処理・検索手法・エージェント・共有パスは、それぞれ独立に差し替え可能な4つの軸として分離されている。
-1つのyamlに全部まとめず、**4フォルダから1ファイルずつ選んで組み合わせて使う**。
+前処理・検索・エージェント・環境パスを独立したYAMLとして管理します。
 
-```
+```text
 configs/
-├── paths/           共有パス（pdf_dir, index_dirのルート等）
-├── process_style/    前処理（Preprocessor）
-├── search_style/     検索手法（Indexer群 + Fuser + Reranker）
-└── agent_style/       エージェント（Agent）
+├── paths/          実行環境の入力・出力root
+├── process_style/  Preprocessor
+├── search_style/   Indexer、Fuser、Reranker
+└── agent_style/    Agentと任意のLLM
 ```
 
-これは `litqa/` 側のDI設計（`registry.py` で `@register(kind, name)` したクラスを
-`registry.build(kind, name, **params)` で組み立てる仕組み）をそのままconfigの
-ファイル単位に反映したもの。`litqa/config.py` の `compose_config()` が4つの
-dictを合成し、`build_pipeline()` に渡す。
+`litqa/config.py`の`compose_config()`が4つの設定を合成します。同じ検索方式を別の
+前処理へ適用しても、Chunkと索引はprocess名ごとのnamespaceへ分離されます。
+環境や利用者ごとに変わる絶対パスはprocess/search YAMLへ書かず、paths YAML、
+環境変数、またはCLI引数で渡してください。
 
-## なぜ分けているか
+## 現在の比較に使う設定
 
-- **本文チャンク(pypdf)を図表チャンク(figure_vlm)に差し替えても、検索手法やエージェントの設定を書き直さなくていい**
-- **同じ検索手法(search_style)を別の前処理(process_style)と組み合わせても、索引の保存先が衝突しない**
-  - `process_style`/`search_style` のファイルには `pdf_dir`/`index_dir` を書かない
-  - `compose_config()` が `paths` から `{index_dir}/{process名}/{indexer名}` のように自動導出する
-  - 例: `pypdf + bm25s` → `index/pypdf/bm25s`、`figure_vlm + bm25s` → `index/figure_vlm/bm25s`（別物として保存される）
-- 新しい手法を1つ追加したいだけなのに、既存の組み合わせファイルを全部複製・修正する必要がない
+前処理:
 
-## 使い方
+- `pypdf.yaml`: PDF本文をページ単位で抽出
+- `marker.yaml`: Markerで本文・図・表・数式を抽出
+- `figure_vlm.yaml`: 図表画像と説明を抽出
+- `mineru.yaml`: 既存MinerU `content_list.json`を読み込むv1
+- `mineru_v2.yaml`: ページ単位の`content_list_v2.json`を読み込むv2
+
+検索:
+
+- `bm25.yaml`: 共通ChunkのBM25
+- `bm25_paper_rank_rrf_fill_to_top_k.yaml`: Chunk BM25と論文単位BM25を
+  paper ID単位で融合する、モデル不要のbaseline
+- `bge_m3_title_abstract.yaml`: 1論文1件の`title_abstract`をBGE-M3で検索
+- `bm25_paper_bge_m3_rrf.yaml`: BM25、論文単位BM25、BGE-M3をPaperRank RRFで融合
+
+BGE-M3は固定revisionを`local_files_only: true`で読みます。cloneや`uv sync`では
+snapshotを取得しないため、利用者が外部パスまたはローカルmodel cacheへ準備する
+必要があります。
+
+## MinerUを1〜3論文で確認する
 
 ```bash
+export MINERU_ROOT=/path/to/read-only/mineru
+export READ_ONLY_ROOT=/path/to/read-only-data
+export ARTIFACT_ROOT="$HOME/littraceqa_data/mineru_eval/smoke"
+
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
-  --process configs/process_style/pypdf.yaml \
-  --search configs/search_style/bm25_qwen3.yaml \
+  --process configs/process_style/mineru.yaml \
+  --search configs/search_style/bm25_paper_rank_rrf_fill_to_top_k.yaml \
   --agent configs/agent_style/simple.yaml \
   --queries data/validation_inputs.jsonl \
-  --output predictions.jsonl \
-  --build   # 初回のみ（前処理+索引構築）。2回目以降は外す
+  --output "$ARTIFACT_ROOT/predictions.jsonl" \
+  --gold data/validation.jsonl \
+  --build \
+  --mineru-root "$MINERU_ROOT" \
+  --artifact-root "$ARTIFACT_ROOT" \
+  --read-only-root "$READ_ONLY_ROOT" \
+  --paper-id <paper-id-1> \
+  --paper-id <paper-id-2> \
+  --limit 2 \
+  --workers 1 \
+  --batch-size 1 \
+  --resume
 ```
 
-組み合わせを変えたいときは、該当する引数だけ差し替える。他の3つはそのままでよい。
+v2を比較する場合は、他の条件を変えず`--process`だけを
+`configs/process_style/mineru_v2.yaml`へ変更し、別の`ARTIFACT_ROOT`を使います。
+少数論文のsmoke testは変換と接続の確認であり、検索精度の主張には使いません。
 
-```bash
-# 検索手法だけColBERTに変える
-  --search configs/search_style/bm25_colbert.yaml
+## Bounded buildとresume
 
-# 前処理を図表チャンク(figure_vlm)に変える
-  --process configs/process_style/figure_vlm.yaml
-```
+現在のrunnerは次の制約を持ちます。
 
-4フォルダのファイルはどう組み合わせても壊れない設計なので、新しいyamlを
-書く必要があるのは「まだ存在しない前処理・検索手法・エージェント自体」を
-追加するときだけ。
+- build時は正の`--limit`が必須
+- 最大200論文まで。全件実行は拒否
+- workerとbatch sizeの既定値は1
+- `--artifact-root`は読み取り専用入力の外側に置く
+- 論文ごとにChunk shardとstateを保存
+- 設定、コード、依存版、入力checksumが一致するときだけresume
+- 失敗したpaper IDを記録し、他の論文は続行
 
-## 現在のファイル一覧
+`--resume`でも入力checksum確認の読み取りI/Oは発生します。全コーパスへ広げる前に、
+増分索引、shard、容量制限、CPU・メモリ制限を設計してください。
 
-```
-configs/
-├── paths/
-│   └── default.yaml
-├── process_style/
-│   ├── pypdf.yaml            : PDFをページ単位でチャンク化
-│   └── figure_vlm.yaml       : Docling+Qwen2-VLで図表をチャンク化
-├── search_style/
-│   ├── bm25.yaml             : BM25 単体
-│   ├── bm25_qwen3.yaml       : BM25 + Qwen3-Embedding-8B（デフォルト）
-│   ├── bm25_colbert.yaml     : BM25 + ColBERT
-│   ├── bm25_specter2.yaml    : BM25 + SPECTER2
-│   └── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding）
-└── agent_style/
-    ├── simple.yaml           : 1回検索して終わり（LLM不使用）
-    └── iterative.yaml        : 見てから次を決める反復検索（LLM使用）
-```
+## 公平な比較
 
-推奨デフォルトの組み合わせ: `process_style/pypdf.yaml` + `search_style/bm25_qwen3.yaml` + `agent_style/simple.yaml`
-
-## 新しい手法を追加するとき
-
-新しい Indexer / Preprocessor / Agent を実装したら、対応するフォルダに
-設定ファイルを1つ追加する。詳しいルールは `CLAUDE.md` の
-「検索手法を追加するときのルール」を参照。
+前処理または検索方式以外は固定します。少なくとも、paper集合、質問、BGE revision、
+Chunk長、候補深さ、RRFの`k`、最終cutoff、評価コードを揃えます。gold annotationは
+検索終了後の評価段階だけで読み、`task_family`と`primary_evidence_type`を検索に
+使用しません。評価方法は[search_style/README.md](search_style/README.md)を
+参照してください。
