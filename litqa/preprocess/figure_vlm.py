@@ -1,6 +1,6 @@
 """Docling で PDF から図・表を抽出し、Qwen2-VL で検索用の記述文を生成する Preprocessor。
 
-本文チャンク（pypdf 等）とは独立に、図・表の Chunk のみを返す。本文チャンクとの
+本文チャンク（marker 等）とは独立に、図・表の Chunk のみを返す。本文チャンクとの
 結合は scripts/merge_chunks.py で行う。
 
 抽出した図・表の画像は metadata["image_path"] にファイルパスとして保存する。

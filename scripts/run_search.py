@@ -7,9 +7,9 @@
     # 初回: 前処理 + 索引構築をしてから検索
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
-      --process configs/process_style/pypdf.yaml \\
-      --search configs/search_style/bm25_qwen3.yaml \\
-      --agent configs/agent_style/simple.yaml \\
+      --process configs/process_style/mineru.yaml \\
+      --search configs/search_style/abstract_specter2_body_qwen3.yaml \\
+      --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl \\
       --build
@@ -17,9 +17,9 @@
     # 2回目以降: 既存の索引を読み込んで検索
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
-      --process configs/process_style/pypdf.yaml \\
-      --search configs/search_style/bm25_qwen3.yaml \\
-      --agent configs/agent_style/simple.yaml \\
+      --process configs/process_style/mineru.yaml \\
+      --search configs/search_style/abstract_specter2_body_qwen3.yaml \\
+      --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl
 """

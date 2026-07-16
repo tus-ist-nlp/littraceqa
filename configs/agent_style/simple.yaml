@@ -1,8 +1,0 @@
-# 1回だけ検索して上位を返す最小構成のエージェント。
-# 本番入力には task_family が無いため、返す論文数(cutoff)は question から推定する。
-# llm を与えると LLM で推定し、与えなければヒューリスティックにフォールバックする。
-# ヒューリスティックは検証55件で正解率0.67（多数決ベースライン0.53）しか出ないので、
-# LLM を使いたい場合は次の行を有効にする（.env の AZURE_OPENAI_* が必要）。
-#   llm: { name: azure_openai, params: { reasoning_effort: low } }
-name: simple
-params: { top_k: 20 }

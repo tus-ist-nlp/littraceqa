@@ -1,10 +1,10 @@
 """Marker(marker-pdf) で PDF を構造保持したまま変換し、ブロック種別ごとに Chunk 化する
 
-Preprocessor。pypdf(平坦テキスト抽出)と違い、図・表・数式をブロック単位のまま
+Preprocessor。ページ単位の平坦テキスト抽出と違い、図・表・数式をブロック単位のまま
 (キャプション統合済み)保持できるため、根拠の質(特に数式・図・表)の向上を狙う。
 
 Marker の ChunkOutput.blocks の page は 0-indexed だが、litqa の既存規約
-(pypdf_chunker, gold の evidence.locator.page)は1-indexedなので +1 して変換する。
+(gold の evidence.locator.page)は1-indexedなので +1 して変換する。
 """
 
 from __future__ import annotations

@@ -11,9 +11,9 @@ compose_config() で組み合わせる（詳細は CLAUDE.md 参照）。
       index_dir: /data2/littraceqa/index
       paper_metadata: data/paper_metadata.jsonl
 
-    configs/process_style/pypdf.yaml:
-      name: pypdf
-      params: { max_chars_per_chunk: 2000 }
+    configs/process_style/marker.yaml:
+      name: marker
+      params: { force_ocr: true, use_llm: false }
 
     configs/search_style/bm25_qwen3.yaml:
       per_index_k: 100
@@ -27,9 +27,10 @@ compose_config() で組み合わせる（詳細は CLAUDE.md 参照）。
         name: none
         params: {}
 
-    configs/agent_style/simple.yaml:
-      name: simple
-      params: { top_k: 20 }
+    configs/agent_style/reading.yaml:
+      name: reading
+      llm: { name: azure_openai, params: { reasoning_effort: medium } }
+      params: { top_k: 20, max_steps: 3 }
 
     # LLM を使うエージェント（例: iterative）は agent.llm で構築するクライアントを指定する:
     #   name: iterative
@@ -68,7 +69,6 @@ from litqa.llm.fake import FakeLLM  # noqa: F401
 from litqa.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
 from litqa.preprocess.marker_chunker import MarkerChunker  # noqa: F401
 from litqa.preprocess.mineru_chunker import MinerUChunker  # noqa: F401
-from litqa.preprocess.pypdf_chunker import PyPDFChunker  # noqa: F401
 from litqa.retrieve.hybrid import HybridRetriever
 from litqa.retrieve.reranker import NoneReranker  # noqa: F401
 from litqa.retrieve.rrf import RRFFuser  # noqa: F401

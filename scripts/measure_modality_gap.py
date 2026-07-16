@@ -11,9 +11,9 @@ reading（読み取り）ができていないからか」を切り分けるた�
 使い方:
     uv run python scripts/measure_modality_gap.py \\
       --paths configs/paths/default.yaml \\
-      --process configs/process_style/pypdf.yaml \\
-      --search configs/search_style/bm25_qwen3.yaml \\
-      --agent configs/agent_style/simple.yaml \\
+      --process configs/process_style/mineru.yaml \\
+      --search configs/search_style/abstract_specter2_body_qwen3.yaml \\
+      --agent configs/agent_style/reading.yaml \\
       --gold data/validation.jsonl \\
       --output results_modality.md
 """

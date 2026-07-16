@@ -30,38 +30,38 @@ def _agent() -> dict:
 def test_compose_config_shape():
     cfg = compose_config(
         paths=_paths(),
-        process={"name": "pypdf", "params": {"max_chars_per_chunk": 2000}},
+        process={"name": "marker", "params": {"max_chars_per_chunk": 2000}},
         search=_search(),
         agent=_agent(),
     )
 
     assert cfg["preprocessor"] == {
-        "name": "pypdf",
+        "name": "marker",
         "params": {"max_chars_per_chunk": 2000, "pdf_dir": "/data/pdfs"},
     }
     assert cfg["retriever"]["per_index_k"] == 100
     assert cfg["retriever"]["fuser"] == _search()["fuser"]
     assert cfg["retriever"]["reranker"] == _search()["reranker"]
     assert cfg["agent"] == _agent()
-    assert cfg["paths"]["chunks"] == "/data/chunks/pypdf_chunks.jsonl"
+    assert cfg["paths"]["chunks"] == "/data/chunks/marker_chunks.jsonl"
 
 
 def test_index_dir_is_namespaced_by_process_name():
     cfg = compose_config(
         paths=_paths(),
-        process={"name": "pypdf", "params": {}},
+        process={"name": "marker", "params": {}},
         search=_search(),
         agent=_agent(),
     )
 
     index_dir = cfg["retriever"]["indexers"][0]["params"]["index_dir"]
-    assert index_dir == "/data/index/pypdf/bm25s"
+    assert index_dir == "/data/index/marker/bm25s"
 
 
 def test_same_search_style_with_different_process_style_does_not_collide():
-    pypdf_cfg = compose_config(
+    marker_cfg = compose_config(
         paths=_paths(),
-        process={"name": "pypdf", "params": {}},
+        process={"name": "marker", "params": {}},
         search=_search(),
         agent=_agent(),
     )
@@ -72,17 +72,17 @@ def test_same_search_style_with_different_process_style_does_not_collide():
         agent=_agent(),
     )
 
-    pypdf_index_dir = pypdf_cfg["retriever"]["indexers"][0]["params"]["index_dir"]
+    marker_index_dir = marker_cfg["retriever"]["indexers"][0]["params"]["index_dir"]
     figure_index_dir = figure_cfg["retriever"]["indexers"][0]["params"]["index_dir"]
 
-    assert pypdf_index_dir != figure_index_dir
-    assert pypdf_cfg["paths"]["chunks"] != figure_cfg["paths"]["chunks"]
+    assert marker_index_dir != figure_index_dir
+    assert marker_cfg["paths"]["chunks"] != figure_cfg["paths"]["chunks"]
 
 
 def test_explicit_pdf_dir_and_index_dir_override_auto_derivation():
     cfg = compose_config(
         paths=_paths(),
-        process={"name": "pypdf", "params": {"pdf_dir": "/custom/pdfs"}},
+        process={"name": "marker", "params": {"pdf_dir": "/custom/pdfs"}},
         search={
             "per_index_k": 100,
             "indexers": [{"name": "bm25s", "params": {"index_dir": "/custom/index"}}],
@@ -98,7 +98,7 @@ def test_explicit_pdf_dir_and_index_dir_override_auto_derivation():
 
 def test_original_dicts_are_not_mutated():
     search = _search()
-    process = {"name": "pypdf", "params": {}}
+    process = {"name": "marker", "params": {}}
 
     compose_config(paths=_paths(), process=process, search=search, agent=_agent())
 

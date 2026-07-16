@@ -60,9 +60,9 @@ title+abstract で学習された**論文単位**のモデルなので、本文�
 ```
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
-  --process configs/process_style/pypdf.yaml \
-  --search configs/search_style/bm25_qwen3.yaml \
-  --agent configs/agent_style/simple.yaml \
+  --process configs/process_style/mineru.yaml \
+  --search configs/search_style/abstract_specter2_body_qwen3.yaml \
+  --agent configs/agent_style/reading.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions.jsonl \
   --build
@@ -72,8 +72,10 @@ uv run python scripts/run_search.py \
 新しい手法をデフォルト（推奨組み合わせ）にする場合は、この節の記載を更新する。
 ablation 用なら触らない。
 
-現在のデフォルト: `process_style/pypdf.yaml` + `search_style/bm25_qwen3.yaml`
-+ `agent_style/simple.yaml`（pypdf + BM25 + Qwen3-Embedding-8B + SimpleAgent）
+現在のデフォルト: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml`
++ `agent_style/reading.yaml`（MinerU + BM25 + SPECTER2(title_abstract) + Qwen3-Embedding-0.6B(本文) + ReadingAgent）。
+27,489件分の chunks・索引（`bm25s` / `faiss_specter2_abstract` / `faiss_qwen3_0p6b`）が
+構築済みで、`--build` なしですぐ検索できる。
 
 ### 3. configs/ のディレクトリ構成
 現在の構成:
@@ -82,21 +84,20 @@ configs/
 ├── paths/
 │   └── default.yaml
 ├── process_style/
-│   ├── pypdf.yaml
 │   ├── marker.yaml
-│   ├── mineru.yaml          : MinerU。事前に scripts/run_mineru.py で変換が必要
+│   ├── mineru.yaml          : MinerU。事前に scripts/run_mineru.py で変換が必要（デフォルト、構築済み）
 │   └── figure_vlm.yaml
 ├── search_style/
 │   ├── bm25.yaml            : BM25 単体
-│   ├── bm25_qwen3.yaml      : BM25 + Qwen3-Embedding-8B（デフォルト）
+│   ├── bm25_qwen3.yaml      : BM25 + Qwen3-Embedding-8B
 │   ├── bm25_colbert.yaml    : BM25 + ColBERT
-│   ├── bm25_specter2.yaml   : BM25 + SPECTER2
-│   └── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding、ablation用）
+│   ├── bm25_specter2.yaml   : BM25 + SPECTER2（全チャンク版）
+│   ├── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding、ablation用）
+│   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) + Qwen3-Embedding-0.6B(本文のみ)。
+│         各モデルを設計どおりの粒度で使う3索引構成（デフォルト、構築済み）
 └── agent_style/
-    ├── simple.yaml       : 検索して本数で切るだけ。LLM不要。素の検索性能のベースライン
     ├── iterative.yaml    : multi_paper のときだけクエリ分解。※反復ループは空回りする（下記）
-    ├── verifying.yaml    : 上位候補をLLMに読ませ、内容ベースで論文を選ぶ（反復なし）
-    ├── reading.yaml      : 分解→読解→不足分の再検索を繰り返す本命。evidence も埋める
+    ├── reading.yaml      : 分解→読解→不足分の再検索を繰り返す本命。evidence も埋める（デフォルト）
     └── reading_llmcount.yaml : reading から paper_cutoff だけ変えた ablation
 ```
 
@@ -123,7 +124,8 @@ configs/
 `answer_types` / `table_schema` の4つだけ）。`task_family` は提出本数を決めるのに使うので、
 与えたまま評価すると「正解を教えてもらった状態」の点数になり本番と乖離する。
 
-差分を取ると効果が分解できる:
+差分を取ると効果が分解できる（`simple` / `verifying` は config を削除済みなので、
+再現するには git history から復元するか同等の agent_style を作り直す）:
 
 | 比較 | 分かること |
 |---|---|

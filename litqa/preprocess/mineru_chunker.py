@@ -9,7 +9,7 @@ PDF の変換自体はここでは行わない。MinerU は本体と依存が両
     .venv-mineru/bin/python scripts/run_mineru.py --paths configs/paths/default.yaml --gpus 0,1,2,3
 
 content_list.json は本文・見出し・数式・表・図をブロック単位で持ち、各ブロックに
-page_idx が付く。pypdf(ページ内をサイズで機械的に割る)と違い、以下ができる。
+page_idx が付く。ページ内をサイズで機械的に割るだけの単純な抽出と違い、以下ができる。
 
 * 見出し(text_level)を節として引き継ぎ、本文を節・ページ単位でまとめる。
 * 数式は LaTeX(``$$...$$``)のまま本文の読み順に埋め込む。数式だけのチャンクは
@@ -18,8 +18,8 @@ page_idx が付く。pypdf(ページ内をサイズで機械的に割る)と違�
   付けた equation_algorithm チャンクを別途立てる。
 * 表は table_body(HTML)を Markdown に、図は caption を本文にする。
 
-MinerU の page_idx は 0-indexed だが、litqa の既存規約(pypdf_chunker,
-gold の evidence.locator.page)は 1-indexed なので +1 して変換する。
+MinerU の page_idx は 0-indexed だが、litqa の既存規約(gold の
+evidence.locator.page)は 1-indexed なので +1 して変換する。
 """
 
 from __future__ import annotations
