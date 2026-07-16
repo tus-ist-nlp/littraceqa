@@ -31,6 +31,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from litqa.contracts import Chunk, RetrievalResult
+from litqa.index.chunk_filter import filter_chunk_types
 from litqa.registry import register
 
 _CHUNKS_FILENAME = "chunks.jsonl"
@@ -51,6 +52,7 @@ class Specter2FAISSIndex:
         batch_size: int = 128,
         device: str = "cuda",
         fp16: bool = True,
+        chunk_types: list[str] | None = None,
         doc_adapter: str = "proximity",
         query_adapter: str = "adhoc_query",
         doc_adapter_id: str = "allenai/specter2",
@@ -61,6 +63,11 @@ class Specter2FAISSIndex:
         self.model_name = model
         self.batch_size = batch_size
         self.device = device
+        # 索引に入れる chunk_type を絞る。None なら全部。
+        # SPECTER2 は proximity アダプタが title+abstract 前提の「論文単位」モデルなので、
+        # chunk_types: [title_abstract] にすると設計どおりの使い方になる。
+        # 本文チャンクを個別に埋め込むのは学習時の入力分布から外れる。
+        self.chunk_types = chunk_types
         # 埋め込みはどうせ L2 正規化するので fp16 でも精度への影響は無視できる。
         # RTX 3090 実測で fp32 134 chunks/s に対し fp16 476 chunks/s（約3.6倍）。
         self.fp16 = fp16 and device.startswith("cuda")
@@ -75,7 +82,12 @@ class Specter2FAISSIndex:
         self._chunks: list[Chunk] = []
 
     def build(self, chunks: Iterable[Chunk]) -> None:
-        self._chunks = list(chunks)
+        self._chunks = filter_chunk_types(chunks, self.chunk_types)
+        if not self._chunks:
+            raise ValueError(
+                f"chunk_types={self.chunk_types} に一致するチャンクが1件もありません"
+            )
+        print(f"  {self.name}: {len(self._chunks):,} 件を埋め込み (chunk_types={self.chunk_types or '全部'})")
         embeddings = self._embed(
             [chunk.text for chunk in self._chunks], adapter=self.doc_adapter
         )

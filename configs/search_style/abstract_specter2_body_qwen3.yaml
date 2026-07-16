@@ -1,0 +1,54 @@
+# 各モデルを「設計どおりの粒度」で使う3索引構成。
+#
+#   faiss_specter2 : title_abstract のみ (27,487件)  -> 論文単位の意味的信号
+#   bm25s          : 全チャンク (2,564,545件)        -> 固有名詞の完全一致
+#   faiss_qwen3    : 本文チャンクのみ (2,537,058件)  -> 言い換えに対応する passage 検索
+#
+# なぜこう分けるか:
+# * SPECTER2 の proximity アダプタは title+abstract で学習された「論文単位」モデル。
+#   本文の断片・表・数式を個別に埋め込むのは学習時の入力分布から外れる
+#   (bm25_specter2.yaml は全チャンクに掛ける版。両者を比べれば使い方の影響が分かる)。
+# * LitTraceQA の質問は固有名詞の塊（55件すべてに手法名/データセット名/指標名が入り、
+#   中央値4個）。PointLoRA や ECM-XL のような稀語の一致は BM25 が最も得意とする。
+#   密ベクトルはむしろ稀語を意味空間に溶かすので苦手。
+# * よって密ベクトルの役割は「BM25 が取りこぼす言い換え」の救済。主役ではない。
+#   まず 0.6B で回路を通し、寄与を見てから 4B/8B に上げるか判断する（実測値）:
+#     0.6B: 35.2 chunks/s -> 4GPU 5.0時間,  1024次元, 索引10.4GB
+#     4B  :  9.7 chunks/s -> 4GPU 18.2時間, 2560次元, 索引26.0GB
+#     8B  :  5.7 chunks/s -> 4GPU 30.9時間, 4096次元, 索引41.6GB
+#
+# index_name は必須。付けないと bm25_specter2.yaml の全チャンク版 SPECTER2 索引と
+# 同じパスを奪い合って上書きしてしまう。
+per_index_k: 100
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: faiss_specter2
+    index_name: faiss_specter2_abstract # 全チャンク版と別ディレクトリにする
+    params:
+      model: allenai/specter2_base
+      chunk_types: [title_abstract] # 設計どおりの論文単位で使う
+      batch_size: 128
+      fp16: true
+
+  - name: faiss_qwen3
+    index_name: faiss_qwen3_0p6b # 8B版と別ディレクトリにする
+    params:
+      model: Qwen/Qwen3-Embedding-0.6B
+      chunk_types: [text_span, table, figure, equation_algorithm]
+      devices: "cuda:0,cuda:1,cuda:2,cuda:3"
+      batch_size: 32
+      fp16: true
+      max_tokens: 1024
+      doc_prefix: "passage: "
+      query_prefix: "query: "
+
+fuser:
+  name: rrf
+  params:
+    k: 60
+    weights: { bm25s: 1.0, faiss_specter2: 1.0, faiss_qwen3: 1.0 }
+reranker:
+  name: none
+  params: {}

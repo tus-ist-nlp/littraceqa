@@ -1,5 +1,11 @@
-# BM25 + Qwen3-Embedding-8B のハイブリッド（デフォルト推奨）。
+# BM25 + Qwen3-Embedding-8B のハイブリッド。
 # 語彙一致（疎）と密ベクトル意味検索を RRF で融合。汎用の高精度な標準構成。
+#
+# 索引構築のコストが SPECTER2 とは桁違いなので注意（実測値）:
+#   スループット 5.7 chunks/s (fp16, RTX 3090) -> 256万件で 1GPU 約124時間
+#   devices に複数GPUを並べてデータ並列で分散すること（3枚で約42時間, 4枚で約31時間）
+#   索引サイズ 4096次元 x 256万件 = 約42GB（SPECTER2 は 768次元で 7.9GB）
+# fp16 は必須。fp32 だと重みが約32GBになり 24GB の 3090 に載らない。
 per_index_k: 100
 indexers:
   - name: bm25s
@@ -7,6 +13,10 @@ indexers:
   - name: faiss_qwen3
     params:
       model: Qwen/Qwen3-Embedding-8B
+      devices: "cuda:0,cuda:1,cuda:2,cuda:3"
+      batch_size: 8
+      fp16: true
+      max_tokens: 1024
       doc_prefix: "passage: "
       query_prefix: "query: "
 fuser:

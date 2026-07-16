@@ -1,9 +1,9 @@
 # 検索 → 読解 → 不足分の再検索 を繰り返す本命エージェント。
 # verifying との差 = 「反復して検索し直すこと」の効果。
 # 共有ノブ(top_k / effort / paper_cutoff / max_papers)は比較のため他と揃えてある。
-# 実行には ANTHROPIC_API_KEY が必要。
+# 実行には .env の AZURE_OPENAI_* が必要。
 name: reading
-llm: { name: claude, params: { effort: medium } }
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
 params:
   max_steps: 3
   top_k: 20

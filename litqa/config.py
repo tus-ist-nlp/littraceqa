@@ -47,8 +47,13 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 from litqa import registry
+
+# APIキー等はリポジトリ直下の .env から読む（コードにも yaml にも書かない）。
+# 既に export されている環境変数は上書きしない。
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from litqa.agent.iterative import IterativeAgent  # noqa: F401
 from litqa.agent.reading import ReadingAgent  # noqa: F401
 from litqa.agent.simple import SimpleAgent  # noqa: F401
@@ -58,7 +63,7 @@ from litqa.index.colbert_index import ColBERTIndex  # noqa: F401
 from litqa.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: F401
 from litqa.index.faiss_specter2 import Specter2FAISSIndex  # noqa: F401
 from litqa.index.siglip_image import SiglipImageIndex  # noqa: F401
-from litqa.llm.claude import ClaudeLLM  # noqa: F401
+from litqa.llm.azure_openai import AzureOpenAILLM  # noqa: F401
 from litqa.llm.fake import FakeLLM  # noqa: F401
 from litqa.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
 from litqa.preprocess.marker_chunker import MarkerChunker  # noqa: F401
@@ -91,8 +96,14 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
     indexers = []
     for indexer in search["indexers"]:
         indexer_params = dict(indexer.get("params", {}))
+        # 同じ indexer の別バリアント（モデル違い・chunk_types 違い）を共存させるための
+        # 索引ディレクトリ名。省略すると indexer 名がそのまま使われる。
+        # 例: faiss_specter2 を「全チャンク版」と「abstractのみ版」で並べたいとき、
+        # index_name を分けないと同じパスを奪い合って上書きしてしまう。
+        # search_style に絶対パスを書かない方針は保ったまま、末尾だけを変える。
+        index_name = indexer.get("index_name", indexer["name"])
         indexer_params.setdefault(
-            "index_dir", f"{paths['index_dir']}/{process_name}/{indexer['name']}"
+            "index_dir", f"{paths['index_dir']}/{process_name}/{index_name}"
         )
         indexers.append({"name": indexer["name"], "params": indexer_params})
 

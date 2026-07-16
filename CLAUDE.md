@@ -34,6 +34,28 @@
 （同じ `search_style` を別の `process_style` と組み合わせても
 索引パスが衝突しないようにするため）。
 
+**同じ indexer の別バリアントを使うときは `index_name` を必ず付ける。**
+索引パスの末尾は既定で indexer 名なので、たとえば `faiss_specter2` を
+「全チャンク版」と「abstractのみ版」で並べると、**同じパスを奪い合って
+先に作った索引を上書きしてしまう**（数時間かけたビルドが消える）。
+indexer エントリに `index_name: faiss_specter2_abstract` のように書けば
+末尾だけが変わる。絶対パスを書かない方針はそのまま保てる。
+
+```yaml
+indexers:
+  - name: faiss_specter2                      # -> {index_dir}/{process}/faiss_specter2
+    params: {}
+  - name: faiss_specter2
+    index_name: faiss_specter2_abstract       # -> {index_dir}/{process}/faiss_specter2_abstract
+    params: { chunk_types: [title_abstract] }
+```
+
+**`chunk_types` で indexer ごとに索引する粒度を変えられる。**
+モデルには設計上の想定粒度がある。SPECTER2 の `proximity` アダプタは
+title+abstract で学習された**論文単位**のモデルなので、本文の断片・表・数式を
+個別に埋め込むのは学習時の入力分布から外れる。`chunk_types: [title_abstract]`
+にすると設計どおりの使い方になる。省略すると全チャンクが対象。
+
 実行例:
 ```
 uv run python scripts/run_search.py \
