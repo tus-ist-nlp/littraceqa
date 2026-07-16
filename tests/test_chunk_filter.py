@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from litqa.config import compose_config
-from litqa.contracts import Chunk
-from litqa.index.chunk_filter import ALL_CHUNK_TYPES, filter_chunk_types
+from littraceqa.di_pipeline.config import compose_config
+from littraceqa.di_pipeline.contracts import Chunk
+from littraceqa.di_pipeline.index.chunk_filter import ALL_CHUNK_TYPES, filter_chunk_types
 
 
 def _chunks() -> list[Chunk]:

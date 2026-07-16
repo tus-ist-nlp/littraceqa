@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from litqa.agent.iterative import IterativeAgent, _is_enumeration_or_comparison
-from litqa.contracts import Query, RetrievalResult
-from litqa.llm.fake import FakeLLM
+from littraceqa.di_pipeline.agent.iterative import IterativeAgent, _is_enumeration_or_comparison
+from littraceqa.di_pipeline.contracts import Query, RetrievalResult
+from littraceqa.di_pipeline.llm.fake import FakeLLM
 
 
 class FakeRetriever:

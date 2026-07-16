@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from litqa.config import compose_config
+from littraceqa.di_pipeline.config import compose_config
 
 
 def _paths() -> dict:

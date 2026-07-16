@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import pytest
 
-from litqa.agent.simple import SimpleAgent
-from litqa.agent.task_family import MULTI, SINGLE, TaskFamilyClassifier
-from litqa.contracts import Query, RetrievalResult
-from litqa.llm.fake import FakeLLM
+from littraceqa.di_pipeline.agent.simple import SimpleAgent
+from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE, TaskFamilyClassifier
+from littraceqa.di_pipeline.contracts import Query, RetrievalResult
+from littraceqa.di_pipeline.llm.fake import FakeLLM
 
 
 def _query(**kwargs) -> Query:

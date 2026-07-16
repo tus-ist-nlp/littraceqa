@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from litqa.contracts import Chunk
+from littraceqa.di_pipeline.contracts import Chunk
 
 
 def load_chunks(path: Path) -> list[Chunk]:

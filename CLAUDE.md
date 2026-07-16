@@ -20,7 +20,7 @@
 
 ### 1. configs/ は4フォルダに分離されている
 前処理・検索手法・エージェント・共有パスはそれぞれ独立したyamlファイルで、
-実行時に4つから1ファイルずつ選んで組み合わせる（`litqa/config.py` の
+実行時に4つから1ファイルずつ選んで組み合わせる（`src/littraceqa/di_pipeline/config.py` の
 `compose_config()` が合成する）。1ファイルに全部詰め込まない。
 
 - `configs/paths/{名前}.yaml`: 実行環境ごとの共有パス（pdf_dir, index_dirのルート等）
@@ -104,7 +104,7 @@ configs/
 反復ループが事実上空回りしていた）。以後 agent_style は `reading` 一本で運用する。
 
 **`reading` の打ち切りは task_family に依存しない。** 反復検索の停止条件は
-`_read_and_judge()` が返す LLM の `sufficient` 判定のみ（`litqa/agent/reading.py`）。
+`_read_and_judge()` が返す LLM の `sufficient` 判定のみ（`src/littraceqa/di_pipeline/agent/reading.py`）。
 提出本数も `paper_cutoff: llm` にしてあるので、LLM が「これで十分」と判断した時点の
 選定をそのまま出す（`max_papers: 10` で頭打ち）。本番入力に `task_family` が無く、
 推定しても正解率0.67程度で当てにならないため、本数決定の経路から task_family を外した。

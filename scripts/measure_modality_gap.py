@@ -28,8 +28,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
-from litqa.config import build_pipeline, compose_config, load_config
-from litqa.contracts import RetrievalResult
+from littraceqa.di_pipeline.config import build_pipeline, compose_config, load_config
+from littraceqa.di_pipeline.contracts import RetrievalResult
 
 _SOURCE_TYPES = ["figure", "equation_algorithm", "table", "text_span", "citation_context"]
 

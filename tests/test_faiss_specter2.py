@@ -16,7 +16,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from litqa.index.faiss_specter2 import _MAX_TOKENS, Specter2FAISSIndex
+from littraceqa.di_pipeline.index.faiss_specter2 import _MAX_TOKENS, Specter2FAISSIndex
 
 
 class _RecordingTokenizer:

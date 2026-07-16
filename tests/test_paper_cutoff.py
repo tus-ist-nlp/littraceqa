@@ -10,12 +10,12 @@ import json
 
 import pytest
 
-from litqa.agent.reading import ReadingAgent
-from litqa.agent.simple import SimpleAgent
-from litqa.agent.task_family import TaskFamilyClassifier, apply_paper_cutoff
-from litqa.agent.verifying import VerifyingAgent
-from litqa.contracts import Query, RetrievalResult
-from litqa.llm.fake import FakeLLM
+from littraceqa.di_pipeline.agent.reading import ReadingAgent
+from littraceqa.di_pipeline.agent.simple import SimpleAgent
+from littraceqa.di_pipeline.agent.task_family import TaskFamilyClassifier, apply_paper_cutoff
+from littraceqa.di_pipeline.agent.verifying import VerifyingAgent
+from littraceqa.di_pipeline.contracts import Query, RetrievalResult
+from littraceqa.di_pipeline.llm.fake import FakeLLM
 
 
 def _query(task_family="multi_paper") -> Query:

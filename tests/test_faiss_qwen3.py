@@ -13,7 +13,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from litqa.index.faiss_qwen3 import _ADD_ROWS, Qwen3FAISSIndex
+from littraceqa.di_pipeline.index.faiss_qwen3 import _ADD_ROWS, Qwen3FAISSIndex
 
 
 def test_fp16_is_the_default(tmp_path):

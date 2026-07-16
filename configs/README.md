@@ -13,9 +13,9 @@ configs/
 └── agent_style/       エージェント（Agent）
 ```
 
-これは `litqa/` 側のDI設計（`registry.py` で `@register(kind, name)` したクラスを
+これは `src/littraceqa/di_pipeline/` 側のDI設計（`registry.py` で `@register(kind, name)` したクラスを
 `registry.build(kind, name, **params)` で組み立てる仕組み）をそのままconfigの
-ファイル単位に反映したもの。`litqa/config.py` の `compose_config()` が4つの
+ファイル単位に反映したもの。`src/littraceqa/di_pipeline/config.py` の `compose_config()` が4つの
 dictを合成し、`build_pipeline()` に渡す。
 
 ## なぜ分けているか

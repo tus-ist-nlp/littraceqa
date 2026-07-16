@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from litqa.preprocess.figure_vlm import FigureVLMChunker, _extract_number
+from littraceqa.di_pipeline.preprocess.figure_vlm import FigureVLMChunker, _extract_number
 
 
 class _FakeProv:

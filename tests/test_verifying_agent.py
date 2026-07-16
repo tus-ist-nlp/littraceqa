@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from litqa.agent.verifying import VerifyingAgent
-from litqa.contracts import Query, RetrievalResult
-from litqa.llm.fake import FakeLLM
+from littraceqa.di_pipeline.agent.verifying import VerifyingAgent
+from littraceqa.di_pipeline.contracts import Query, RetrievalResult
+from littraceqa.di_pipeline.llm.fake import FakeLLM
 
 
 class FakeRetriever:

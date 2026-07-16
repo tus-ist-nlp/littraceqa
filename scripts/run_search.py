@@ -39,9 +39,9 @@ except ImportError:
     def tqdm(iterable, **kwargs):
         return iterable
 
-from litqa.agent.json_utils import parse_json_object
-from litqa.config import build_pipeline, compose_config, load_config
-from litqa.contracts import Chunk, Query
+from littraceqa.di_pipeline.agent.json_utils import parse_json_object
+from littraceqa.di_pipeline.config import build_pipeline, compose_config, load_config
+from littraceqa.di_pipeline.contracts import Chunk, Query
 
 
 def load_papers(path: Path) -> list[dict]:
