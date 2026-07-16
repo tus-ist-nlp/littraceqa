@@ -73,9 +73,7 @@ configs/
 │   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) +
 │         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う（デフォルト、構築済み）
 └── agent_style/
-    ├── iterative.yaml        : multi_paper のときだけクエリ分解（反復ループは事実上空回り）
-    ├── reading.yaml          : 分解→読解→不足分の再検索を繰り返す本命（デフォルト）
-    └── reading_llmcount.yaml : reading から paper_cutoff だけ変えた ablation
+    └── reading.yaml          : 分解→読解→不足分の再検索を繰り返す唯一の本命（デフォルト）
 ```
 
 推奨デフォルトの組み合わせ: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml` + `agent_style/reading.yaml`

@@ -32,10 +32,10 @@ compose_config() で組み合わせる（詳細は CLAUDE.md 参照）。
       llm: { name: azure_openai, params: { reasoning_effort: medium } }
       params: { top_k: 20, max_steps: 3 }
 
-    # LLM を使うエージェント（例: iterative）は agent.llm で構築するクライアントを指定する:
-    #   name: iterative
-    #   llm: { name: fake, params: {} }
-    #   params: { top_k: 20, max_steps: 3 }
+    # agent.llm で構築するクライアントを指定する（LLM を使わないエージェントなら省略可）。
+    # yaml のファイル名は任意のラベルで、実際に組み立てるクラスは name フィールド
+    # （registry に @register("agent", name) されたキー）で決まる。両者が一致する
+    # 必要はない。
 
 process_style / search_style の各ファイルには pdf_dir / index_dir を書かない。
 compose_config() が paths から自動導出する（同じ search_style を別の

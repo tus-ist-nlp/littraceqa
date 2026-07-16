@@ -96,45 +96,33 @@ configs/
 │   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) + Qwen3-Embedding-0.6B(本文のみ)。
 │         各モデルを設計どおりの粒度で使う3索引構成（デフォルト、構築済み）
 └── agent_style/
-    ├── iterative.yaml    : multi_paper のときだけクエリ分解。※反復ループは空回りする（下記）
-    ├── reading.yaml      : 分解→読解→不足分の再検索を繰り返す本命。evidence も埋める（デフォルト）
-    └── reading_llmcount.yaml : reading から paper_cutoff だけ変えた ablation
+    └── reading.yaml      : 分解→読解→不足分の再検索を繰り返す唯一の本命。evidence も埋める（デフォルト）
 ```
 
-`iterative` の反復ループは事実上回らない。停止条件が「見つかった論文の**本数**」で、
-検索が返した論文が無条件に found に入るため、top_k=20 で引いた時点で初回から
-条件を満たして打ち切られる（`_refine` は一度も呼ばれない）。中身を読んで根拠を確認し、
-足りなければ本当に検索し直すのは `reading`。`iterative` は「LLM分解あり・検証なし」の
-ベースラインとして残してある。
+`iterative.yaml` / `reading_llmcount.yaml` / `simple.yaml` / `verifying.yaml` は削除済み
+（`iterative` は停止条件が「見つかった論文の本数」で top_k=20 の時点で初回から満たされ、
+反復ループが事実上空回りしていた）。以後 agent_style は `reading` 一本で運用する。
 
-### 3.1 比較実験の作法
+**`reading` の打ち切りは task_family に依存しない。** 反復検索の停止条件は
+`_read_and_judge()` が返す LLM の `sufficient` 判定のみ（`litqa/agent/reading.py`）。
+提出本数も `paper_cutoff: llm` にしてあるので、LLM が「これで十分」と判断した時点の
+選定をそのまま出す（`max_papers: 10` で頭打ち）。本番入力に `task_family` が無く、
+推定しても正解率0.67程度で当てにならないため、本数決定の経路から task_family を外した。
 
-**共有ノブを揃えること。** `top_k` / `effort` / `paper_cutoff` / `max_papers` が
-エージェント間でズレていると、「エージェントの賢さ」ではなく予算の差を測ってしまう。
-現在は全 agent_style で `top_k: 20` / `effort: medium` / `paper_cutoff: task_family` /
-`max_papers: 10` に揃えてある。新しい agent_style を足すときもここは揃える。
-
-**提出本数は `paper_cutoff` で制御する。** 論文集合は F1 採点なので本数がスコアを支配する。
-`task_family`（single=2/multi=5 で機械的に切る）に固定して比べれば、本数を揃えた上で
-選定の質だけを比較できる。`llm`（LLMが選んだ本数をそのまま出す）はその効果を
-単独で測るための ablation。
+### 3.1 評価の作法
 
 **評価は `--production-input` を付けて回す。** `data/validation_inputs.jsonl` は55件
 すべてに `task_family` が入っているが、本番入力には無い（`query_id` / `question` /
-`answer_types` / `table_schema` の4つだけ）。`task_family` は提出本数を決めるのに使うので、
-与えたまま評価すると「正解を教えてもらった状態」の点数になり本番と乖離する。
-
-差分を取ると効果が分解できる（`simple` / `verifying` は config を削除済みなので、
-再現するには git history から復元するか同等の agent_style を作り直す）:
-
-| 比較 | 分かること |
-|---|---|
-| simple → iterative | クエリ**分解**の効果 |
-| simple → verifying | **読解・選定**の効果 |
-| verifying → reading | **反復**の効果 |
-| reading → reading_llmcount | 提出**本数をLLMに決めさせる**効果 |
+`answer_types` / `table_schema` の4つだけ）。与えたまま評価すると「正解を教えてもらった
+状態」の点数になり本番と乖離する（`reading` は `task_family` を提出本数に使わないため
+影響は小さいが、`_decompose()` のサブクエリ分解の文言分岐にはまだ使っている）。
 
 結果は `results/experiments.jsonl` に自動で追記される（config名 + metrics + timestamp）。
+加えて実行1回につき、設定と指標とLLMコメントをまとめた Markdown が
+`report/{timestamp}_{process名}_{search名}_{agent名}.md` として1枚書き出される
+（`scripts/run_search.py` の `write_report()`）。`results/` `report/` はどちらも
+各自のローカルな実行記録で `.gitignore` 対象（チーム共有はしない、生成物なので消えても
+再実行すれば復元できる）。
 LLM は非決定的（Opus 4.8 は temperature を受け付けない）でクエリは55件しかないので、
 数ポイントの差はノイズの可能性がある。結論を出す前に複数回まわすこと。
 

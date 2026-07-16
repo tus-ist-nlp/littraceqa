@@ -20,3 +20,7 @@ pdfs/
 logs/
 # 予測結果（実験の生成物。results/experiments.jsonl に config とスコアが残るので再現可能）
 predictions*.jsonl
+# 実行ごとのレポート（生成物。results/experiments.jsonl があれば再現可能）
+report/
+# 実験ログ（各自のローカルな実行記録。チーム共有はしない）
+results/
