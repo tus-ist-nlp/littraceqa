@@ -89,7 +89,10 @@ def normalize_visible_id(value: Any, prefix: str) -> str:
 def coarse_evidence_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
     paper_id = normalize_id(item.get("paper_id"))
     source_type = normalize_id(item.get("source_type"))
-    locator = item.get("locator") if isinstance(item.get("locator"), dict) else {}
+    if isinstance(item.get("locator"), dict):
+        locator = item.get("locator")
+    else:
+        locator = {}
     page = str(locator.get("page", "")).strip()
     object_id = ""
     if source_type == "table":
@@ -116,17 +119,30 @@ def prf(gold: set[Any], pred: set[Any]) -> tuple[float, float, float]:
     if not gold and not pred:
         return (1.0, 1.0, 1.0)
     if not pred:
-        return (0.0, 0.0 if gold else 1.0, 0.0)
+        if gold:
+            return (0.0, 0.0, 0.0)
+        return (0.0, 1.0, 0.0)
     correct = len(gold & pred)
-    precision = correct / len(pred) if pred else 0.0
-    recall = correct / len(gold) if gold else 1.0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    if pred:
+        precision = correct / len(pred)
+    else:
+        precision = 0.0
+    if gold:
+        recall = correct / len(gold)
+    else:
+        recall = 1.0
+    if precision + recall:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = 0.0
     return (precision, recall, f1)
 
 
 def prediction_answer(record: dict[str, Any]) -> dict[str, Any]:
     answer = record.get("answer")
-    return answer if isinstance(answer, dict) else {}
+    if isinstance(answer, dict):
+        return answer
+    return {}
 
 
 def multiple_choice_prediction(record: dict[str, Any]) -> str:
@@ -139,7 +155,9 @@ def multiple_choice_prediction(record: dict[str, Any]) -> str:
 
 def multiple_choice_gold(record: dict[str, Any]) -> str:
     mc = record.get("answer", {}).get("multiple_choice", {})
-    return normalize_id(mc.get("gold")).upper() if isinstance(mc, dict) else ""
+    if isinstance(mc, dict):
+        return normalize_id(mc.get("gold")).upper()
+    return ""
 
 
 def freeform_prediction(record: dict[str, Any]) -> str:
@@ -152,7 +170,9 @@ def freeform_prediction(record: dict[str, Any]) -> str:
 
 def freeform_gold(record: dict[str, Any]) -> str:
     freeform = record.get("answer", {}).get("freeform", {})
-    return normalize_text(freeform.get("text")) if isinstance(freeform, dict) else ""
+    if isinstance(freeform, dict):
+        return normalize_text(freeform.get("text"))
+    return ""
 
 
 def row_key_value(row: dict[str, Any], row_key_columns: list[str]) -> tuple[str, ...]:
@@ -179,9 +199,18 @@ def table_metrics(gold: dict[str, Any], pred: dict[str, Any]) -> dict[str, float
     if not isinstance(gold_table, dict) or not isinstance(pred_table, dict):
         return {"row_precision": 0.0, "row_recall": 0.0, "row_f1": 0.0, "cell_accuracy": 0.0, "cell_correct": 0, "cell_total": 0}
 
-    schema = gold_table.get("schema") if isinstance(gold_table.get("schema"), list) else []
-    gold_rows = gold_table.get("rows") if isinstance(gold_table.get("rows"), list) else []
-    pred_rows = pred_table.get("rows") if isinstance(pred_table.get("rows"), list) else []
+    if isinstance(gold_table.get("schema"), list):
+        schema = gold_table.get("schema")
+    else:
+        schema = []
+    if isinstance(gold_table.get("rows"), list):
+        gold_rows = gold_table.get("rows")
+    else:
+        gold_rows = []
+    if isinstance(pred_table.get("rows"), list):
+        pred_rows = pred_table.get("rows")
+    else:
+        pred_rows = []
     row_keys = [column["name"] for column in schema if isinstance(column, dict) and column.get("is_row_key")]
     if not row_keys and schema:
         row_keys = [str(schema[0].get("name", ""))]
@@ -214,7 +243,10 @@ def table_metrics(gold: dict[str, Any], pred: dict[str, Any]) -> dict[str, float
             cell_total += 1
             if cell_equal(gold_row.get(column_name), pred_row.get(column_name), column_type):
                 cell_correct += 1
-    cell_accuracy = cell_correct / cell_total if cell_total else row_f1
+    if cell_total:
+        cell_accuracy = cell_correct / cell_total
+    else:
+        cell_accuracy = row_f1
     return {
         "row_precision": row_precision,
         "row_recall": row_recall,
@@ -226,7 +258,9 @@ def table_metrics(gold: dict[str, Any], pred: dict[str, Any]) -> dict[str, float
 
 
 def mean(values: list[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
+    if values:
+        return sum(values) / len(values)
+    return 0.0
 
 
 def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -281,6 +315,19 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             table_cell_correct += int(metrics["cell_correct"])
             table_cell_total += int(metrics["cell_total"])
 
+    if mc_total:
+        multiple_choice_accuracy = mc_correct / mc_total
+    else:
+        multiple_choice_accuracy = None
+    if freeform_total:
+        freeform_exact_match = freeform_exact_correct / freeform_total
+    else:
+        freeform_exact_match = None
+    if table_cell_total:
+        table_cell_accuracy_micro = table_cell_correct / table_cell_total
+    else:
+        table_cell_accuracy_micro = None
+
     return {
         "metrics": {
             "paper_precision_macro": mean(paper_precision),
@@ -289,11 +336,11 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             "evidence_precision_macro": mean(evidence_precision),
             "evidence_recall_macro": mean(evidence_recall),
             "evidence_f1_macro": mean(evidence_f1),
-            "multiple_choice_accuracy": mc_correct / mc_total if mc_total else None,
-            "freeform_exact_match": freeform_exact_correct / freeform_total if freeform_total else None,
+            "multiple_choice_accuracy": multiple_choice_accuracy,
+            "freeform_exact_match": freeform_exact_match,
             "table_row_f1_macro": mean(table_row_f1),
             "table_cell_accuracy_macro": mean(table_cell_accuracy),
-            "table_cell_accuracy_micro": table_cell_correct / table_cell_total if table_cell_total else None,
+            "table_cell_accuracy_micro": table_cell_accuracy_micro,
         },
         "details": {
             "total": len(gold_records),

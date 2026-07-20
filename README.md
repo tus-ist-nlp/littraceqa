@@ -16,11 +16,32 @@ uv sync
 The base install covers the dataset scripts (`scripts/`) and the
 provider-agnostic tools (`littraceqa.extract_pdf_archives`,
 `littraceqa.fix_chunk_locators`, `littraceqa.validate_submission`,
-`littraceqa.compare_runs`). The Azure baseline additionally needs the
-optional `azure` extra:
+`littraceqa.compare_runs`). The two RAG pipelines each need their own
+optional extra, and **the two are mutually exclusive in one environment**
+(`di_pipeline` pins `pypdfium2==4.30.0` transitively via `marker-pdf`, which
+conflicts with `azure`'s `pypdfium2>=5.11.0`; `uv` will refuse to resolve
+both extras together):
 
 ```bash
-uv sync --extra azure
+uv sync --extra azure         # Azure RAG pipeline (baseline)
+uv sync --extra di_pipeline   # DI-based hybrid retrieval pipeline
+```
+
+## DI-based hybrid retrieval pipeline
+
+This pipeline lives under `src/littraceqa/di_pipeline/` (preprocessors,
+indexers, fusers/rerankers, and agents wired up via dependency injection —
+see `CLAUDE.md` and `configs/README.md` for the full design and usage) and
+is run via `scripts/run_search.py`, e.g.:
+
+```bash
+uv run python scripts/run_search.py \
+  --paths configs/paths/default.yaml \
+  --process configs/process_style/mineru.yaml \
+  --search configs/search_style/abstract_specter2_body_qwen3.yaml \
+  --agent configs/agent_style/reading.yaml \
+  --queries data/validation_inputs.jsonl \
+  --output predictions.jsonl
 ```
 
 ## Azure RAG pipeline (baseline)

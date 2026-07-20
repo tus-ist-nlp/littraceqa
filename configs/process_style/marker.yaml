@@ -1,0 +1,4 @@
+name: marker
+params:
+  force_ocr: true
+  use_llm: false

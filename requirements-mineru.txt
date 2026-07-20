@@ -1,0 +1,27 @@
+# MinerU 前処理（scripts/run_mineru.py）専用の隔離環境。
+#
+# 本体（pyproject.toml）とは同居できない。理由:
+#   MinerU 3.x は transformers>=4.57.3 / torch<3,>=2.6 を要求する一方、本体は
+#   marker-pdf と torch>=2.11,<2.12 に固定されており、解決が衝突する。
+#   本体は requires-python >=3.13 だが MinerU は <3.14 なので余裕も無い。
+#
+# よって MinerU 段は別 venv (.venv-mineru) に隔離し、Markdown /
+# content_list.json 経由で本体パイプライン（MinerUChunker）に受け渡す。
+#
+# 構築: bash scripts/setup_mineru_env.sh
+# 実行: .venv-mineru/bin/python scripts/run_mineru.py ...
+#
+# pipeline バックエンド（layout+OCR+数式+表の専用モデル群）を使う。
+# vlm バックエンドは vllm を要求し導入コストが高いため既定では入れない。
+mineru[pipeline]==3.4.3
+
+# torch は mineru の制約（<3,>=2.6）内で明示的に固定する。無指定だと
+# torch 2.13.0+cu130 が入り、同時に入る nvidia-cudnn-cu13 9.20 と噛み合わず
+# conv2d が CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH で落ちる。
+# 2.8.0 は PyPI 既定が cu128 ビルドで、RTX3090(sm_86) で問題なく動く。
+torch==2.8.0
+torchvision==0.23.0
+
+# mineru 3.4.3 の同梱 pytorchocr（mineru/model/utils/pytorchocr）が import する。
+# mineru 側の依存宣言から漏れているため明示的に足す。
+six

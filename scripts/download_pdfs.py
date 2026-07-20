@@ -771,9 +771,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     def reporter() -> None:
         while not stop_event.wait(timeout=15.0):
             elapsed = time.monotonic() - start
-            rate = progress.done / elapsed if elapsed else 0.0
+            if elapsed:
+                rate = progress.done / elapsed
+            else:
+                rate = 0.0
             remaining = progress.total - progress.done
-            eta = remaining / rate if rate else float("inf")
+            if rate:
+                eta = remaining / rate
+            else:
+                eta = float("inf")
             print(
                 f"[{elapsed:6.0f}s] done {progress.done}/{progress.total} "
                 f"(ok {progress.ok}, fail {progress.failed}) "
@@ -805,7 +811,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     print_summary(progress, skipped, manifest_path, time.monotonic() - start)
     if progress.failed:
         report_failures(manifest, output_dir)
-    return 1 if progress.failed and progress.ok == 0 else 0
+    if progress.failed and progress.ok == 0:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

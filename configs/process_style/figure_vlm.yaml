@@ -1,0 +1,6 @@
+name: figure_vlm
+params:
+  vlm_model: Qwen/Qwen2-VL-7B-Instruct
+  device: cuda
+  max_new_tokens: 256
+  include_tables: true
