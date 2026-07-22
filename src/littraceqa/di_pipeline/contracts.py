@@ -35,10 +35,12 @@ class Query:
     answer_types: list[str]
     # 回答が table 型のときだけ与えられる列定義: [{"name": ..., "type": ..., "is_row_key": bool}]
     table_schema: list[dict] | None = None
-    # multiple_choice の選択肢 {"A": "...", "B": "..."}。これは「正解」ではなく問題の一部
-    # （どれが正解かは gold にしかない）。回答生成に使う。validation_inputs.jsonl には
-    # 無いので、評価時は run_search.py が validation.jsonl の options だけを結合する
-    # （gold は絶対に読まない）。
+    # multiple_choice の選択肢 {"A": "...", "B": "..."}。**本番入力には無い**（本番は
+    # query_id / question / answer_types / table_schema の4つだけ）。よってここが埋まるのは
+    # run_search.py --options-file で validation.jsonl から結合した oracle 実行のときだけで、
+    # 「選択肢を教えてもらえたら何点取れるか」を測る ablation 用。本番では常に None になり、
+    # そのとき ReadingAgent は multiple_choice を答えられない（選択肢が分からなければ
+    # どの文字を出すべきか決まらない）。
     options: dict | None = None
     # 以下2つは本番入力には無い。手元の検証データにだけ入っている。
     task_family: str | None = None  # 観測値: "hidden_source_single_paper" / "multi_paper"

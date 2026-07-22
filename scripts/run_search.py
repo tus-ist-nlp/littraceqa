@@ -67,17 +67,19 @@ def load_chunks(path: Path) -> list[Chunk]:
     return chunks
 
 
-# 本番の入力に実際に入っているフィールド。multiple_choice 問題には options が
-# 付いてくる想定なので残す（options は「正解」ではなく問題の一部）。
-_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema", "options")
+# 本番の入力に実際に入っているフィールドはこの4つだけ（確定仕様）。
+# multiple_choice の options は**本番では与えられない**ので、ここには入れない。
+_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema")
 
 
 def load_mc_options(path: Path) -> dict[str, dict]:
     """query_id -> multiple_choice の options だけを読む（gold は絶対に読まない）。
 
-    multiple_choice の選択肢は「正解」ではなく問題の一部（どれが正解かは gold）。
-    validation_inputs.jsonl には options が無いので、回答生成のために validation.jsonl
-    から options のみを結合する。gold（正解の選択肢）は読まないので情報漏洩にならない。
+    本番入力に options は無い（上記 _PRODUCTION_FIELDS）。よってこれを結合した実行は
+    「選択肢を教えてもらえたら何点取れるか」を見る **oracle 設定** であり、本番の点数
+    ではない。gold（正解の選択肢）は読まないので答えそのものの漏洩ではないが、
+    41/55 問が multiple_choice で、うち21問は freeform すら無い（選択肢が無いと
+    そもそも文字を決められない）ため、点数への影響は大きい。
     """
     options_map: dict[str, dict] = {}
     with path.open(encoding="utf-8") as f:
@@ -105,8 +107,11 @@ def load_queries(
     これを与えたまま評価すると「正解を教えてもらった状態」の点数になり、
     本番の点数と乖離する。比較実験ではこちらを使うこと。
 
-    options_path があれば multiple_choice の選択肢だけを結合する（回答生成に使う。
-    gold は読まない）。本番入力なら options は入力自体に含まれる想定。
+    options_path があれば multiple_choice の選択肢だけを結合する（gold は読まない）。
+    ただし本番入力に options は無いので、これは oracle 設定であり本番の点数ではない。
+    production_input=True のときに自動で結合してはいけない（--production-input は
+    本番と情報量を揃えるためのフラグなので、そこで本番に無い情報を足し戻すと
+    フラグの意味が消える）。呼び出し側で options_path を渡さないこと。
     """
     options_map = load_mc_options(options_path) if options_path else {}
     queries = []
@@ -204,13 +209,22 @@ def tuned_params(cfg: dict, retriever_obj: Any = None) -> dict:
 
 
 def log_experiment(
-    args: argparse.Namespace, metrics: dict, n_queries: int, cfg: dict, retriever_obj: Any = None
+    args: argparse.Namespace,
+    metrics: dict,
+    n_queries: int,
+    cfg: dict,
+    retriever_obj: Any = None,
+    options_joined: bool = False,
 ) -> None:
     """どの組み合わせで何点だったかを results/experiments.jsonl に追記する。
 
     設定ファイルの「パス」だけだと、同じ yaml を書き換えて振った実験が
     全部同じ行に見えてしまい、後から「この数字はどのパラメータで出たのか」が
     追えない。compose_config() が解決した実際の値ごと残す。
+
+    options_joined は multiple_choice の選択肢を与えた oracle 実行かどうか。
+    本番では options が来ないので、True の行の multiple_choice_accuracy は
+    本番の点数として読んではいけない。後から見分けられるように残す。
     """
     path = Path("results/experiments.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,6 +236,7 @@ def log_experiment(
         "agent": args.agent,
         "queries": args.queries,
         "production_input": args.production_input,
+        "options_joined": options_joined,
         "n_queries": n_queries,
         "output": args.output,
         "git_sha": git_sha(),
@@ -291,7 +306,13 @@ def generate_comment(llm, args: argparse.Namespace, metrics: dict, n_queries: in
 
 
 def write_report(
-    args: argparse.Namespace, metrics: dict, n_queries: int, comment: str, cfg: dict, retriever_obj: Any = None
+    args: argparse.Namespace,
+    metrics: dict,
+    n_queries: int,
+    comment: str,
+    cfg: dict,
+    retriever_obj: Any = None,
+    options_joined: bool = False,
 ) -> None:
     """1回の実行につき、設定・指標・LLMコメントをまとめた Markdown を report/ に1枚書く。"""
     process_name = Path(args.process).stem
@@ -318,6 +339,11 @@ def write_report(
     sha = git_sha()
     if sha:
         lines.append(f"- git: `{sha[:12]}`")
+    if options_joined:
+        lines.append(
+            "- **[oracle] multiple_choice の選択肢を与えて実行**（本番入力に options は"
+            "無いため、multiple_choice_accuracy は本番の点数ではない）"
+        )
     # yaml は後から書き換わるので、レポート単体で「どの値で回したか」が分かるように
     # 解決済みのパラメータをここに焼き込む。
     lines.extend(
@@ -371,9 +397,10 @@ def main() -> None:
     parser.add_argument(
         "--options-file",
         default=None,
-        help="multiple_choice の options を結合する jsonl（gold は読まない）。"
-        "省略時、--queries が data/validation_inputs.jsonl のときだけ "
-        "data/validation.jsonl を既定で使う（回答生成に options が要るため）。",
+        help="[oracle] multiple_choice の options を結合する jsonl（gold は読まない）。"
+        "本番入力に options は無いので、これを付けた実行は「選択肢を教えてもらえたら"
+        "何点取れるか」を見る ablation であり本番の点数ではない。"
+        "--production-input との併用時は無視される。",
     )
     args = parser.parse_args()
 
@@ -429,26 +456,31 @@ def main() -> None:
                 sys.exit(1)
         print("読み込み完了")
 
-    # multiple_choice の options の入手先を決める。--options-file 明示指定を最優先。
-    # 省略時は、既定の validation 入力のときだけ validation.jsonl の options を結合する
-    # （他の入力＝隠しテスト等では query_id 衝突で誤った options を付けないよう既定では結合しない。
-    # run_rag.py の default_validation_options と同じ安全策）。options は gold ではない。
+    # multiple_choice の options の入手先を決める。本番入力に options は無いので、
+    # 結合するのは常に oracle 設定（--options-file を明示したときだけ）。
+    # --production-input との併用は矛盾（本番と揃えるフラグなのに本番に無い情報を足す）
+    # なので、その場合は結合しない。
     options_path = Path(args.options_file) if args.options_file else None
-    if options_path is None:
-        default_input = Path("data/validation_inputs.jsonl")
-        default_options = Path("data/validation.jsonl")
-        if Path(args.queries).resolve() == default_input.resolve() and default_options.exists():
-            options_path = default_options
+    if options_path is not None and args.production_input:
+        print(
+            "警告: --production-input と --options-file は併用できません"
+            "（本番入力に options は無い）。options の結合をスキップします。",
+            file=sys.stderr,
+        )
+        options_path = None
     queries = load_queries(
         Path(args.queries),
         production_input=args.production_input,
         options_path=options_path,
     )
     if args.production_input:
-        print("本番と同じフィールド（task_family を捨てて）で走らせます")
+        print("本番と同じ4フィールド（query_id/question/answer_types/table_schema）で走らせます")
     if options_path is not None:
         n_opt = sum(1 for q in queries if q.options)
-        print(f"multiple_choice options を {options_path} から結合しました（{n_opt}件）")
+        print(
+            f"[oracle] multiple_choice options を {options_path} から結合しました"
+            f"（{n_opt}件）。本番では与えられないので、この点数は本番の点数ではありません。"
+        )
     print(f"{len(queries)} 件の質問に対して検索中...")
 
     predictions = []
@@ -483,9 +515,10 @@ def main() -> None:
     except (json.JSONDecodeError, KeyError):
         print("採点結果を解釈できなかったので実験ログには残しません", file=sys.stderr)
         return
-    log_experiment(args, metrics, len(queries), cfg, retriever)
+    options_joined = options_path is not None
+    log_experiment(args, metrics, len(queries), cfg, retriever, options_joined)
     comment = generate_comment(getattr(agent, "llm", None), args, metrics, len(queries))
-    write_report(args, metrics, len(queries), comment, cfg, retriever)
+    write_report(args, metrics, len(queries), comment, cfg, retriever, options_joined)
 
 
 if __name__ == "__main__":
