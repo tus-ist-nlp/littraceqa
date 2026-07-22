@@ -8,7 +8,7 @@
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --process configs/process_style/mineru.yaml \\
-      --search configs/search_style/abstract_specter2_body_qwen3.yaml \\
+      --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl \\
@@ -18,7 +18,7 @@
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --process configs/process_style/mineru.yaml \\
-      --search configs/search_style/abstract_specter2_body_qwen3.yaml \\
+      --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl
@@ -32,6 +32,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 try:
     from tqdm import tqdm
@@ -66,11 +67,35 @@ def load_chunks(path: Path) -> list[Chunk]:
     return chunks
 
 
-# 本番の入力に実際に入っているのはこの4つだけ。
-_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema")
+# 本番の入力に実際に入っているフィールド。multiple_choice 問題には options が
+# 付いてくる想定なので残す（options は「正解」ではなく問題の一部）。
+_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema", "options")
 
 
-def load_queries(path: Path, production_input: bool = False) -> list[Query]:
+def load_mc_options(path: Path) -> dict[str, dict]:
+    """query_id -> multiple_choice の options だけを読む（gold は絶対に読まない）。
+
+    multiple_choice の選択肢は「正解」ではなく問題の一部（どれが正解かは gold）。
+    validation_inputs.jsonl には options が無いので、回答生成のために validation.jsonl
+    から options のみを結合する。gold（正解の選択肢）は読まないので情報漏洩にならない。
+    """
+    options_map: dict[str, dict] = {}
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            mc = (record.get("answer") or {}).get("multiple_choice") or {}
+            options = mc.get("options") if isinstance(mc, dict) else None
+            if options:
+                options_map[record["query_id"]] = options
+    return options_map
+
+
+def load_queries(
+    path: Path, production_input: bool = False, options_path: Path | None = None
+) -> list[Query]:
     """クエリを読み込む。
 
     production_input=True にすると、本番入力に無いフィールド
@@ -79,7 +104,11 @@ def load_queries(path: Path, production_input: bool = False) -> list[Query]:
     本番入力には無い。task_family は提出論文数（cutoff）を決めるのに使うので、
     これを与えたまま評価すると「正解を教えてもらった状態」の点数になり、
     本番の点数と乖離する。比較実験ではこちらを使うこと。
+
+    options_path があれば multiple_choice の選択肢だけを結合する（回答生成に使う。
+    gold は読まない）。本番入力なら options は入力自体に含まれる想定。
     """
+    options_map = load_mc_options(options_path) if options_path else {}
     queries = []
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -89,14 +118,100 @@ def load_queries(path: Path, production_input: bool = False) -> list[Query]:
             record = json.loads(line)
             if production_input:
                 record = {k: v for k, v in record.items() if k in _PRODUCTION_FIELDS}
+            if not record.get("options") and record["query_id"] in options_map:
+                record["options"] = options_map[record["query_id"]]
             queries.append(Query.from_dict(record))
     return queries
 
 
+def git_sha() -> str | None:
+    """実行時のコミットハッシュ。git 管理外なら None（記録は best effort）。"""
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if completed.returncode == 0:
+            return completed.stdout.strip()
+    except Exception:  # noqa: BLE001 - 由来情報が取れなくても実験は続行する。
+        pass
+    return None
+
+
+# reranker の実効設定として記録する属性（インスタンス側の名前 -> 記録名）。
+# yaml に書かれていない既定値（instruction / compile など）も残さないと、
+# 「この数字がどの設定で出たのか」が後から再現できない。
+_RERANKER_EFFECTIVE_ATTRS = {
+    "model_name": "model",
+    "device": "device",
+    "fp16": "fp16",
+    "batch_size": "batch_size",
+    "max_tokens": "max_tokens",
+    "instruction": "instruction",
+    "compile": "compile",
+}
+
+
+def _flatten(prefix: str, params: dict | None) -> dict:
+    """{"k": 60} -> {"fuser_k": 60}。ネストしたままだと差分比較で読めないため平らにする。"""
+    if not isinstance(params, dict):
+        return {}
+    return {f"{prefix}_{key}": value for key, value in params.items()}
+
+
+def tuned_params(cfg: dict, retriever_obj: Any = None) -> dict:
+    """チューニング対象のパラメータだけを平らな dict にまとめる。
+
+    experiments.jsonl には解決済みの cfg 全体も残すが、そちらは index_dir などの
+    環境依存の値も含んで長い。実験を横並び比較するときに見たいのは
+    「振ったつまみ」なので、それだけを抜き出す。
+
+    ネストした *_params は平らにする（reranker_max_tokens のように1つずつ列になり、
+    1つだけ変えた実験の差分が読めるようにするため）。reranker は yaml に書かない
+    既定値も効いてしまうので、組み立て済みインスタンスから実効値を拾う。
+    """
+    retriever = cfg.get("retriever", {})
+    agent = cfg.get("agent", {})
+    agent_params = agent.get("params", {})
+    fuser = retriever.get("fuser", {})
+    reranker = retriever.get("reranker", {})
+
+    # reranker: 実インスタンスの属性を優先し、取れなければ yaml 宣言値にフォールバック。
+    reranker_effective = _flatten("reranker", reranker.get("params"))
+    obj = getattr(retriever_obj, "reranker", None)
+    if obj is not None:
+        for attr, label in _RERANKER_EFFECTIVE_ATTRS.items():
+            if hasattr(obj, attr):
+                reranker_effective[f"reranker_{label}"] = getattr(obj, attr)
+
+    return {
+        # 検索側
+        "per_index_k": retriever.get("per_index_k"),
+        "pool_k": retriever.get("pool_k"),
+        "indexers": [ix.get("index_name", ix["name"]) for ix in retriever.get("indexers", [])],
+        "fuser": fuser.get("name"),
+        **_flatten("fuser", fuser.get("params")),
+        "reranker": reranker.get("name"),
+        **reranker_effective,
+        # エージェント側
+        "agent": agent.get("name"),
+        "agent_llm": (agent.get("llm") or {}).get("name"),
+        **{f"agent_{k}": v for k, v in agent_params.items()},
+    }
+
+
 def log_experiment(
-    args: argparse.Namespace, metrics: dict, n_queries: int
+    args: argparse.Namespace, metrics: dict, n_queries: int, cfg: dict, retriever_obj: Any = None
 ) -> None:
-    """どの組み合わせで何点だったかを results/experiments.jsonl に追記する。"""
+    """どの組み合わせで何点だったかを results/experiments.jsonl に追記する。
+
+    設定ファイルの「パス」だけだと、同じ yaml を書き換えて振った実験が
+    全部同じ行に見えてしまい、後から「この数字はどのパラメータで出たのか」が
+    追えない。compose_config() が解決した実際の値ごと残す。
+    """
     path = Path("results/experiments.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -109,6 +224,9 @@ def log_experiment(
         "production_input": args.production_input,
         "n_queries": n_queries,
         "output": args.output,
+        "git_sha": git_sha(),
+        "tuned_params": tuned_params(cfg, retriever_obj),
+        "config": cfg,
         "metrics": metrics,
     }
     with path.open("a", encoding="utf-8") as f:
@@ -173,7 +291,7 @@ def generate_comment(llm, args: argparse.Namespace, metrics: dict, n_queries: in
 
 
 def write_report(
-    args: argparse.Namespace, metrics: dict, n_queries: int, comment: str
+    args: argparse.Namespace, metrics: dict, n_queries: int, comment: str, cfg: dict, retriever_obj: Any = None
 ) -> None:
     """1回の実行につき、設定・指標・LLMコメントをまとめた Markdown を report/ に1枚書く。"""
     process_name = Path(args.process).stem
@@ -196,12 +314,34 @@ def write_report(
         f"- agent: `{args.agent}`",
         f"- queries: `{args.queries}` ({n_queries}件, production_input={args.production_input})",
         f"- output: `{args.output}`",
-        "",
-        "## 指標",
-        "",
-        "| 指標 | 値 |",
-        "|---|---|",
     ]
+    sha = git_sha()
+    if sha:
+        lines.append(f"- git: `{sha[:12]}`")
+    # yaml は後から書き換わるので、レポート単体で「どの値で回したか」が分かるように
+    # 解決済みのパラメータをここに焼き込む。
+    lines.extend(
+        [
+            "",
+            "## 設定（この実行時の実際の値）",
+            "",
+            "| パラメータ | 値 |",
+            "|---|---|",
+        ]
+    )
+    for key, value in tuned_params(cfg, retriever_obj).items():
+        if value is None:
+            continue
+        lines.append(f"| {key} | `{json.dumps(value, ensure_ascii=False)}` |")
+    lines.extend(
+        [
+            "",
+            "## 指標",
+            "",
+            "| 指標 | 値 |",
+            "|---|---|",
+        ]
+    )
     for key, value in metrics.items():
         formatted = f"{value:.4f}" if isinstance(value, float) else str(value)
         lines.append(f"| {key} | {formatted} |")
@@ -227,6 +367,13 @@ def main() -> None:
         action="store_true",
         help="task_family / primary_evidence_type を捨てて本番と同じ4フィールドで走らせる"
         "（比較実験ではこちらを使う）",
+    )
+    parser.add_argument(
+        "--options-file",
+        default=None,
+        help="multiple_choice の options を結合する jsonl（gold は読まない）。"
+        "省略時、--queries が data/validation_inputs.jsonl のときだけ "
+        "data/validation.jsonl を既定で使う（回答生成に options が要るため）。",
     )
     args = parser.parse_args()
 
@@ -282,9 +429,26 @@ def main() -> None:
                 sys.exit(1)
         print("読み込み完了")
 
-    queries = load_queries(Path(args.queries), production_input=args.production_input)
+    # multiple_choice の options の入手先を決める。--options-file 明示指定を最優先。
+    # 省略時は、既定の validation 入力のときだけ validation.jsonl の options を結合する
+    # （他の入力＝隠しテスト等では query_id 衝突で誤った options を付けないよう既定では結合しない。
+    # run_rag.py の default_validation_options と同じ安全策）。options は gold ではない。
+    options_path = Path(args.options_file) if args.options_file else None
+    if options_path is None:
+        default_input = Path("data/validation_inputs.jsonl")
+        default_options = Path("data/validation.jsonl")
+        if Path(args.queries).resolve() == default_input.resolve() and default_options.exists():
+            options_path = default_options
+    queries = load_queries(
+        Path(args.queries),
+        production_input=args.production_input,
+        options_path=options_path,
+    )
     if args.production_input:
-        print("本番と同じ4フィールド（task_family を捨てて）で走らせます")
+        print("本番と同じフィールド（task_family を捨てて）で走らせます")
+    if options_path is not None:
+        n_opt = sum(1 for q in queries if q.options)
+        print(f"multiple_choice options を {options_path} から結合しました（{n_opt}件）")
     print(f"{len(queries)} 件の質問に対して検索中...")
 
     predictions = []
@@ -319,9 +483,9 @@ def main() -> None:
     except (json.JSONDecodeError, KeyError):
         print("採点結果を解釈できなかったので実験ログには残しません", file=sys.stderr)
         return
-    log_experiment(args, metrics, len(queries))
+    log_experiment(args, metrics, len(queries), cfg, retriever)
     comment = generate_comment(getattr(agent, "llm", None), args, metrics, len(queries))
-    write_report(args, metrics, len(queries), comment)
+    write_report(args, metrics, len(queries), comment, cfg, retriever)
 
 
 if __name__ == "__main__":

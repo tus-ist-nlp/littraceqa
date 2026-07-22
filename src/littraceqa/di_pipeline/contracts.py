@@ -35,6 +35,11 @@ class Query:
     answer_types: list[str]
     # 回答が table 型のときだけ与えられる列定義: [{"name": ..., "type": ..., "is_row_key": bool}]
     table_schema: list[dict] | None = None
+    # multiple_choice の選択肢 {"A": "...", "B": "..."}。これは「正解」ではなく問題の一部
+    # （どれが正解かは gold にしかない）。回答生成に使う。validation_inputs.jsonl には
+    # 無いので、評価時は run_search.py が validation.jsonl の options だけを結合する
+    # （gold は絶対に読まない）。
+    options: dict | None = None
     # 以下2つは本番入力には無い。手元の検証データにだけ入っている。
     task_family: str | None = None  # 観測値: "hidden_source_single_paper" / "multi_paper"
     primary_evidence_type: str | None = None  # 観測値: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
@@ -45,6 +50,7 @@ class Query:
             "question": self.question,
             "answer_types": self.answer_types,
             "table_schema": self.table_schema,
+            "options": self.options,
             "task_family": self.task_family,
             "primary_evidence_type": self.primary_evidence_type,
         }
@@ -57,6 +63,7 @@ class Query:
             question=d["question"],
             answer_types=d.get("answer_types") or [],
             table_schema=d.get("table_schema"),
+            options=d.get("options"),
             task_family=d.get("task_family"),
             primary_evidence_type=d.get("primary_evidence_type"),
         )
@@ -242,6 +249,11 @@ class Prediction:
     evidence: list[Evidence]
     answer: Answer
     trace: list[dict] = field(default_factory=list)  # デバッグ用ログ（採点対象外）
+    # 検索が集めた候補論文をスコア順に並べたもの（採点対象外）。gold_papers は LLM の
+    # 選定と cutoff で数本に絞られるため、これだけでは「検索が gold を候補に拾えて
+    # いたか」を後から測れない。上位50本を残せば、予測を作り直さずに
+    # recall@5/10/20/50 まで計算できる（再実行は LLM コストが高いので多めに持つ）。
+    candidate_papers: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -250,6 +262,7 @@ class Prediction:
             "evidence": [item.to_dict() for item in self.evidence],
             "answer": self.answer.to_dict(),
             "trace": self.trace,
+            "candidate_papers": self.candidate_papers,
         }
 
     @classmethod
@@ -260,4 +273,5 @@ class Prediction:
             evidence=[],
             answer=Answer(),
             trace=[],
+            candidate_papers=[],
         )

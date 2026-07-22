@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from littraceqa.di_pipeline.agent.reading import ReadingAgent
+from littraceqa.di_pipeline.agent.reading import CANDIDATE_PAPERS_LIMIT, ReadingAgent
 from littraceqa.di_pipeline.contracts import Query, RetrievalResult
 from littraceqa.di_pipeline.llm.fake import FakeLLM
 
@@ -190,6 +190,33 @@ def test_drops_hallucinated_paper_and_chunk_ids():
     assert len(prediction.evidence) == 1  # 実在しない p0#c99 は落ちる
 
 
+def test_duplicate_chunk_keeps_the_higher_score():
+    """同じチャンクが複数のサブクエリで当たったら、スコアが高いほうを残す。
+
+    後勝ちにすると、サブクエリ1で最上位だったチャンクが後のサブクエリの低い
+    スコアで上書きされ、候補論文の順位が「最後に投げたサブクエリ」に引きずられる。
+    reranker がスコアに順位を書き戻すようになった以上、ここが後勝ちだと
+    rerank の順位がサブクエリ間で壊れる。
+    """
+    retriever = _StubRetriever(
+        {
+            "sq-a": [_result(0, "pA", 9.0), _result(0, "pB", 1.0)],
+            # pA#c00 は sq-a と同じチャンク。スコアだけが低い。
+            "sq-b": [_result(0, "pA", 0.1), _result(0, "pB", 2.0)],
+        }
+    )
+    llm = FakeLLM(
+        responses=[_subqueries("sq-a", "sq-b"), _judge(["pA"], sufficient=True)]
+    )
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, top_k=5)
+    agent.run(_query())
+
+    # 候補一覧は _read_and_judge のプロンプトに関連度順で並ぶ。pA が 9.0 を
+    # 保っていれば pA が先頭、0.1 に上書きされていれば pB (2.0) が先頭になる。
+    listing = llm.calls[-1]
+    assert listing.index("[paper_id: pA]") < listing.index("[paper_id: pB]")
+
+
 @pytest.mark.parametrize(
     "task_family,expected", [("hidden_source_single_paper", 2), ("multi_paper", 5)]
 )
@@ -202,3 +229,40 @@ def test_falls_back_to_cutoff_when_llm_output_is_unusable(task_family, expected)
 
     assert len(prediction.gold_papers) == expected
     assert prediction.evidence == []
+
+
+def test_candidate_papers_records_ranking_before_cutoff():
+    """打ち切り前の候補論文を関連度順で残す（recall@k の分析に使う）。
+
+    gold_papers は LLM の選定と cutoff で数本に絞られるので、これだけでは
+    「検索がそもそも gold を候補に拾えていたか」を後から測れない。
+    """
+    retriever = _StubRetriever(
+        {"sq": [_result(0, f"p{i}", 10.0 - i) for i in range(8)]}
+    )
+    llm = FakeLLM(
+        responses=[
+            _subqueries("sq"),
+            _judge(["p0"], sufficient=True),  # 提出は1本に絞られる
+        ]
+    )
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, top_k=8, paper_cutoff="llm")
+    prediction = agent.run(_query())
+
+    # 提出は絞られても、候補はスコア降順で丸ごと残っている。
+    assert [p["paper_id"] for p in prediction.gold_papers] == ["p0"]
+    assert prediction.candidate_papers == [f"p{i}" for i in range(8)]
+
+
+def test_candidate_papers_is_capped():
+    """候補列は CANDIDATE_PAPERS_LIMIT 本で頭打ちにする（予測ファイルの肥大化を防ぐ）。"""
+    n = CANDIDATE_PAPERS_LIMIT + 10
+    retriever = _StubRetriever(
+        {"sq": [_result(0, f"p{i:03d}", float(n - i)) for i in range(n)]}
+    )
+    llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p000"], sufficient=True)])
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, top_k=n, paper_cutoff="llm")
+    prediction = agent.run(_query())
+
+    assert len(prediction.candidate_papers) == CANDIDATE_PAPERS_LIMIT
+    assert prediction.candidate_papers[0] == "p000"  # 最上位が先頭
