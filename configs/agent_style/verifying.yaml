@@ -1,3 +1,0 @@
-name: verifying
-llm: { name: fake, params: {} }  # Replace after implementing a production LLM client.
-params: { top_k: 20, max_candidates: 15, max_papers: 20 }

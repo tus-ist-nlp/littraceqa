@@ -15,6 +15,22 @@ import re
 from pathlib import Path
 from typing import Any
 
+from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE
+
+# 候補上位 k 本に gold 論文が入っていたか。paper_recall_macro は「LLM がどう絞ったか」と
+# 「検索がそもそも拾えていたか」が混ざるが、こちらは絞り込み前の検索力だけを見る。
+#
+# 看板は recall@20（agent_style/reading.yaml の max_candidates=20 と一致＝LLM が実際に
+# 見られる範囲＝実システムの天井）。k を並べてカーブで見るのは、recall@20 だけだと
+# 「1位で当てた」と「20位でギリギリ入った」が区別できず、reranker や RRF 重みを
+# いじる余地があるのかが見えないため:
+#   recall@1 が高い          -> 順位付けまで的確
+#   recall@1 低 / @20 高     -> 拾えているが順位が弱い（reranker/RRF重みが効く）
+#   recall@20 も低い         -> そもそも索引に引っかかっていない（索引構成/分解の問題）
+# 上限50は reading.py の CANDIDATE_PAPERS_LIMIT（予測に残す候補本数）に合わせている。
+CANDIDATE_RECALL_KS = (1, 5, 10, 20, 50)
+CANDIDATE_RECALL_SCENARIOS = ("single", "multi", "total")
+
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
@@ -136,6 +152,47 @@ def prf(gold: set[Any], pred: set[Any]) -> tuple[float, float, float]:
     else:
         f1 = 0.0
     return (precision, recall, f1)
+
+
+def candidate_paper_ids(record: dict[str, Any]) -> list[str] | None:
+    """予測レコードの candidate_papers（関連度順）を正規化して返す。
+
+    このフィールドを持たない古い予測ファイルとは区別したいので、「無い」場合は
+    空リストではなく None を返す（呼び出し側で指標そのものを出さないため）。
+    """
+    papers = record.get("candidate_papers")
+    if not isinstance(papers, list):
+        return None
+    paper_ids: list[str] = []
+    for item in papers:
+        if isinstance(item, str):
+            paper_id = item
+        elif isinstance(item, dict):
+            paper_id = item.get("paper_id", "")
+        else:
+            paper_id = ""
+        paper_id = normalize_id(paper_id)
+        # 順位が意味を持つのでソートせず、重複だけ落として出現順を保つ。
+        if paper_id and paper_id not in paper_ids:
+            paper_ids.append(paper_id)
+    return paper_ids
+
+
+def recall_at_k(gold: set[str], ranked: list[str], k: int) -> float:
+    """関連度順 ranked の上位 k 本で gold をどれだけ拾えたか。
+
+    gold が空のときに 1.0 を返すのは prf() の recall と挙動を揃えるため。
+    """
+    if not gold:
+        return 1.0
+    return len(gold & set(ranked[:k])) / len(gold)
+
+
+def macro_or_none(values: list[float]) -> float | None:
+    """該当クエリが1件も無ければ None を返す（mean() の 0.0 と区別する）。"""
+    if not values:
+        return None
+    return mean(values)
 
 
 def prediction_answer(record: dict[str, Any]) -> dict[str, Any]:
@@ -263,248 +320,6 @@ def mean(values: list[float]) -> float:
     return 0.0
 
 
-def paper_group_summary(
-    values: list[tuple[float, float, float, bool]],
-) -> dict[str, Any]:
-    """Summarize paper retrieval for one gold-paper-count group."""
-    return {
-        "count": len(values),
-        "paper_precision_macro": mean([value[0] for value in values]),
-        "paper_recall_macro": mean([value[1] for value in values]),
-        "paper_f1_macro": mean([value[2] for value in values]),
-        "all_gold_count": sum(value[3] for value in values),
-        "all_gold_rate": mean([float(value[3]) for value in values]),
-    }
-
-
-def ordered_paper_ids(record: dict[str, Any]) -> list[str]:
-    """Return unique paper IDs while preserving their retrieval order.
-
-    Ranking files use ``papers``. The other accepted field names make this
-    helper usable with existing prediction and diagnostic artifacts without
-    changing the legacy set-based evaluator.
-    """
-    papers: Any = []
-    for field_name in ("papers", "ranked_papers", "results", "gold_papers"):
-        candidate = record.get(field_name)
-        if isinstance(candidate, list):
-            papers = candidate
-            break
-
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for item in papers:
-        if isinstance(item, str):
-            paper_id = item
-        elif isinstance(item, dict):
-            paper_id = item.get("paper_id", "")
-        else:
-            paper_id = ""
-        normalized = normalize_id(paper_id)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            ordered.append(normalized)
-    return ordered
-
-
-def _validated_cutoffs(cutoffs: tuple[int, ...]) -> tuple[int, ...]:
-    normalized = tuple(sorted(set(cutoffs)))
-    if not normalized or any(cutoff <= 0 for cutoff in normalized):
-        raise ValueError("cutoffs must contain positive integers")
-    return normalized
-
-
-def ranked_query_metrics(
-    gold_paper_ids: set[str],
-    ranked_paper_ids: list[str],
-    cutoffs: tuple[int, ...] = (5, 10, 20),
-) -> dict[str, float | int | bool]:
-    """Compute ordered paper-retrieval metrics for one query.
-
-    Precision@k uses ``k`` as its denominator even when a ranking is shorter.
-    nDCG uses binary relevance, and duplicate retrieved IDs only count at their
-    first occurrence.
-    """
-    cutoffs = _validated_cutoffs(cutoffs)
-    unique_ranking: list[str] = []
-    seen: set[str] = set()
-    for paper_id in ranked_paper_ids:
-        normalized = normalize_id(paper_id)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            unique_ranking.append(normalized)
-
-    metrics: dict[str, float | int | bool] = {
-        "ranked_paper_count": len(unique_ranking),
-    }
-    for cutoff in cutoffs:
-        retrieved = unique_ranking[:cutoff]
-        relevant_count = sum(paper_id in gold_paper_ids for paper_id in retrieved)
-        precision = relevant_count / cutoff
-        recall = relevant_count / len(gold_paper_ids) if gold_paper_ids else 0.0
-        if precision + recall:
-            f1 = 2 * precision * recall / (precision + recall)
-        else:
-            f1 = 0.0
-        metrics[f"paper_precision_at_{cutoff}"] = precision
-        metrics[f"paper_recall_at_{cutoff}"] = recall
-        metrics[f"paper_f1_at_{cutoff}"] = f1
-        metrics[f"relevant_paper_count_at_{cutoff}"] = relevant_count
-        metrics[f"all_gold_at_{cutoff}"] = bool(
-            gold_paper_ids and gold_paper_ids.issubset(set(retrieved))
-        )
-
-    reciprocal_rank = 0.0
-    for rank, paper_id in enumerate(unique_ranking, start=1):
-        if paper_id in gold_paper_ids:
-            reciprocal_rank = 1.0 / rank
-            break
-    metrics["reciprocal_rank"] = reciprocal_rank
-
-    ndcg_cutoff = 10
-    dcg = sum(
-        1.0 / math.log2(rank + 1)
-        for rank, paper_id in enumerate(unique_ranking[:ndcg_cutoff], start=1)
-        if paper_id in gold_paper_ids
-    )
-    ideal_relevant = min(len(gold_paper_ids), ndcg_cutoff)
-    idcg = sum(
-        1.0 / math.log2(rank + 1)
-        for rank in range(1, ideal_relevant + 1)
-    )
-    metrics["ndcg_at_10"] = dcg / idcg if idcg else 0.0
-    return metrics
-
-
-def ranked_paper_summary(
-    query_metrics: list[dict[str, float | int | bool]],
-    cutoffs: tuple[int, ...] = (5, 10, 20),
-) -> dict[str, float | int]:
-    """Aggregate ordered paper metrics across queries using macro averages."""
-    cutoffs = _validated_cutoffs(cutoffs)
-    summary: dict[str, float | int] = {"count": len(query_metrics)}
-    ranking_lengths = [
-        int(metrics["ranked_paper_count"]) for metrics in query_metrics
-    ]
-    summary["ranked_paper_count_mean"] = mean(
-        [float(length) for length in ranking_lengths]
-    )
-    summary["ranked_paper_count_min"] = min(ranking_lengths, default=0)
-    summary["ranked_paper_count_max"] = max(ranking_lengths, default=0)
-    for cutoff in cutoffs:
-        for metric_name in ("precision", "recall", "f1"):
-            key = f"paper_{metric_name}_at_{cutoff}"
-            summary[f"{key}_macro"] = mean(
-                [float(metrics[key]) for metrics in query_metrics]
-            )
-        all_gold_key = f"all_gold_at_{cutoff}"
-        all_gold_count = sum(bool(metrics[all_gold_key]) for metrics in query_metrics)
-        summary[f"{all_gold_key}_count"] = all_gold_count
-        summary[f"{all_gold_key}_rate"] = mean(
-            [float(bool(metrics[all_gold_key])) for metrics in query_metrics]
-        )
-        relevant_count_key = f"relevant_paper_count_at_{cutoff}"
-        summary[f"{relevant_count_key}_total"] = sum(
-            int(metrics[relevant_count_key]) for metrics in query_metrics
-        )
-    summary["mrr"] = mean(
-        [float(metrics["reciprocal_rank"]) for metrics in query_metrics]
-    )
-    summary["ndcg_at_10_macro"] = mean(
-        [float(metrics["ndcg_at_10"]) for metrics in query_metrics]
-    )
-    return summary
-
-
-def _records_by_query_id(
-    records: list[dict[str, Any]],
-    *,
-    source_name: str,
-) -> dict[str, dict[str, Any]]:
-    indexed: dict[str, dict[str, Any]] = {}
-    for record_number, record in enumerate(records, start=1):
-        query_id = normalize_id(record.get("query_id"))
-        if not query_id:
-            raise ValueError(f"{source_name} record {record_number} has no query_id")
-        if query_id in indexed:
-            raise ValueError(f"{source_name} contains duplicate query_id: {query_id}")
-        indexed[query_id] = record
-    return indexed
-
-
-def evaluate_rankings(
-    gold_records: list[dict[str, Any]],
-    ranking_records: list[dict[str, Any]],
-    cutoffs: tuple[int, ...] = (5, 10, 20),
-) -> dict[str, Any]:
-    """Evaluate ordered paper rankings without using development-only labels."""
-    cutoffs = _validated_cutoffs(cutoffs)
-    gold_by_id = _records_by_query_id(gold_records, source_name="gold")
-    ranking_by_id = _records_by_query_id(ranking_records, source_name="ranking")
-    missing_rankings = sorted(set(gold_by_id) - set(ranking_by_id))
-    extra_rankings = sorted(set(ranking_by_id) - set(gold_by_id))
-
-    all_metrics: list[dict[str, float | int | bool]] = []
-    grouped_metrics: dict[str, list[dict[str, float | int | bool]]] = {
-        "single_gold_paper": [],
-        "multiple_gold_papers": [],
-    }
-    query_details: list[dict[str, Any]] = []
-    no_gold_paper_queries = 0
-
-    for query_id, gold in gold_by_id.items():
-        ranking_missing = query_id not in ranking_by_id
-        ranking = ranking_by_id.get(query_id, {})
-        gold_ids = paper_id_set(gold)
-        ranked_ids = ordered_paper_ids(ranking)
-        metrics = ranked_query_metrics(gold_ids, ranked_ids, cutoffs)
-
-        if len(gold_ids) == 1:
-            group = "single_gold_paper"
-        elif len(gold_ids) > 1:
-            group = "multiple_gold_papers"
-        else:
-            group = "no_gold_paper"
-            no_gold_paper_queries += 1
-        # Recall and all-gold recovery are undefined without a gold paper.
-        # Keep such records visible for input auditing, but do not let them
-        # dilute aggregate retrieval metrics or paired method comparisons.
-        if gold_ids:
-            all_metrics.append(metrics)
-        if group in grouped_metrics:
-            grouped_metrics[group].append(metrics)
-
-        query_details.append(
-            {
-                "query_id": query_id,
-                "gold_paper_ids": sorted(gold_ids),
-                "gold_paper_count": len(gold_ids),
-                "gold_count_group": group,
-                "ranked_paper_ids": ranked_ids,
-                "ranking_missing": ranking_missing,
-                "metrics": metrics,
-            }
-        )
-
-    return {
-        "metrics": ranked_paper_summary(all_metrics, cutoffs),
-        "paper_metrics_by_gold_count": {
-            name: ranked_paper_summary(metrics, cutoffs)
-            for name, metrics in grouped_metrics.items()
-        },
-        "details": {
-            "total": len(gold_records),
-            "paper_metric_query_count": len(all_metrics),
-            "missing_ranking_count": len(missing_rankings),
-            "extra_ranking_count": len(extra_rankings),
-            "no_gold_paper_query_count": no_gold_paper_queries,
-            "missing_rankings": missing_rankings,
-            "extra_rankings": extra_rankings,
-        },
-        "queries": query_details,
-    }
-
-
 def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, Any]]) -> dict[str, Any]:
     gold_by_id = {normalize_id(record.get("query_id")): record for record in gold_records}
     pred_by_id = {normalize_id(record.get("query_id")): record for record in pred_records}
@@ -512,6 +327,10 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
 
     missing_predictions = sorted(set(gold_by_id) - set(pred_by_id))
     extra_predictions = sorted(set(pred_by_id) - set(gold_by_id))
+
+    # 1件でも候補列を持てば新形式の予測ファイルとみなす。ファイル全体に無ければ
+    # （この変更より前に作った予測）指標を None にして、黙って 0.0 を出さない。
+    has_candidate_papers = any("candidate_papers" in record for record in pred_records)
 
     paper_precision: list[float] = []
     paper_recall: list[float] = []
@@ -527,32 +346,37 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
     table_cell_accuracy: list[float] = []
     table_cell_correct = 0
     table_cell_total = 0
-    paper_groups: dict[str, list[tuple[float, float, float, bool]]] = {
-        "single_gold_paper": [],
-        "multiple_gold_papers": [],
+    # シナリオ -> k -> クエリごとの recall。single/multi は gold の task_family で振り分け、
+    # total は全クエリ（＝single と multi の加重平均になる）。
+    candidate_recall: dict[str, dict[int, list[float]]] = {
+        scenario: {k: [] for k in CANDIDATE_RECALL_KS}
+        for scenario in CANDIDATE_RECALL_SCENARIOS
     }
-    no_gold_paper_queries = 0
 
     for query_id, gold in gold_by_id.items():
         pred = pred_by_id.get(query_id, {})
 
-        gold_paper_ids = paper_id_set(gold)
-        pred_paper_ids = paper_id_set(pred)
-        p, r, f = prf(gold_paper_ids, pred_paper_ids)
+        p, r, f = prf(paper_id_set(gold), paper_id_set(pred))
         paper_precision.append(p)
         paper_recall.append(r)
         paper_f1.append(f)
-        if len(gold_paper_ids) == 1:
-            group = "single_gold_paper"
-        elif len(gold_paper_ids) > 1:
-            group = "multiple_gold_papers"
-        else:
-            group = None
-            no_gold_paper_queries += 1
-        if group is not None:
-            paper_groups[group].append(
-                (p, r, f, gold_paper_ids.issubset(pred_paper_ids))
-            )
+
+        if has_candidate_papers:
+            # 打ち切り前の候補上位 k 本に gold 論文が入っていたか（＝検索力）。
+            gold_paper_ids = paper_id_set(gold)
+            ranked = candidate_paper_ids(pred) or []
+            # task_family は本番入力から削られる（run_search.py --production-input）ため、
+            # 予測側ではなく必ず gold 側から読む。未知/欠落なら total にだけ入れる。
+            task_family = normalize_id(gold.get("task_family"))
+            scenarios = ["total"]
+            if task_family == SINGLE:
+                scenarios.append("single")
+            elif task_family == MULTI:
+                scenarios.append("multi")
+            for k in CANDIDATE_RECALL_KS:
+                recall = recall_at_k(gold_paper_ids, ranked, k)
+                for scenario in scenarios:
+                    candidate_recall[scenario][k].append(recall)
 
         p, r, f = prf(evidence_set(gold), evidence_set(pred))
         evidence_precision.append(p)
@@ -593,6 +417,15 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             "paper_precision_macro": mean(paper_precision),
             "paper_recall_macro": mean(paper_recall),
             "paper_f1_macro": mean(paper_f1),
+            # 検索が候補として拾えていたか（LLM の絞り込み前）。gold の task_family 別に
+            # k を並べてカーブで出す。シナリオごとに k 昇順で並べて表で読みやすくする。
+            **{
+                f"candidate_recall_at{k}_{scenario}_macro": macro_or_none(
+                    candidate_recall[scenario][k]
+                )
+                for scenario in CANDIDATE_RECALL_SCENARIOS
+                for k in CANDIDATE_RECALL_KS
+            },
             "evidence_precision_macro": mean(evidence_precision),
             "evidence_recall_macro": mean(evidence_recall),
             "evidence_f1_macro": mean(evidence_f1),
@@ -602,17 +435,18 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             "table_cell_accuracy_macro": mean(table_cell_accuracy),
             "table_cell_accuracy_micro": table_cell_accuracy_micro,
         },
-        "paper_metrics_by_gold_count": {
-            name: paper_group_summary(values)
-            for name, values in paper_groups.items()
-        },
         "details": {
             "total": len(gold_records),
             "missing_prediction_count": len(missing_predictions),
             "extra_prediction_count": len(extra_predictions),
+            # 各シナリオが何件のクエリで測れたかの内訳（数字の妥当性確認用）。
+            "candidate_recall_ks": list(CANDIDATE_RECALL_KS),
+            "candidate_recall_counts": {
+                scenario: len(candidate_recall[scenario][CANDIDATE_RECALL_KS[0]])
+                for scenario in CANDIDATE_RECALL_SCENARIOS
+            },
             "table_cell_correct": table_cell_correct,
             "table_cell_total": table_cell_total,
-            "no_gold_paper_query_count": no_gold_paper_queries,
             "missing_predictions": missing_predictions,
             "extra_predictions": extra_predictions,
         },

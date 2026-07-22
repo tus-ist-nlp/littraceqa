@@ -1,2 +1,0 @@
-name: simple
-params: { top_k: 20, max_papers: 20 }

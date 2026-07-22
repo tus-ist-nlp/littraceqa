@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from litqa.preprocess.marker_chunker import MarkerChunker
+from littraceqa.di_pipeline.preprocess.marker_chunker import MarkerChunker
 
 
 class _FakeBlock:

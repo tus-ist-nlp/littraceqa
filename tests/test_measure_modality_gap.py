@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from litqa.contracts import RetrievalResult
+from littraceqa.di_pipeline.contracts import RetrievalResult
 from measure_modality_gap import compute_modality_hit_rates
 
 

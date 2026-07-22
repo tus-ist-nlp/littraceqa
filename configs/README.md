@@ -1,94 +1,85 @@
 # configs/ の使い方
 
-## 構成
+## コンセプト
 
-前処理・検索・エージェント・環境パスを独立したYAMLとして管理します。
+前処理・検索手法・エージェント・共有パスは、それぞれ独立に差し替え可能な4つの軸として分離されている。
+1つのyamlに全部まとめず、**4フォルダから1ファイルずつ選んで組み合わせて使う**。
 
-```text
+```
 configs/
-├── paths/          実行環境の入力・出力root
-├── process_style/  Preprocessor
-├── search_style/   Indexer、Fuser、Reranker
-└── agent_style/    Agentと任意のLLM
+├── paths/           共有パス（pdf_dir, index_dirのルート等）
+├── process_style/    前処理（Preprocessor）
+├── search_style/     検索手法（Indexer群 + Fuser + Reranker）
+└── agent_style/       エージェント（Agent）
 ```
 
-`litqa/config.py`の`compose_config()`が4つの設定を合成します。同じ検索方式を別の
-前処理へ適用しても、Chunkと索引はprocess名ごとのnamespaceへ分離されます。
-環境や利用者ごとに変わる絶対パスはprocess/search YAMLへ書かず、paths YAML、
-環境変数、またはCLI引数で渡してください。
+これは `src/littraceqa/di_pipeline/` 側のDI設計（`registry.py` で `@register(kind, name)` したクラスを
+`registry.build(kind, name, **params)` で組み立てる仕組み）をそのままconfigの
+ファイル単位に反映したもの。`src/littraceqa/di_pipeline/config.py` の `compose_config()` が4つの
+dictを合成し、`build_pipeline()` に渡す。
 
-## 現在の比較に使う設定
+## なぜ分けているか
 
-前処理:
+- **本文チャンク(mineru)を図表チャンク(figure_vlm)に差し替えても、検索手法やエージェントの設定を書き直さなくていい**
+- **同じ検索手法(search_style)を別の前処理(process_style)と組み合わせても、索引の保存先が衝突しない**
+  - `process_style`/`search_style` のファイルには `pdf_dir`/`index_dir` を書かない
+  - `compose_config()` が `paths` から `{index_dir}/{process名}/{indexer名}` のように自動導出する
+  - 例: `mineru + bm25s` → `index/mineru/bm25s`、`figure_vlm + bm25s` → `index/figure_vlm/bm25s`（別物として保存される）
+- 新しい手法を1つ追加したいだけなのに、既存の組み合わせファイルを全部複製・修正する必要がない
 
-- `pypdf.yaml`: PDF本文をページ単位で抽出
-- `marker.yaml`: Markerで本文・図・表・数式を抽出
-- `figure_vlm.yaml`: 図表画像と説明を抽出
-- `mineru.yaml`: 既存MinerU `content_list.json`を読み込むv1
-- `mineru_v2.yaml`: ページ単位の`content_list_v2.json`を読み込むv2
-
-検索:
-
-- `bm25.yaml`: 共通ChunkのBM25
-- `bm25_paper_rank_rrf_fill_to_top_k.yaml`: Chunk BM25と論文単位BM25を
-  paper ID単位で融合する、モデル不要のbaseline
-- `bge_m3_title_abstract.yaml`: 1論文1件の`title_abstract`をBGE-M3で検索
-- `bm25_paper_bge_m3_rrf.yaml`: BM25、論文単位BM25、BGE-M3をPaperRank RRFで融合
-
-BGE-M3は固定revisionを`local_files_only: true`で読みます。cloneや`uv sync`では
-snapshotを取得しないため、利用者が外部パスまたはローカルmodel cacheへ準備する
-必要があります。
-
-## MinerUを1〜3論文で確認する
+## 使い方
 
 ```bash
-export MINERU_ROOT=/path/to/read-only/mineru
-export READ_ONLY_ROOT=/path/to/read-only-data
-export ARTIFACT_ROOT="$HOME/littraceqa_data/mineru_eval/smoke"
-
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
   --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_paper_rank_rrf_fill_to_top_k.yaml \
-  --agent configs/agent_style/simple.yaml \
+  --search configs/search_style/abstract_specter2_body_qwen3.yaml \
+  --agent configs/agent_style/reading.yaml \
   --queries data/validation_inputs.jsonl \
-  --output "$ARTIFACT_ROOT/predictions.jsonl" \
-  --gold data/validation.jsonl \
-  --build \
-  --mineru-root "$MINERU_ROOT" \
-  --artifact-root "$ARTIFACT_ROOT" \
-  --read-only-root "$READ_ONLY_ROOT" \
-  --paper-id <paper-id-1> \
-  --paper-id <paper-id-2> \
-  --limit 2 \
-  --workers 1 \
-  --batch-size 1 \
-  --resume
+  --output predictions.jsonl \
+  --build   # 初回のみ（前処理+索引構築）。2回目以降は外す（mineruは構築済みなので通常不要）
 ```
 
-v2を比較する場合は、他の条件を変えず`--process`だけを
-`configs/process_style/mineru_v2.yaml`へ変更し、別の`ARTIFACT_ROOT`を使います。
-少数論文のsmoke testは変換と接続の確認であり、検索精度の主張には使いません。
+組み合わせを変えたいときは、該当する引数だけ差し替える。他の3つはそのままでよい。
 
-## Bounded buildとresume
+```bash
+# 検索手法だけColBERTに変える
+  --search configs/search_style/bm25_colbert.yaml
 
-現在のrunnerは次の制約を持ちます。
+# 前処理を図表チャンク(figure_vlm)に変える
+  --process configs/process_style/figure_vlm.yaml
+```
 
-- build時は正の`--limit`が必須
-- 最大200論文まで。全件実行は拒否
-- workerとbatch sizeの既定値は1
-- `--artifact-root`は読み取り専用入力の外側に置く
-- 論文ごとにChunk shardとstateを保存
-- 設定、コード、依存版、入力checksumが一致するときだけresume
-- 失敗したpaper IDを記録し、他の論文は続行
+4フォルダのファイルはどう組み合わせても壊れない設計なので、新しいyamlを
+書く必要があるのは「まだ存在しない前処理・検索手法・エージェント自体」を
+追加するときだけ。
 
-`--resume`でも入力checksum確認の読み取りI/Oは発生します。全コーパスへ広げる前に、
-増分索引、shard、容量制限、CPU・メモリ制限を設計してください。
+## 現在のファイル一覧
 
-## 公平な比較
+```
+configs/
+├── paths/
+│   └── default.yaml
+├── process_style/
+│   ├── marker.yaml           : PDFをブロック単位でチャンク化
+│   ├── mineru.yaml           : MinerU。事前に scripts/run_mineru.py で変換が必要（デフォルト、構築済み）
+│   └── figure_vlm.yaml       : Docling+Qwen2-VLで図表をチャンク化
+├── search_style/
+│   ├── bm25.yaml             : BM25 単体
+│   ├── bm25_qwen3.yaml       : BM25 + Qwen3-Embedding-8B
+│   ├── bm25_colbert.yaml     : BM25 + ColBERT
+│   ├── bm25_specter2.yaml    : BM25 + SPECTER2（全チャンク版）
+│   ├── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding）
+│   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) +
+│         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う（デフォルト、構築済み）
+└── agent_style/
+    └── reading.yaml          : 分解→読解→不足分の再検索を繰り返す唯一の本命（デフォルト）
+```
 
-前処理または検索方式以外は固定します。少なくとも、paper集合、質問、BGE revision、
-Chunk長、候補深さ、RRFの`k`、最終cutoff、評価コードを揃えます。gold annotationは
-検索終了後の評価段階だけで読み、`task_family`と`primary_evidence_type`を検索に
-使用しません。評価方法は[search_style/README.md](search_style/README.md)を
-参照してください。
+推奨デフォルトの組み合わせ: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml` + `agent_style/reading.yaml`
+
+## 新しい手法を追加するとき
+
+新しい Indexer / Preprocessor / Agent を実装したら、対応するフォルダに
+設定ファイルを1つ追加する。詳しいルールは `CLAUDE.md` の
+「検索手法を追加するときのルール」を参照。

@@ -1,3 +1,0 @@
-name: pypdf
-params:
-  max_chars_per_chunk: 2000

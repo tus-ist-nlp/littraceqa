@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """複数の chunks.jsonl を1つに結合する汎用マージスクリプト。
 
-本文チャンク（pypdf / docint など、本文ソースは問わない）と図表チャンク
+本文チャンク（marker / docint など、本文ソースは問わない）と図表チャンク
 （figure_vlm）のように、別々の Preprocessor で生成した chunks.jsonl を
 まとめて1つの索引対象にするために使う。
 
 使い方:
     uv run python scripts/merge_chunks.py \\
-      --inputs pypdf_chunks.jsonl figure_chunks.jsonl \\
+      --inputs marker_chunks.jsonl figure_chunks.jsonl \\
       --output chunks.jsonl
 """
 
@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from litqa.contracts import Chunk
+from littraceqa.di_pipeline.contracts import Chunk
 
 
 def load_chunks(path: Path) -> list[Chunk]:

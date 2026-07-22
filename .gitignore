@@ -1,17 +1,36 @@
 # uv / Python environment
 .venv/
+# MinerU 用の隔離環境（scripts/setup_mineru_env.sh が作る）
+.venv-mineru/
 __pycache__/
 *.py[cod]
 
 # uv cache
 .uv/
+.uv-bootstrap/
 
-# Local Codex working notes
-/codex.md
-/paper_ids_200.txt
+# Generated compatibility exports; keep dependencies in pyproject.toml.
+requirements.txt
+
+# Local secrets
+.env
 
 # setuptools build metadata
 *.egg-info/
 
 # Downloaded PDF cache (scripts/download_pdfs.py default --output)
 pdfs/
+
+# 実行ログ（索引構築・検索の進捗。巨大かつ再現可能なので追跡しない）
+logs/
+# 予測結果（実験の生成物。results/experiments.jsonl に config とスコアが残るので再現可能）
+predictions*.jsonl
+# 実行ごとのレポート（生成物。results/experiments.jsonl があれば再現可能）
+report/
+# 実験ログ（各自のローカルな実行記録。チーム共有はしない）
+results/
+
+# Local pipeline outputs
+archives/
+artifacts/
+runs/
