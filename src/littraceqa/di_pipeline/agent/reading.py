@@ -33,6 +33,11 @@ from littraceqa.di_pipeline.registry import register
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
 
 
+# 予測ファイルに残す候補論文の本数。看板指標は recall@20 だが、再実行が高コストなので
+# あとから recall@50 まで測れるよう多めに持たせる。
+CANDIDATE_PAPERS_LIMIT = 50
+
+
 @register("agent", "reading")
 class ReadingAgent:
     """候補を読んで根拠を確定し、足りなければ検索し直す反復エージェント。"""
@@ -71,7 +76,13 @@ class ReadingAgent:
             tried.extend(subqueries)
             for subquery in subqueries:
                 for result in self.retriever.retrieve(subquery, self.top_k):
-                    chunks[result.chunk_id] = result
+                    # 同じチャンクが複数のサブクエリで当たったら、スコアが高いほうを残す。
+                    # 後勝ちにすると、サブクエリ1で最上位だったチャンクがサブクエリ3の
+                    # 低いスコアで上書きされ、_candidate_papers の論文順位が
+                    # 「最後に投げたサブクエリ」に引きずられる。
+                    previous = chunks.get(result.chunk_id)
+                    if previous is None or result.score > previous.score:
+                        chunks[result.chunk_id] = result
 
             candidates = self._candidate_papers(chunks)
             new_verdict = self._read_and_judge(query, candidates, chunks)
@@ -278,9 +289,17 @@ class ReadingAgent:
         chunks: dict[str, RetrievalResult],
         trace: list[dict],
     ) -> Prediction:
+        # 反復中に溜めたチャンクを論文順位に直したもの。打ち切り前の「検索が拾えた候補」
+        # なので、recall@k の分析はこちらを見る必要がある（gold_papers は LLM 選定と
+        # cutoff の後なので、検索力と選定力が混ざってしまう）。
+        candidate_papers = to_gold_papers(
+            list(chunks.values()), max_papers=CANDIDATE_PAPERS_LIMIT
+        )
+
         if verdict is None:
             # LLM が一度も使える判定を返さなかった場合は検索の順位のまま出す。
-            ranked = to_gold_papers(list(chunks.values()))
+            # 直後の apply_paper_cutoff が最大 max_papers 本に切るので、上限50でも等価。
+            ranked = candidate_papers
             evidence: list[Evidence] = []
         else:
             ranked = verdict["paper_ids"]
@@ -289,21 +308,96 @@ class ReadingAgent:
             ranked, query, self.task_family, self.paper_cutoff, self.max_papers
         )
 
+        evidence_results: list[RetrievalResult] = []
         if verdict is not None:
             # 打ち切りで落ちた論文の evidence は出さない。
             kept = set(paper_ids)
-            evidence = [
-                evidence_from_result(chunks[chunk_id])
+            evidence_results = [
+                chunks[chunk_id]
                 for chunk_id in dict.fromkeys(verdict["evidence_chunk_ids"])
                 if chunks[chunk_id].paper_id in kept
             ]
+            evidence = [evidence_from_result(r) for r in evidence_results]
+
+        # 検索で選んだ根拠チャンクを渡して回答（freeform/multiple_choice/table）を生成する。
+        # 根拠チャンクが空なら、残った論文の上位チャンクにフォールバックする。
+        answer = self._generate_answer(query, evidence_results, chunks, set(paper_ids))
 
         return Prediction(
             query_id=query.query_id,
             gold_papers=[{"paper_id": paper_id} for paper_id in paper_ids],
             evidence=evidence,
-            answer=Answer(),
+            answer=answer,
             trace=trace,
+            candidate_papers=candidate_papers,
+        )
+
+    # ---- 6. 回答生成 ------------------------------------------------------
+
+    def _generate_answer(
+        self,
+        query: Query,
+        evidence_results: list[RetrievalResult],
+        chunks: dict[str, RetrievalResult],
+        kept_paper_ids: set[str],
+    ) -> Answer:
+        """検索が取ってきた根拠チャンクを渡し、回答を生成する（gold は渡さない）。"""
+        if not query.answer_types:
+            return Answer()
+
+        # 回答の根拠は「LLM が選んだ evidence チャンク」を最優先。空なら残った論文の
+        # スコア上位チャンクで補う（回答に必要な値が evidence 外にあることもあるため）。
+        context_results = list(evidence_results)
+        if not context_results:
+            fallback = [r for r in chunks.values() if r.paper_id in kept_paper_ids]
+            fallback.sort(key=lambda r: r.score, reverse=True)
+            context_results = fallback[: self.max_candidates]
+        if not context_results:
+            return Answer()
+
+        context = "\n\n".join(
+            f"[{r.chunk_id}] {r.text[: self.snippet_chars]}" for r in context_results
+        )
+        schema_fields: list[str] = []
+        blocks = [
+            "以下は検索で見つかった根拠チャンクです。この内容だけを根拠に質問に答えてください。",
+            context,
+            f"質問: {query.question}",
+        ]
+        if "freeform" in query.answer_types:
+            schema_fields.append(
+                '"freeform": {"text": "原文からの短い逐語的な値・語句（数値も引用符付き文字列で）"}'
+            )
+        if "multiple_choice" in query.answer_types and query.options:
+            opt_lines = "\n".join(f"{k}: {v}" for k, v in query.options.items())
+            blocks.append(f"選択肢:\n{opt_lines}")
+            schema_fields.append('"multiple_choice": {"gold": "選んだ選択肢のアルファベット1文字"}')
+        if "table" in query.answer_types and query.table_schema:
+            columns = "\n".join(
+                f'- "{c.get("name")}" (type: {c.get("type", "string")}'
+                f'{", row key" if c.get("is_row_key") else ""})'
+                for c in query.table_schema
+                if isinstance(c, dict) and c.get("name")
+            )
+            blocks.append(f"必要な表の列:\n{columns}")
+            schema_fields.append('"table": {"rows": [{"列名": "値", ...}, ...]}')
+
+        if not schema_fields:
+            return Answer()
+
+        blocks.append(
+            "次の JSON 形式だけで答えてください（説明文は不要）:\n"
+            "{ " + ", ".join(schema_fields) + " }"
+        )
+        payload = self._ask_for_json("\n\n".join(blocks)) or {}
+        return Answer(
+            freeform=payload.get("freeform") if "freeform" in query.answer_types else None,
+            multiple_choice=(
+                payload.get("multiple_choice")
+                if "multiple_choice" in query.answer_types
+                else None
+            ),
+            table=payload.get("table") if "table" in query.answer_types else None,
         )
 
     # ---- LLM 呼び出しの薄いラッパ ------------------------------------------

@@ -15,6 +15,22 @@ import re
 from pathlib import Path
 from typing import Any
 
+from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE
+
+# 候補上位 k 本に gold 論文が入っていたか。paper_recall_macro は「LLM がどう絞ったか」と
+# 「検索がそもそも拾えていたか」が混ざるが、こちらは絞り込み前の検索力だけを見る。
+#
+# 看板は recall@20（agent_style/reading.yaml の max_candidates=20 と一致＝LLM が実際に
+# 見られる範囲＝実システムの天井）。k を並べてカーブで見るのは、recall@20 だけだと
+# 「1位で当てた」と「20位でギリギリ入った」が区別できず、reranker や RRF 重みを
+# いじる余地があるのかが見えないため:
+#   recall@1 が高い          -> 順位付けまで的確
+#   recall@1 低 / @20 高     -> 拾えているが順位が弱い（reranker/RRF重みが効く）
+#   recall@20 も低い         -> そもそも索引に引っかかっていない（索引構成/分解の問題）
+# 上限50は reading.py の CANDIDATE_PAPERS_LIMIT（予測に残す候補本数）に合わせている。
+CANDIDATE_RECALL_KS = (1, 5, 10, 20, 50)
+CANDIDATE_RECALL_SCENARIOS = ("single", "multi", "total")
+
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
@@ -136,6 +152,47 @@ def prf(gold: set[Any], pred: set[Any]) -> tuple[float, float, float]:
     else:
         f1 = 0.0
     return (precision, recall, f1)
+
+
+def candidate_paper_ids(record: dict[str, Any]) -> list[str] | None:
+    """予測レコードの candidate_papers（関連度順）を正規化して返す。
+
+    このフィールドを持たない古い予測ファイルとは区別したいので、「無い」場合は
+    空リストではなく None を返す（呼び出し側で指標そのものを出さないため）。
+    """
+    papers = record.get("candidate_papers")
+    if not isinstance(papers, list):
+        return None
+    paper_ids: list[str] = []
+    for item in papers:
+        if isinstance(item, str):
+            paper_id = item
+        elif isinstance(item, dict):
+            paper_id = item.get("paper_id", "")
+        else:
+            paper_id = ""
+        paper_id = normalize_id(paper_id)
+        # 順位が意味を持つのでソートせず、重複だけ落として出現順を保つ。
+        if paper_id and paper_id not in paper_ids:
+            paper_ids.append(paper_id)
+    return paper_ids
+
+
+def recall_at_k(gold: set[str], ranked: list[str], k: int) -> float:
+    """関連度順 ranked の上位 k 本で gold をどれだけ拾えたか。
+
+    gold が空のときに 1.0 を返すのは prf() の recall と挙動を揃えるため。
+    """
+    if not gold:
+        return 1.0
+    return len(gold & set(ranked[:k])) / len(gold)
+
+
+def macro_or_none(values: list[float]) -> float | None:
+    """該当クエリが1件も無ければ None を返す（mean() の 0.0 と区別する）。"""
+    if not values:
+        return None
+    return mean(values)
 
 
 def prediction_answer(record: dict[str, Any]) -> dict[str, Any]:
@@ -271,6 +328,10 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
     missing_predictions = sorted(set(gold_by_id) - set(pred_by_id))
     extra_predictions = sorted(set(pred_by_id) - set(gold_by_id))
 
+    # 1件でも候補列を持てば新形式の予測ファイルとみなす。ファイル全体に無ければ
+    # （この変更より前に作った予測）指標を None にして、黙って 0.0 を出さない。
+    has_candidate_papers = any("candidate_papers" in record for record in pred_records)
+
     paper_precision: list[float] = []
     paper_recall: list[float] = []
     paper_f1: list[float] = []
@@ -285,6 +346,12 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
     table_cell_accuracy: list[float] = []
     table_cell_correct = 0
     table_cell_total = 0
+    # シナリオ -> k -> クエリごとの recall。single/multi は gold の task_family で振り分け、
+    # total は全クエリ（＝single と multi の加重平均になる）。
+    candidate_recall: dict[str, dict[int, list[float]]] = {
+        scenario: {k: [] for k in CANDIDATE_RECALL_KS}
+        for scenario in CANDIDATE_RECALL_SCENARIOS
+    }
 
     for query_id, gold in gold_by_id.items():
         pred = pred_by_id.get(query_id, {})
@@ -293,6 +360,23 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
         paper_precision.append(p)
         paper_recall.append(r)
         paper_f1.append(f)
+
+        if has_candidate_papers:
+            # 打ち切り前の候補上位 k 本に gold 論文が入っていたか（＝検索力）。
+            gold_paper_ids = paper_id_set(gold)
+            ranked = candidate_paper_ids(pred) or []
+            # task_family は本番入力から削られる（run_search.py --production-input）ため、
+            # 予測側ではなく必ず gold 側から読む。未知/欠落なら total にだけ入れる。
+            task_family = normalize_id(gold.get("task_family"))
+            scenarios = ["total"]
+            if task_family == SINGLE:
+                scenarios.append("single")
+            elif task_family == MULTI:
+                scenarios.append("multi")
+            for k in CANDIDATE_RECALL_KS:
+                recall = recall_at_k(gold_paper_ids, ranked, k)
+                for scenario in scenarios:
+                    candidate_recall[scenario][k].append(recall)
 
         p, r, f = prf(evidence_set(gold), evidence_set(pred))
         evidence_precision.append(p)
@@ -333,6 +417,15 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             "paper_precision_macro": mean(paper_precision),
             "paper_recall_macro": mean(paper_recall),
             "paper_f1_macro": mean(paper_f1),
+            # 検索が候補として拾えていたか（LLM の絞り込み前）。gold の task_family 別に
+            # k を並べてカーブで出す。シナリオごとに k 昇順で並べて表で読みやすくする。
+            **{
+                f"candidate_recall_at{k}_{scenario}_macro": macro_or_none(
+                    candidate_recall[scenario][k]
+                )
+                for scenario in CANDIDATE_RECALL_SCENARIOS
+                for k in CANDIDATE_RECALL_KS
+            },
             "evidence_precision_macro": mean(evidence_precision),
             "evidence_recall_macro": mean(evidence_recall),
             "evidence_f1_macro": mean(evidence_f1),
@@ -346,6 +439,12 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             "total": len(gold_records),
             "missing_prediction_count": len(missing_predictions),
             "extra_prediction_count": len(extra_predictions),
+            # 各シナリオが何件のクエリで測れたかの内訳（数字の妥当性確認用）。
+            "candidate_recall_ks": list(CANDIDATE_RECALL_KS),
+            "candidate_recall_counts": {
+                scenario: len(candidate_recall[scenario][CANDIDATE_RECALL_KS[0]])
+                for scenario in CANDIDATE_RECALL_SCENARIOS
+            },
             "table_cell_correct": table_cell_correct,
             "table_cell_total": table_cell_total,
             "missing_predictions": missing_predictions,
