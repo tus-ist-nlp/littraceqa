@@ -15,8 +15,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE
-
 # 候補上位 k 本に gold 論文が入っていたか。paper_recall_macro は「LLM がどう絞ったか」と
 # 「検索がそもそも拾えていたか」が混ざるが、こちらは絞り込み前の検索力だけを見る。
 #
@@ -346,9 +344,13 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
     table_cell_accuracy: list[float] = []
     table_cell_correct = 0
     table_cell_total = 0
-    # シナリオ -> k -> クエリごとの recall。single/multi は gold の task_family で振り分け、
-    # total は全クエリ（＝single と multi の加重平均になる）。
+    # Group by the observed number of gold papers, not validation-only labels.
+    # This keeps evaluation independent of task_family.
     candidate_recall: dict[str, dict[int, list[float]]] = {
+        scenario: {k: [] for k in CANDIDATE_RECALL_KS}
+        for scenario in CANDIDATE_RECALL_SCENARIOS
+    }
+    candidate_all_gold: dict[str, dict[int, list[float]]] = {
         scenario: {k: [] for k in CANDIDATE_RECALL_KS}
         for scenario in CANDIDATE_RECALL_SCENARIOS
     }
@@ -365,18 +367,17 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             # 打ち切り前の候補上位 k 本に gold 論文が入っていたか（＝検索力）。
             gold_paper_ids = paper_id_set(gold)
             ranked = candidate_paper_ids(pred) or []
-            # task_family は本番入力から削られる（run_search.py --production-input）ため、
-            # 予測側ではなく必ず gold 側から読む。未知/欠落なら total にだけ入れる。
-            task_family = normalize_id(gold.get("task_family"))
             scenarios = ["total"]
-            if task_family == SINGLE:
+            if len(gold_paper_ids) == 1:
                 scenarios.append("single")
-            elif task_family == MULTI:
+            elif len(gold_paper_ids) > 1:
                 scenarios.append("multi")
             for k in CANDIDATE_RECALL_KS:
                 recall = recall_at_k(gold_paper_ids, ranked, k)
+                all_gold = float(gold_paper_ids.issubset(set(ranked[:k])))
                 for scenario in scenarios:
                     candidate_recall[scenario][k].append(recall)
+                    candidate_all_gold[scenario][k].append(all_gold)
 
         p, r, f = prf(evidence_set(gold), evidence_set(pred))
         evidence_precision.append(p)
@@ -417,11 +418,18 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             "paper_precision_macro": mean(paper_precision),
             "paper_recall_macro": mean(paper_recall),
             "paper_f1_macro": mean(paper_f1),
-            # 検索が候補として拾えていたか（LLM の絞り込み前）。gold の task_family 別に
-            # k を並べてカーブで出す。シナリオごとに k 昇順で並べて表で読みやすくする。
+            # Report candidate recall before the agent cutoff. Single and multi
+            # groups are derived from gold-paper count.
             **{
                 f"candidate_recall_at{k}_{scenario}_macro": macro_or_none(
                     candidate_recall[scenario][k]
+                )
+                for scenario in CANDIDATE_RECALL_SCENARIOS
+                for k in CANDIDATE_RECALL_KS
+            },
+            **{
+                f"candidate_all_gold_at{k}_{scenario}_rate": macro_or_none(
+                    candidate_all_gold[scenario][k]
                 )
                 for scenario in CANDIDATE_RECALL_SCENARIOS
                 for k in CANDIDATE_RECALL_KS

@@ -7,6 +7,7 @@ LitTraceQA は 27,487 件の科学論文コーパスに対する質問につい�
 
 各クラスの役割（パイプライン順）:
     Query            -- システムへの入力1件（コーパスに対する質問）。
+    SearchHints      -- Optional structured attributes used to softly rerank search results.
     PaperMeta        -- ``data/paper_metadata.jsonl`` の1レコード。
     Chunk            -- 前処理 → 索引 の境界。
     RetrievalResult  -- 索引 → 融合 の境界。
@@ -68,6 +69,68 @@ class Query:
             options=d.get("options"),
             task_family=d.get("task_family"),
             primary_evidence_type=d.get("primary_evidence_type"),
+        )
+
+
+@dataclass(frozen=True)
+class SearchHints:
+    """Optional paper attributes supplied by a search planner.
+
+    Multiple values within one field are alternatives.  Empty tuples mean that
+    the attribute must not affect ranking.  This contract is deliberately
+    independent from ``Query`` so existing callers and production input records
+    remain backward compatible.
+    """
+
+    venues: tuple[str, ...] = ()
+    years: tuple[int, ...] = ()
+    methods: tuple[str, ...] = ()
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether no attribute should influence retrieval."""
+
+        return not (self.venues or self.years or self.methods)
+
+    def to_dict(self) -> dict:
+        return {
+            "venues": list(self.venues),
+            "years": list(self.years),
+            "methods": list(self.methods),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> SearchHints:
+        """Build hints from plural fields while accepting singular aliases."""
+
+        if not data:
+            return cls()
+
+        def values(plural: str, singular: str) -> tuple:
+            value = data.get(plural)
+            if value is None:
+                value = data.get(singular)
+            if value is None:
+                return ()
+            if isinstance(value, (str, int)):
+                return (value,)
+            return tuple(value)
+
+        years: list[int] = []
+        for value in values("years", "year"):
+            try:
+                years.append(int(value))
+            except (TypeError, ValueError):
+                continue
+
+        return cls(
+            venues=tuple(str(value) for value in values("venues", "venue") if str(value).strip()),
+            years=tuple(years),
+            methods=tuple(
+                str(value)
+                for value in values("methods", "method")
+                if str(value).strip()
+            ),
         )
 
 

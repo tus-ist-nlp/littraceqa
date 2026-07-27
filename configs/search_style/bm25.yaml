@@ -3,7 +3,15 @@
 per_index_k: 100
 indexers:
   - name: bm25s
-    params: {}
+    params:
+      method: lucene
+      idf_method: lucene
+      k1: 1.5
+      b: 0.75
+      delta: 0.5
+      resumable_build: true
+      build_batch_size: 256
+      max_batch_characters: 2000000
 fuser:
   name: rrf
   params: { k: 60, weights: { bm25s: 1.0 } }

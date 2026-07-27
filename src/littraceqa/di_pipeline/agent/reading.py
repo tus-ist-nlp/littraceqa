@@ -30,7 +30,8 @@ from littraceqa.di_pipeline.agent.task_family import MULTI, TaskFamilyClassifier
 from littraceqa.di_pipeline.contracts import Answer, Evidence, Prediction, Query, RetrievalResult
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.di_pipeline.registry import register
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
+from littraceqa.di_pipeline.retrieve.base import Retriever
+from littraceqa.di_pipeline.retrieve.hybrid import to_gold_papers
 
 
 # 予測ファイルに残す候補論文の本数。看板指標は recall@20 だが、再実行が高コストなので
@@ -44,7 +45,7 @@ class ReadingAgent:
 
     def __init__(
         self,
-        retriever: HybridRetriever,
+        retriever: Retriever,
         llm: LLMClient,
         max_steps: int = 3,
         top_k: int = 20,

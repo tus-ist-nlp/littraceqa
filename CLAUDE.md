@@ -12,6 +12,7 @@
 - Python 3.11+
 - uv でパッケージ管理
 - 型アノテーション必須
+- git commit と git push は実行せず、変更を未コミットで残す
 
 ## 検索手法を追加するときのルール
 
@@ -74,7 +75,7 @@ ablation 用なら触らない。
 
 現在のデフォルト: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml`
 + `agent_style/reading.yaml`（MinerU + BM25 + SPECTER2(title_abstract) + Qwen3-Embedding-0.6B(本文) + ReadingAgent）。
-27,489件分の chunks・索引（`bm25s` / `faiss_specter2_abstract` / `faiss_qwen3_0p6b`）が
+27,487件分の chunks・索引（`bm25s` / `faiss_specter2_abstract` / `faiss_qwen3_0p6b`）が
 構築済みで、`--build` なしですぐ検索できる。
 
 ### 3. configs/ のディレクトリ構成
@@ -138,7 +139,7 @@ bash scripts/setup_mineru_env.sh   # 初回のみ（.venv-mineru を作りモデ
 ```
 
 出力先は `pdf_dir` の兄弟 `mineru/`（`process_style` yaml にはパスを書かない方針に従い、
-`MinerUChunker` が自動導出する）。27,489件で 4GPU 約25時間。変換済みの論文は
+`MinerUChunker` が自動導出する）。27,487件で 4GPU 約25時間。変換済みの論文は
 飛ばすので、中断しても同じコマンドで再開できる。
 
 ### 5. registry への登録確認

@@ -10,14 +10,15 @@ from littraceqa.di_pipeline.agent.task_family import CUTOFF_BY_TASK_FAMILY, Task
 from littraceqa.di_pipeline.contracts import Answer, Prediction, Query
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.di_pipeline.registry import register
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
+from littraceqa.di_pipeline.retrieve.base import Retriever
+from littraceqa.di_pipeline.retrieve.hybrid import to_gold_papers
 
 
 @register("agent", "simple")
 class SimpleAgent:
     def __init__(
         self,
-        retriever: HybridRetriever,
+        retriever: Retriever,
         top_k: int = 20,
         llm: LLMClient | None = None,
     ):

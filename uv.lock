@@ -1349,6 +1349,7 @@ di-pipeline = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "torch" },
+    { name = "transformers" },
 ]
 figures = [
     { name = "accelerate" },
@@ -1369,7 +1370,7 @@ requires-dist = [
     { name = "azure-ai-documentintelligence", marker = "extra == 'azure'", specifier = ">=1.0.2" },
     { name = "azure-search-documents", marker = "extra == 'azure'", specifier = ">=11.6.0" },
     { name = "beautifulsoup4", marker = "extra == 'di-pipeline'", specifier = ">=4.15.0" },
-    { name = "bm25s", marker = "extra == 'di-pipeline'", specifier = ">=0.3.9" },
+    { name = "bm25s", marker = "extra == 'di-pipeline'", specifier = "==0.3.9" },
     { name = "docling", marker = "extra == 'figures'" },
     { name = "faiss-cpu", marker = "extra == 'di-pipeline'" },
     { name = "markdownify", marker = "extra == 'di-pipeline'", specifier = ">=1.2.3" },
@@ -1386,6 +1387,7 @@ requires-dist = [
     { name = "qwen-vl-utils", marker = "extra == 'figures'" },
     { name = "requests", specifier = ">=2.31" },
     { name = "torch", marker = "extra == 'di-pipeline'", specifier = ">=2.11.0,<2.12" },
+    { name = "transformers", marker = "extra == 'di-pipeline'", specifier = ">=4.51.0" },
     { name = "transformers", marker = "extra == 'figures'", specifier = ">=4.45" },
 ]
 provides-extras = ["di-pipeline", "figures", "azure"]

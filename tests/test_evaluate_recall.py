@@ -1,8 +1,8 @@
-"""候補上位k本に対する gold 論文 recall（task_family別）の集計ロジックのテスト。
+"""Test candidate recall grouped by the actual number of gold papers.
 
-paper_recall_macro は LLM の絞り込み後の提出セットに対する recall なので、
-「検索がそもそも候補に拾えていたか」を別途測るのがこの指標。gold の task_family で
-single / multi / total に振り分ける。
+Paper recall after LLM selection mixes retrieval and selection quality.
+Candidate recall instead measures whether retrieval itself found each paper.
+Grouping uses the gold-paper count rather than ``task_family``.
 """
 
 from __future__ import annotations
@@ -53,12 +53,12 @@ def test_old_predictions_without_field_yield_none() -> None:
         assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_{scenario}_macro"] is None
 
 
-def test_recall_splits_by_task_family() -> None:
-    """single / multi / total がそれぞれ正しく集計される。"""
+def test_recall_splits_by_gold_paper_count_not_task_family() -> None:
+    """Validation-only labels must not control the single/multi grouping."""
     gold = [
-        _gold("q1", SINGLE, ["p1"]),                    # 1位にヒット -> 1.0
-        _gold("q2", SINGLE, ["p9"]),                    # 候補に無い    -> 0.0
-        _gold("q3", MULTI, ["p1", "p2", "p3", "p4"]),   # 2/4 ヒット    -> 0.5
+        _gold("q1", MULTI, ["p1"]),
+        _gold("q2", MULTI, ["p9"]),
+        _gold("q3", SINGLE, ["p1", "p2", "p3", "p4"]),
     ]
     pred = [
         _pred("q1", ["p1", "p2", "p3"]),
@@ -71,6 +71,8 @@ def test_recall_splits_by_task_family() -> None:
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_single_macro"] == 0.5  # (1.0+0.0)/2
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_multi_macro"] == 0.5
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_total_macro"] == 0.5  # (1+0+0.5)/3
+    assert metrics[f"candidate_all_gold_at{CANDIDATE_RECALL_K}_single_rate"] == 0.5
+    assert metrics[f"candidate_all_gold_at{CANDIDATE_RECALL_K}_multi_rate"] == 0.0
 
 
 def test_only_top_k_counts() -> None:
@@ -95,25 +97,25 @@ def test_missing_prediction_counts_as_zero() -> None:
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_total_macro"] == 0.5
 
 
-def test_absent_task_family_group_is_none() -> None:
-    """gold にその task_family が1件も無ければ、そのキーだけ None。
+def test_absent_gold_count_group_is_none() -> None:
+    """Return None when no query belongs to a gold-count group.
 
     mean([]) == 0.0 を「recall 0」と誤読しないため。
     """
-    gold = [_gold("q1", MULTI, ["p1"])]
-    metrics = evaluate(gold, [_pred("q1", ["p1"])])["metrics"]
+    gold = [_gold("q1", SINGLE, ["p1", "p2"])]
+    metrics = evaluate(gold, [_pred("q1", ["p1", "p2"])])["metrics"]
 
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_single_macro"] is None
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_multi_macro"] == 1.0
 
 
-def test_unknown_task_family_counts_only_in_total() -> None:
-    """未知/欠落の task_family は total にだけ入れる。"""
+def test_missing_task_family_is_still_grouped_by_gold_count() -> None:
+    """A missing task_family must not prevent single/multi evaluation."""
     gold = [{"query_id": "q1", "answer_types": [], "gold_papers": [{"paper_id": "p1"}]}]
     metrics = evaluate(gold, [_pred("q1", ["p1"])])["metrics"]
 
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_total_macro"] == 1.0
-    assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_single_macro"] is None
+    assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_single_macro"] == 1.0
     assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_multi_macro"] is None
 
 
@@ -133,6 +135,7 @@ def test_recall_curve_is_emitted_for_every_k_and_scenario() -> None:
     for k in CANDIDATE_RECALL_KS:
         for scenario in ("single", "multi", "total"):
             assert f"candidate_recall_at{k}_{scenario}_macro" in metrics
+            assert f"candidate_all_gold_at{k}_{scenario}_rate" in metrics
 
 
 def test_recall_curve_is_monotonic_in_k() -> None:

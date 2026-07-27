@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from littraceqa.di_pipeline.preprocess.mineru_chunker import MinerUChunker
 
 
@@ -22,6 +24,12 @@ def _write_content_list(mineru_dir, paper_id: str, blocks: list[dict]) -> None:
     path = mineru_dir / paper_id / "auto" / f"{paper_id}_content_list.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(blocks), encoding="utf-8")
+
+
+def _write_image(mineru_dir, paper_id: str, relative_path: str) -> None:
+    path = mineru_dir / paper_id / "auto" / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"fixture")
 
 
 def _chunker(tmp_path, **kwargs) -> MinerUChunker:
@@ -52,6 +60,20 @@ def test_broken_content_list_returns_only_title_abstract_chunk(tmp_path):
     assert [c.chunk_type for c in chunks] == ["title_abstract"]
 
 
+def test_strict_mode_reports_missing_content_list(tmp_path):
+    with pytest.raises(FileNotFoundError, match="content list is missing"):
+        _chunker(tmp_path, strict=True).process(_paper())
+
+
+def test_strict_mode_reports_broken_content_list(tmp_path):
+    path = tmp_path / "mineru" / "p1" / "auto" / "p1_content_list.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Failed to load MinerU content list"):
+        _chunker(tmp_path, strict=True).process(_paper())
+
+
 def test_mineru_dir_defaults_to_sibling_of_pdf_dir(tmp_path):
     chunker = MinerUChunker(pdf_dir=str(tmp_path / "corpus" / "pdfs"))
 
@@ -64,6 +86,46 @@ def test_page_idx_is_converted_to_1_indexed(tmp_path):
     chunks = _chunker(tmp_path).process(_paper())
 
     assert _by_type(chunks, "text_span")[0].metadata["page"] == 1
+
+
+@pytest.mark.parametrize("page_idx", [None, "0", -1, True])
+def test_invalid_or_missing_page_idx_is_not_inferred(tmp_path, page_idx):
+    block = {"type": "text", "text": "Body."}
+    if page_idx is not None:
+        block["page_idx"] = page_idx
+    _write_content_list(tmp_path / "mineru", "p1", [block])
+
+    chunks = _chunker(tmp_path).process(_paper())
+
+    assert "page" not in _by_type(chunks, "text_span")[0].metadata
+
+
+def test_missing_page_idx_is_not_inferred_for_figure(tmp_path):
+    _write_image(tmp_path / "mineru", "p1", "images/f.jpg")
+    _write_content_list(
+        tmp_path / "mineru",
+        "p1",
+        [{"type": "image", "img_path": "images/f.jpg"}],
+    )
+
+    figure = _by_type(_chunker(tmp_path).process(_paper()), "figure")[0]
+
+    assert "page" not in figure.metadata
+
+
+def test_title_venue_and_year_are_added_to_every_chunk(tmp_path):
+    _write_content_list(
+        tmp_path / "mineru",
+        "p1",
+        [{"type": "text", "text": "Body.", "page_idx": 0}],
+    )
+
+    chunks = _chunker(tmp_path).process(_paper())
+
+    assert all(chunk.text.startswith("[EMNLP 2026] Example Paper\n") for chunk in chunks)
+    assert all(chunk.metadata["title"] == "Example Paper" for chunk in chunks)
+    assert all(chunk.metadata["venue"] == "EMNLP" for chunk in chunks)
+    assert all(chunk.metadata["year"] == 2026 for chunk in chunks)
 
 
 def test_heading_becomes_section_and_is_not_its_own_chunk(tmp_path):
@@ -166,6 +228,7 @@ def test_untagged_equation_does_not_create_an_equation_chunk(tmp_path):
 
 
 def test_table_body_html_becomes_markdown_and_table_id_comes_from_caption(tmp_path):
+    _write_image(tmp_path / "mineru", "p1", "images/t.jpg")
     _write_content_list(
         tmp_path / "mineru", "p1",
         [
@@ -193,6 +256,7 @@ def test_table_body_html_becomes_markdown_and_table_id_comes_from_caption(tmp_pa
 
 
 def test_image_becomes_figure_chunk_with_figure_id_and_image_path(tmp_path):
+    _write_image(tmp_path / "mineru", "p1", "images/f.jpg")
     _write_content_list(
         tmp_path / "mineru", "p1",
         [
@@ -226,10 +290,63 @@ def test_chart_content_is_used_as_figure_text(tmp_path):
     assert "acc rises with size" in figures[0].text
 
 
-def test_figure_without_caption_or_content_is_dropped(tmp_path):
+def test_image_only_figure_is_preserved_for_vision_retrieval(tmp_path):
+    _write_image(tmp_path / "mineru", "p1", "images/x.jpg")
     _write_content_list(
         tmp_path / "mineru", "p1",
         [{"type": "chart", "chart_caption": [], "content": "", "img_path": "images/x.jpg", "page_idx": 0}],
+    )
+
+    figures = _by_type(_chunker(tmp_path).process(_paper()), "figure")
+
+    assert len(figures) == 1
+    assert figures[0].metadata["image_only"] is True
+    assert figures[0].metadata["image_path"].endswith("images/x.jpg")
+
+
+def test_figure_without_text_or_image_reference_is_dropped(tmp_path):
+    _write_content_list(
+        tmp_path / "mineru", "p1",
+        [{"type": "chart", "chart_caption": [], "content": "", "page_idx": 0}],
+    )
+
+    assert _by_type(_chunker(tmp_path).process(_paper()), "figure") == []
+
+
+def test_image_only_figure_with_missing_image_is_dropped(tmp_path):
+    _write_content_list(
+        tmp_path / "mineru",
+        "p1",
+        [
+            {
+                "type": "chart",
+                "chart_caption": [],
+                "content": "",
+                "img_path": "images/missing.jpg",
+                "page_idx": 0,
+            }
+        ],
+    )
+
+    assert _by_type(_chunker(tmp_path).process(_paper()), "figure") == []
+
+
+def test_image_path_cannot_escape_the_paper_output_directory(tmp_path):
+    outside = tmp_path / "mineru" / "p1" / "outside.jpg"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"fixture")
+    _write_content_list(
+        tmp_path / "mineru",
+        "p1",
+        [
+            {
+                "type": "chart",
+                "chart_caption": [],
+                "content": "",
+                "img_path": "../outside.jpg",
+                "page_idx": 0,
+            }
+        ],
     )
 
     assert _by_type(_chunker(tmp_path).process(_paper()), "figure") == []

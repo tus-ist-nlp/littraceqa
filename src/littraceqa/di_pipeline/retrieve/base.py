@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from littraceqa.di_pipeline.contracts import RetrievalResult
+from littraceqa.di_pipeline.contracts import RetrievalResult, SearchHints
 
 
 class Fuser(Protocol):
@@ -18,4 +18,10 @@ class Reranker(Protocol):
 
 
 class Retriever(Protocol):
-    def retrieve(self, query: str, top_k: int) -> list[RetrievalResult]: ...
+    def retrieve(
+        self,
+        query: str,
+        top_k: int,
+        *,
+        hints: SearchHints | None = None,
+    ) -> list[RetrievalResult]: ...

@@ -6,3 +6,4 @@
 name: mineru
 params:
   max_chars_per_chunk: 2000
+  strict: true

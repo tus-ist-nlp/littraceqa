@@ -1,0 +1,100 @@
+# Experimental baseline: rerank a fixed 20-paper candidate set.
+# Several weights were selected on the current validation queries and require
+# confirmation on a separate held-out set.
+per_index_k: 100
+attribute_weight: 0.75
+indexers:
+  - name: bm25s
+    params:
+      method: lucene
+      idf_method: lucene
+      k1: 1.5
+      b: 0.75
+      delta: 0.5
+      resumable_build: true
+      build_batch_size: 256
+      max_batch_characters: 2000000
+  - name: paper_bm25
+    index_name: paper_bm25
+    params:
+      exclude_references: false
+      result_text_chars: 2000
+      extract_method_names: true
+      method_max_degree: 10
+fuser:
+  name: paper_rank_rrf
+  params:
+    k: 60
+    weights: { bm25s: 1.0, paper_bm25: 1.0 }
+    budget_source: bm25s
+    fill_to_top_k: true
+    expansion_source: paper_bm25
+reranker:
+  name: qwen3
+  params:
+    model: Qwen/Qwen3-Reranker-0.6B
+    revision: e61197ed45024b0ed8a2d74b80b4d909f1255473
+    device: cuda:0
+    dtype: bfloat16
+    batch_size: 4
+    max_tokens: 1024
+    local_files_only: true
+    # An official-gold validation sweep selected a slight preference for the
+    # original order across cutoffs 5, 8, and 10. Treat this as
+    # validation-selected until held-out data becomes available.
+    base_rank_weight: 0.56
+    rank_fusion_k: 60.0
+    instruction: >-
+      Given a scientific question, determine whether the document contains
+      evidence needed to answer it.
+retriever_wrapper:
+  name: seed_expansion
+  params:
+    candidate_k: 50
+    seed_text_chars: 512
+    rrf_k: 60
+    max_results: 20
+    stable_prefix_k: 10
+    protect_explicit_title_matches: true
+    max_protected_titles: 4
+    local_expansion_weight: 0.5
+    literal_attribute_hints: true
+    literal_method_hints: true
+    method_owner_weight: 0.35
+    method_relation_weight: 0.35
+    method_relation_seed_k: 3
+    method_relation_max_results: 10
+    method_relation_max_new_papers: 1
+    method_relation_protected_top_k: 8
+    method_topic_weight: 0.35
+    method_topic_seed_chars: 2000
+    method_topic_seed_k: 1
+    method_topic_max_results: 50
+    # Follow an explicit method edge only when the owner-text search also
+    # places the new paper in its top five.
+    method_bridge_topic_max_rank: 5
+    paper_neighborhood_weight: 0.2
+    paper_neighborhood_two_hop_weight: 0.05
+    paper_neighborhood_max_hub_degree: 4
+    paper_embedding_index_name: specter2_paper_embeddings
+    method_dense_tail_weight: 1.0
+    method_dense_tail_seed_k: 1
+    method_dense_tail_max_results: 7
+    method_dense_tail_max_new_papers: 2
+    paper_dense_tail_weight: 1.0
+    paper_dense_tail_seed_k: 1
+    paper_dense_tail_max_results: 7
+    paper_dense_consensus_seed_k: 3
+    paper_dense_consensus_max_results: 15
+    paper_dense_consensus_min_support: 2
+    # Run the validation-selected high-confidence reciprocal check before
+    # method-graph and narrow-consensus exploration.
+    paper_dense_reciprocal_seed_k: 8
+    paper_dense_reciprocal_forward_k: 20
+    paper_dense_reciprocal_reverse_k: 10
+    paper_dense_reciprocal_min_support: 6
+    paper_dense_reciprocal_max_candidates: 32
+    # Dense-tail and consensus candidates are fixed before model scoring.
+    rerank_final_candidates: true
+    final_rerank_document_chars: 2000
+    rerank_pool_k: 20

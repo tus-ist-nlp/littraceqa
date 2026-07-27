@@ -21,6 +21,9 @@ requirements.txt
 # Downloaded PDF cache (scripts/download_pdfs.py default --output)
 pdfs/
 
+# Local Codex working notes
+/codex.md
+
 # 実行ログ（索引構築・検索の進捗。巨大かつ再現可能なので追跡しない）
 logs/
 # 予測結果（実験の生成物。results/experiments.jsonl に config とスコアが残るので再現可能）

@@ -44,40 +44,160 @@ process_style と組み合わせても索引パスが衝突しないようにす
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any
 
-import yaml
-from dotenv import load_dotenv
-
 from littraceqa.di_pipeline import registry
-
-# APIキー等はリポジトリ直下の .env から読む（コードにも yaml にも書かない）。
-# 既に export されている環境変数は上書きしない。
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-from littraceqa.di_pipeline.agent.iterative import IterativeAgent  # noqa: F401
-from littraceqa.di_pipeline.agent.reading import ReadingAgent  # noqa: F401
-from littraceqa.di_pipeline.agent.simple import SimpleAgent  # noqa: F401
-from littraceqa.di_pipeline.agent.verifying import VerifyingAgent  # noqa: F401
-from littraceqa.di_pipeline.index.bm25_index import BM25Index  # noqa: F401
-from littraceqa.di_pipeline.index.colbert_index import ColBERTIndex  # noqa: F401
-from littraceqa.di_pipeline.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: F401
-from littraceqa.di_pipeline.index.faiss_specter2 import Specter2FAISSIndex  # noqa: F401
-from littraceqa.di_pipeline.index.siglip_image import SiglipImageIndex  # noqa: F401
-from littraceqa.di_pipeline.llm.azure_openai import AzureOpenAILLM  # noqa: F401
-from littraceqa.di_pipeline.llm.fake import FakeLLM  # noqa: F401
-from littraceqa.di_pipeline.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
-from littraceqa.di_pipeline.preprocess.marker_chunker import MarkerChunker  # noqa: F401
-from littraceqa.di_pipeline.preprocess.mineru_chunker import MinerUChunker  # noqa: F401
+from littraceqa.di_pipeline.retrieve.base import Retriever
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
-from littraceqa.di_pipeline.retrieve.reranker import NoneReranker  # noqa: F401
-from littraceqa.di_pipeline.retrieve.rrf import RRFFuser  # noqa: F401
+
+
+# Each built-in implementation registers itself when its module is imported.
+# Lazy placeholders retain the registry's public keys while avoiding optional
+# dependencies for components that are not selected by the composed config.
+_BUILTIN_COMPONENTS: dict[tuple[str, str], tuple[str, str]] = {
+    ("agent", "iterative"): (
+        "littraceqa.di_pipeline.agent.iterative",
+        "IterativeAgent",
+    ),
+    ("agent", "reading"): ("littraceqa.di_pipeline.agent.reading", "ReadingAgent"),
+    ("agent", "simple"): ("littraceqa.di_pipeline.agent.simple", "SimpleAgent"),
+    ("agent", "verifying"): (
+        "littraceqa.di_pipeline.agent.verifying",
+        "VerifyingAgent",
+    ),
+    ("indexer", "bm25s"): ("littraceqa.di_pipeline.index.bm25_index", "BM25Index"),
+    ("indexer", "paper_bm25"): (
+        "littraceqa.di_pipeline.index.paper_bm25",
+        "PaperBM25Index",
+    ),
+    ("indexer", "colbert"): (
+        "littraceqa.di_pipeline.index.colbert_index",
+        "ColBERTIndex",
+    ),
+    ("indexer", "faiss_qwen3"): (
+        "littraceqa.di_pipeline.index.faiss_qwen3",
+        "Qwen3FAISSIndex",
+    ),
+    ("indexer", "faiss_specter2"): (
+        "littraceqa.di_pipeline.index.faiss_specter2",
+        "Specter2FAISSIndex",
+    ),
+    ("indexer", "siglip_image"): (
+        "littraceqa.di_pipeline.index.siglip_image",
+        "SiglipImageIndex",
+    ),
+    ("llm", "azure_openai"): (
+        "littraceqa.di_pipeline.llm.azure_openai",
+        "AzureOpenAILLM",
+    ),
+    ("llm", "fake"): ("littraceqa.di_pipeline.llm.fake", "FakeLLM"),
+    ("preprocessor", "figure_vlm"): (
+        "littraceqa.di_pipeline.preprocess.figure_vlm",
+        "FigureVLMChunker",
+    ),
+    ("preprocessor", "marker"): (
+        "littraceqa.di_pipeline.preprocess.marker_chunker",
+        "MarkerChunker",
+    ),
+    ("preprocessor", "mineru"): (
+        "littraceqa.di_pipeline.preprocess.mineru_chunker",
+        "MinerUChunker",
+    ),
+    ("fuser", "rrf"): ("littraceqa.di_pipeline.retrieve.rrf", "RRFFuser"),
+    ("fuser", "paper_rank_rrf"): (
+        "littraceqa.di_pipeline.retrieve.paper_rank_rrf",
+        "PaperRankRRFFuser",
+    ),
+    ("reranker", "none"): (
+        "littraceqa.di_pipeline.retrieve.reranker",
+        "NoneReranker",
+    ),
+    ("reranker", "qwen3"): (
+        "littraceqa.di_pipeline.retrieve.qwen3_reranker",
+        "Qwen3Reranker",
+    ),
+    ("retriever_wrapper", "seed_expansion"): (
+        "littraceqa.di_pipeline.retrieve.seed_expansion",
+        "SeedExpansionRetriever",
+    ),
+}
+
+
+def _load_project_dotenv() -> None:
+    """Load the project dotenv file when LLM construction actually needs it."""
+    try:
+        from dotenv import load_dotenv
+    except ModuleNotFoundError as exc:
+        if exc.name != "dotenv":
+            raise
+        return
+
+    # Keep exported environment variables authoritative over local dotenv values.
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+
+
+def _lazy_component_class(
+    kind: str,
+    module_name: str,
+    class_name: str,
+) -> type[Any]:
+    """Create a registry-compatible placeholder that imports on construction."""
+
+    class LazyComponent:
+        def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+            if kind == "llm":
+                _load_project_dotenv()
+            module = importlib.import_module(module_name)
+            implementation = getattr(module, class_name)
+            return implementation(*args, **kwargs)
+
+    LazyComponent.__name__ = class_name
+    LazyComponent.__qualname__ = class_name
+    LazyComponent.__module__ = module_name
+    return LazyComponent
+
+
+def _register_lazy_builtins() -> None:
+    """Expose every built-in registry key without importing its implementation."""
+    registered = set(registry.list_registered())
+    for (kind, name), (module_name, class_name) in _BUILTIN_COMPONENTS.items():
+        if (kind, name) in registered:
+            continue
+        placeholder = _lazy_component_class(kind, module_name, class_name)
+        registry.register(kind, name)(placeholder)
+
+
+_register_lazy_builtins()
 
 
 def load_config(path: str | Path) -> dict:
-    """yaml ファイルを読み込み、dict をそのまま返す。"""
+    """Load a YAML file and return its mapping unchanged."""
+    import yaml
+
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def override_rerank_pool(search: dict, pool_k: int | None) -> dict:
+    """Return a copied search config with a bounded reranker candidate pool."""
+    if pool_k is None:
+        return search
+    if not 1 <= pool_k <= 1000:
+        raise ValueError("reranker pool size must be between 1 and 1000")
+    if (search.get("reranker") or {}).get("name", "none") == "none":
+        raise ValueError("reranker pool size requires an enabled reranker")
+    updated = dict(search)
+    updated["pool_k"] = pool_k
+    wrapper = search.get("retriever_wrapper")
+    if wrapper:
+        wrapper_copy = dict(wrapper)
+        wrapper_params = dict(wrapper_copy.get("params", {}))
+        wrapper_params["rerank_pool_k"] = pool_k
+        wrapper_copy["params"] = wrapper_params
+        updated["retriever_wrapper"] = wrapper_copy
+    return updated
 
 
 def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dict:
@@ -110,21 +230,65 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
     resolved_paths = dict(paths)
     resolved_paths["chunks"] = f"{paths['chunks_dir']}/{process_name}_chunks.jsonl"
 
+    retriever = {
+        "per_index_k": search["per_index_k"],
+        "indexers": indexers,
+        "fuser": search["fuser"],
+        "reranker": search["reranker"],
+    }
+    if "pool_k" in search:
+        retriever["pool_k"] = search["pool_k"]
+    if "attribute_weight" in search:
+        retriever["attribute_weight"] = search["attribute_weight"]
+    if "retriever_wrapper" in search:
+        wrapper = search["retriever_wrapper"]
+        wrapper_params = dict(wrapper.get("params", {}))
+        paper_embedding_index_name = wrapper_params.pop(
+            "paper_embedding_index_name",
+            None,
+        )
+        if paper_embedding_index_name is not None:
+            if (
+                not isinstance(paper_embedding_index_name, str)
+                or not paper_embedding_index_name.strip()
+                or Path(paper_embedding_index_name).name
+                != paper_embedding_index_name
+            ):
+                raise ValueError(
+                    "paper_embedding_index_name must be a non-empty directory name"
+                )
+            wrapper_params.setdefault(
+                "paper_embedding_index_dir",
+                (
+                    f"{paths['index_dir']}/{process_name}/"
+                    f"{paper_embedding_index_name}"
+                ),
+            )
+        retriever["retriever_wrapper"] = {
+            "name": wrapper["name"],
+            "params": wrapper_params,
+        }
+
     return {
         "paths": resolved_paths,
         "preprocessor": {"name": process_name, "params": preprocessor_params},
-        "retriever": {
-            "per_index_k": search["per_index_k"],
-            "indexers": indexers,
-            "fuser": search["fuser"],
-            "reranker": search["reranker"],
-        },
+        "retriever": retriever,
         "agent": agent,
     }
 
 
-def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
-    """cfg から preprocessor, retriever, agent のインスタンスを組み立てる。"""
+def build_pipeline(
+    cfg: dict,
+    *,
+    build_agent: bool = True,
+    build_preprocessor: bool = True,
+) -> tuple[Any, Retriever, Any | None]:
+    """Build pipeline components with optional agent and preprocessor stages.
+
+    Retrieval-only jobs do not need an LLM client or PDF parser. Skipping those
+    stages keeps existing-index evaluation independent from Azure and
+    preprocessing dependencies.
+    """
     indexers = [
         registry.build("indexer", ix["name"], **ix.get("params", {}))
         for ix in cfg["retriever"]["indexers"]
@@ -137,35 +301,53 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
 
     reranker_cfg = cfg["retriever"].get("reranker")
     reranker = None
-    if reranker_cfg:
+    if reranker_cfg and reranker_cfg.get("name", "none") != "none":
         reranker = registry.build(
             "reranker", reranker_cfg["name"], **reranker_cfg.get("params", {})
         )
 
-    retriever = HybridRetriever(
+    wrapper_cfg = cfg["retriever"].get("retriever_wrapper")
+    core_reranker = None if wrapper_cfg else reranker
+    core_retriever = HybridRetriever(
         indexers=indexers,
         fuser=fuser,
-        reranker=reranker,
+        reranker=core_reranker,
         per_index_k=cfg["retriever"]["per_index_k"],
+        pool_k=cfg["retriever"].get("pool_k"),
+        attribute_weight=cfg["retriever"].get("attribute_weight", 0.25),
     )
 
-    agent_cfg = cfg["agent"]
-    llm_kwargs: dict[str, Any] = {}
-    llm_cfg = agent_cfg.get("llm")
-    if llm_cfg:
-        llm_kwargs["llm"] = registry.build("llm", llm_cfg["name"], **llm_cfg.get("params", {}))
+    retriever = core_retriever
+    if wrapper_cfg:
+        retriever = registry.build(
+            "retriever_wrapper",
+            wrapper_cfg["name"],
+            retriever=core_retriever,
+            reranker=reranker,
+            **wrapper_cfg.get("params", {}),
+        )
 
-    agent = registry.build(
-        "agent",
-        agent_cfg["name"],
-        retriever=retriever,
-        **llm_kwargs,
-        **agent_cfg.get("params", {}),
-    )
+    agent = None
+    if build_agent:
+        agent_cfg = cfg["agent"]
+        llm_kwargs: dict[str, Any] = {}
+        llm_cfg = agent_cfg.get("llm")
+        if llm_cfg:
+            llm_kwargs["llm"] = registry.build(
+                "llm", llm_cfg["name"], **llm_cfg.get("params", {})
+            )
+
+        agent = registry.build(
+            "agent",
+            agent_cfg["name"],
+            retriever=retriever,
+            **llm_kwargs,
+            **agent_cfg.get("params", {}),
+        )
 
     preprocessor = None
     preprocessor_cfg = cfg.get("preprocessor")
-    if preprocessor_cfg:
+    if build_preprocessor and preprocessor_cfg:
         preprocessor = registry.build(
             "preprocessor", preprocessor_cfg["name"], **preprocessor_cfg.get("params", {})
         )

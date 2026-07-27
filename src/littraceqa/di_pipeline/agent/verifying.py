@@ -16,7 +16,8 @@ from littraceqa.di_pipeline.agent.task_family import TaskFamilyClassifier, apply
 from littraceqa.di_pipeline.contracts import Answer, Prediction, Query, RetrievalResult
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.di_pipeline.registry import register
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
+from littraceqa.di_pipeline.retrieve.base import Retriever
+from littraceqa.di_pipeline.retrieve.hybrid import to_gold_papers
 
 
 @register("agent", "verifying")
@@ -25,7 +26,7 @@ class VerifyingAgent:
 
     def __init__(
         self,
-        retriever: HybridRetriever,
+        retriever: Retriever,
         llm: LLMClient,
         top_k: int = 20,
         max_candidates: int = 15,
