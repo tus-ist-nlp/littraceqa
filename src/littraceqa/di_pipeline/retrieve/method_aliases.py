@@ -117,6 +117,62 @@ GENERIC_METHOD_ALIASES = frozenset(
     }
 )
 
+# The subset that also disqualifies a *title* prefix from identifying a paper.
+# Title matching only ever sees the part before the colon, so it needs the
+# venue and architecture acronyms but not the dataset and metric names that
+# GENERIC_METHOD_ALIASES additionally covers.
+GENERIC_TITLE_ALIASES = frozenset(
+    {
+        "ACL",
+        "AI",
+        "API",
+        "AUC",
+        "BERT",
+        "BLEU",
+        "CNN",
+        "COCO",
+        "CPU",
+        "CV",
+        "CVPR",
+        "DNN",
+        "DPO",
+        "ECCV",
+        "EMNLP",
+        "FID",
+        "GAN",
+        "GPT",
+        "GPU",
+        "HTML",
+        "ICCV",
+        "ICLR",
+        "ICML",
+        "IOU",
+        "JSON",
+        "LLM",
+        "LORA",
+        "LSTM",
+        "MAE",
+        "ML",
+        "MLP",
+        "MSE",
+        "NAACL",
+        "NEURIPS",
+        "NIPS",
+        "NLP",
+        "OCR",
+        "PDF",
+        "QA",
+        "RAG",
+        "RAM",
+        "RL",
+        "SOTA",
+        "VAE",
+        "VIT",
+        "VLM",
+        "VQA",
+    }
+)
+
 _ALIAS_TOKEN = r"[A-Za-z][A-Za-z0-9]*(?:[-+.][A-Za-z0-9]+)*"
 _ALIAS_WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _REFERENCE_HEADING_RE = re.compile(

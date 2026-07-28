@@ -1088,15 +1088,8 @@ def write_report(
     print(f"レポートを {path} に書き出しました")
 
 
-def main() -> None:
-    # Import optional retrieval dependencies only when the CLI is executed.
-    # Query-loading and path-safety helpers remain testable with the base extra.
-    from littraceqa.di_pipeline.config import (
-        build_pipeline,
-        compose_config,
-        load_config,
-        override_rerank_pool,
-    )
+def build_parser() -> argparse.ArgumentParser:
+    """Define the command-line surface."""
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--paths", required=True, help="configs/paths/*.yaml")
@@ -1212,7 +1205,14 @@ def main() -> None:
         "何点取れるか」を見る ablation であり本番の点数ではない。"
         "--production-input との併用時は無視される。",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def validate_cli_args(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> list[str]:
+    """Reject unusable flag combinations and resolve the requested paper IDs."""
 
     try:
         validate_build_mode(
@@ -1258,7 +1258,24 @@ def main() -> None:
             requested_paper_ids,
             file_paper_ids,
         )
+    return requested_paper_ids
 
+
+def resolve_config(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> tuple[dict, Path | None, Path | None]:
+    """Compose the four config files and derive the build artifact paths."""
+
+    # Import optional retrieval dependencies only when the CLI is executed.
+    # Query-loading and path-safety helpers remain testable with the base extra.
+    from littraceqa.di_pipeline.config import (
+        compose_config,
+        load_config,
+        override_rerank_pool,
+    )
+
+    artifact_root: Path | None = None
     preprocess_cache_root: Path | None = None
     paths_cfg = load_config(args.paths)
     if args.build:
@@ -1304,140 +1321,178 @@ def main() -> None:
             artifact_root,
             args.read_only_root,
         )
+    return cfg, artifact_root, preprocess_cache_root
 
-    selected_papers: list[dict] | None = None
-    if args.build:
-        metadata_path = Path(
-            cfg.get("paths", {}).get("paper_metadata", "data/paper_metadata.jsonl")
-        )
-        try:
-            selected_papers = select_papers_for_bounded_build(
-                metadata_path,
-                requested_paper_ids,
-                args.limit,
-                max_build_papers=args.max_build_papers,
-            )
-            validate_large_build_selection(
-                len(selected_papers),
-                paper_ids_file=args.paper_ids_file,
-                confirm_paper_count=args.confirm_paper_count,
-                limit=args.limit,
-                max_build_papers=args.max_build_papers,
-            )
-        except ValueError as exc:
-            parser.error(str(exc))
 
-    preprocessor, retriever, agent = build_pipeline(
-        cfg,
-        build_agent=not args.build_only,
-        build_preprocessor=args.build,
+def select_build_papers(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    cfg: dict,
+    requested_paper_ids: list[str],
+) -> list[dict]:
+    """Choose the bounded paper set that a build will preprocess."""
+
+    metadata_path = Path(
+        cfg.get("paths", {}).get("paper_metadata", "data/paper_metadata.jsonl")
     )
-    if args.build:
-        if preprocessor is None or preprocess_cache_root is None:
-            raise RuntimeError("build preprocessing cache was not initialized")
-        try:
-            validate_preprocess_cache_root(
-                preprocess_cache_root,
-                read_only_root=args.read_only_root,
-                source_roots=[
-                    *preprocessing_source_roots(preprocessor),
-                    Path(cfg["paths"]["paper_metadata"]),
-                ],
-            )
-        except ValueError as exc:
-            parser.error(str(exc))
-
-    if args.build:
-        chunks_path = Path(cfg["paths"]["chunks"])
-        merged_chunks: MergeResult | None = None
-
-        if preprocessor is not None:
-            if selected_papers is None:
-                raise RuntimeError("bounded paper selection was not initialized")
-
-            failures_path = artifact_root / "failures.jsonl"
-            implementation_paths = _implementation_source_paths(preprocessor)
-            cache = PreprocessCache(
-                preprocess_cache_root,
-                process_config=cfg["preprocessor"],
-                source_module_path=implementation_paths[0],
-                source_dependency_paths=implementation_paths[1:],
-            )
-            preprocessing = preprocess_selected_papers(
-                preprocessor=preprocessor,
-                selected_papers=selected_papers,
-                cache=cache,
-                chunks_path=chunks_path,
-                failures_path=failures_path,
-                resume=args.resume,
-            )
-            print(
-                "Bounded preprocessing: "
-                f"{preprocessing.processed_count} processed, "
-                f"{preprocessing.reused_count} reused, "
-                f"{len(preprocessing.failures)} failed; "
-                f"failures: {failures_path}"
-            )
-            if preprocessing.failures:
-                print(
-                    "Preprocessing stopped before global index construction. "
-                    "Completed papers remain checkpointed; rerun the same build "
-                    "with --resume to retry only failed or stale papers.",
-                    file=sys.stderr,
-                )
-                raise SystemExit(1)
-            if preprocessing.merge_result is None:
-                raise RuntimeError("preprocessing did not publish merged chunks")
-            merged_chunks = preprocessing.merge_result
-            print(
-                f"{preprocessing.merge_result.chunk_count} chunks from "
-                f"{preprocessing.merge_result.paper_count} papers were "
-                f"atomically saved to {chunks_path}"
-            )
-
-        else:
-            if not chunks_path.exists():
-                print(f"エラー: {chunks_path} が存在しません", file=sys.stderr)
-                sys.exit(1)
-            merged_chunks = _fingerprint_chunk_file(chunks_path)
-
-        if merged_chunks is None:
-            raise RuntimeError("merged chunk fingerprint was not initialized")
-        index_build = build_indexers_with_resume(
-            indexers=retriever.indexers,
-            indexer_configs=cfg["retriever"]["indexers"],
-            chunks_path=chunks_path,
-            chunks=merged_chunks,
-            state_path=artifact_root / "index_build_state.json",
-            resume=args.resume,
+    try:
+        selected_papers = select_papers_for_bounded_build(
+            metadata_path,
+            requested_paper_ids,
+            args.limit,
+            max_build_papers=args.max_build_papers,
         )
+        validate_large_build_selection(
+            len(selected_papers),
+            paper_ids_file=args.paper_ids_file,
+            confirm_paper_count=args.confirm_paper_count,
+            limit=args.limit,
+            max_build_papers=args.max_build_papers,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    return selected_papers
+
+
+def run_build(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    cfg: dict,
+    *,
+    preprocessor,
+    retriever,
+    selected_papers: list[dict] | None,
+    artifact_root: Path | None,
+    preprocess_cache_root: Path | None,
+) -> None:
+    """Preprocess the selected papers, then build every index checkpoint."""
+
+    if preprocessor is None or preprocess_cache_root is None:
+        raise RuntimeError("build preprocessing cache was not initialized")
+    try:
+        validate_preprocess_cache_root(
+            preprocess_cache_root,
+            read_only_root=args.read_only_root,
+            source_roots=[
+                *preprocessing_source_roots(preprocessor),
+                Path(cfg["paths"]["paper_metadata"]),
+            ],
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    chunks_path = Path(cfg["paths"]["chunks"])
+    merged_chunks = _preprocess_for_build(
+        args,
+        cfg,
+        preprocessor=preprocessor,
+        selected_papers=selected_papers,
+        chunks_path=chunks_path,
+        artifact_root=artifact_root,
+        preprocess_cache_root=preprocess_cache_root,
+    )
+    index_build = build_indexers_with_resume(
+        indexers=retriever.indexers,
+        indexer_configs=cfg["retriever"]["indexers"],
+        chunks_path=chunks_path,
+        chunks=merged_chunks,
+        state_path=artifact_root / "index_build_state.json",
+        resume=args.resume,
+    )
+    print(
+        f"Index checkpoints: {index_build.built_count} built, "
+        f"{index_build.loaded_count} loaded"
+    )
+    print("索引構築完了")
+
+
+def _preprocess_for_build(
+    args: argparse.Namespace,
+    cfg: dict,
+    *,
+    preprocessor,
+    selected_papers: list[dict] | None,
+    chunks_path: Path,
+    artifact_root: Path,
+    preprocess_cache_root: Path,
+) -> MergeResult:
+    """Publish the merged chunk file the index build reads from."""
+
+    if preprocessor is None:
+        if not chunks_path.exists():
+            print(f"エラー: {chunks_path} が存在しません", file=sys.stderr)
+            sys.exit(1)
+        return _fingerprint_chunk_file(chunks_path)
+
+    if selected_papers is None:
+        raise RuntimeError("bounded paper selection was not initialized")
+
+    failures_path = artifact_root / "failures.jsonl"
+    implementation_paths = _implementation_source_paths(preprocessor)
+    cache = PreprocessCache(
+        preprocess_cache_root,
+        process_config=cfg["preprocessor"],
+        source_module_path=implementation_paths[0],
+        source_dependency_paths=implementation_paths[1:],
+    )
+    preprocessing = preprocess_selected_papers(
+        preprocessor=preprocessor,
+        selected_papers=selected_papers,
+        cache=cache,
+        chunks_path=chunks_path,
+        failures_path=failures_path,
+        resume=args.resume,
+    )
+    print(
+        "Bounded preprocessing: "
+        f"{preprocessing.processed_count} processed, "
+        f"{preprocessing.reused_count} reused, "
+        f"{len(preprocessing.failures)} failed; "
+        f"failures: {failures_path}"
+    )
+    if preprocessing.failures:
         print(
-            f"Index checkpoints: {index_build.built_count} built, "
-            f"{index_build.loaded_count} loaded"
+            "Preprocessing stopped before global index construction. "
+            "Completed papers remain checkpointed; rerun the same build "
+            "with --resume to retry only failed or stale papers.",
+            file=sys.stderr,
         )
-        print("索引構築完了")
-        if args.build_only:
-            print("Build-only mode completed without constructing or calling an agent.")
-            return
+        raise SystemExit(1)
+    if preprocessing.merge_result is None:
+        raise RuntimeError("preprocessing did not publish merged chunks")
+    print(
+        f"{preprocessing.merge_result.chunk_count} chunks from "
+        f"{preprocessing.merge_result.paper_count} papers were "
+        f"atomically saved to {chunks_path}"
+    )
+    return preprocessing.merge_result
 
-    else:
-        print("既存の索引を読み込み中...")
-        for indexer in retriever.indexers:
-            try:
-                indexer.load()
-            except Exception as exc:
-                print(
-                    f"エラー: {indexer.name} の索引読み込みに失敗しました: {exc}\n"
-                    f"先に --build を付けて索引を構築してください。",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        print("読み込み完了")
 
-    # multiple_choice の options の入手先を決める。本番入力に options は無いので、
-    # 結合するのは常に oracle 設定（--options-file を明示したときだけ）。
-    # --production-input との併用は矛盾（本番と揃えるフラグなのに本番に無い情報を足す）
-    # なので、その場合は結合しない。
+def load_existing_indexes(retriever) -> None:
+    """Load every prebuilt index, exiting with guidance if one is missing."""
+
+    print("既存の索引を読み込み中...")
+    for indexer in retriever.indexers:
+        try:
+            indexer.load()
+        except Exception as exc:
+            print(
+                f"エラー: {indexer.name} の索引読み込みに失敗しました: {exc}\n"
+                f"先に --build を付けて索引を構築してください。",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    print("読み込み完了")
+
+
+def resolve_options_path(args: argparse.Namespace) -> Path | None:
+    """Decide where multiple_choice options come from.
+
+    本番入力に options は無いので、結合するのは常に oracle 設定
+    （--options-file を明示したときだけ）。--production-input との併用は矛盾
+    （本番と揃えるフラグなのに本番に無い情報を足す）なので、その場合は結合しない。
+    """
+
     options_path = Path(args.options_file) if args.options_file else None
     if options_path is not None and args.production_input:
         print(
@@ -1445,7 +1500,16 @@ def main() -> None:
             "（本番入力に options は無い）。options の結合をスキップします。",
             file=sys.stderr,
         )
-        options_path = None
+        return None
+    return options_path
+
+
+def load_and_announce_queries(
+    args: argparse.Namespace,
+    options_path: Path | None,
+) -> list:
+    """Load the query file and report which input mode is in effect."""
+
     queries = load_queries(
         Path(args.queries),
         production_input=args.production_input,
@@ -1459,10 +1523,11 @@ def main() -> None:
             f"[oracle] multiple_choice options を {options_path} から結合しました"
             f"（{n_opt}件）。本番では与えられないので、この点数は本番の点数ではありません。"
         )
-    print(f"{len(queries)} 件の質問に対して検索中...")
+    return queries
 
-    if agent is None:
-        raise RuntimeError("agent was not built")
+
+def predict_all(agent, queries: list) -> list[dict]:
+    """Run the agent over every query, reporting progress every ten queries."""
 
     predictions = []
     for i, query in enumerate(queries):
@@ -1470,12 +1535,20 @@ def main() -> None:
         predictions.append(pred.to_dict())
         if (i + 1) % 10 == 0:
             print(f"  {i + 1}/{len(queries)} 完了")
+    return predictions
 
-    output_path = Path(args.output)
+
+def write_predictions(output_path: Path, predictions: list[dict]) -> None:
+    """Write one prediction per line and report where they landed."""
+
     with output_path.open("w", encoding="utf-8") as f:
         for pred in predictions:
             f.write(json.dumps(pred, ensure_ascii=False) + "\n")
     print(f"予測結果を {output_path} に書き出しました")
+
+
+def score_predictions(output_path: Path) -> dict | None:
+    """Score the predictions, returning ``None`` when the output is unusable."""
 
     print("\n採点中...")
     result = subprocess.run(
@@ -1492,9 +1565,62 @@ def main() -> None:
         print(result.stderr, file=sys.stderr)
 
     try:
-        metrics = json.loads(result.stdout)["metrics"]
+        return json.loads(result.stdout)["metrics"]
     except (json.JSONDecodeError, KeyError):
         print("採点結果を解釈できなかったので実験ログには残しません", file=sys.stderr)
+        return None
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    requested_paper_ids = validate_cli_args(parser, args)
+    cfg, artifact_root, preprocess_cache_root = resolve_config(parser, args)
+    selected_papers = (
+        select_build_papers(parser, args, cfg, requested_paper_ids)
+        if args.build
+        else None
+    )
+
+    from littraceqa.di_pipeline.config import build_pipeline
+
+    preprocessor, retriever, agent = build_pipeline(
+        cfg,
+        build_agent=not args.build_only,
+        build_preprocessor=args.build,
+    )
+
+    if args.build:
+        run_build(
+            parser,
+            args,
+            cfg,
+            preprocessor=preprocessor,
+            retriever=retriever,
+            selected_papers=selected_papers,
+            artifact_root=artifact_root,
+            preprocess_cache_root=preprocess_cache_root,
+        )
+        if args.build_only:
+            print("Build-only mode completed without constructing or calling an agent.")
+            return
+    else:
+        load_existing_indexes(retriever)
+
+    options_path = resolve_options_path(args)
+    queries = load_and_announce_queries(args, options_path)
+    print(f"{len(queries)} 件の質問に対して検索中...")
+
+    if agent is None:
+        raise RuntimeError("agent was not built")
+
+    predictions = predict_all(agent, queries)
+    output_path = Path(args.output)
+    write_predictions(output_path, predictions)
+
+    metrics = score_predictions(output_path)
+    if metrics is None:
         return
     options_joined = options_path is not None
     log_experiment(args, metrics, len(queries), cfg, retriever, options_joined)

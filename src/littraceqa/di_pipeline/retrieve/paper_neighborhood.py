@@ -12,60 +12,10 @@ from numbers import Real
 from typing import Pattern
 
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
+from littraceqa.di_pipeline.retrieve.method_aliases import GENERIC_TITLE_ALIASES
 
 
 _TITLE_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
-_GENERIC_TITLE_ALIASES = frozenset(
-    {
-        "ACL",
-        "AI",
-        "API",
-        "AUC",
-        "BERT",
-        "BLEU",
-        "CNN",
-        "COCO",
-        "CPU",
-        "CV",
-        "CVPR",
-        "DNN",
-        "DPO",
-        "ECCV",
-        "EMNLP",
-        "FID",
-        "GAN",
-        "GPT",
-        "GPU",
-        "HTML",
-        "ICCV",
-        "ICLR",
-        "ICML",
-        "IOU",
-        "JSON",
-        "LLM",
-        "LORA",
-        "LSTM",
-        "MAE",
-        "ML",
-        "MLP",
-        "MSE",
-        "NAACL",
-        "NEURIPS",
-        "NIPS",
-        "NLP",
-        "OCR",
-        "PDF",
-        "QA",
-        "RAG",
-        "RAM",
-        "RL",
-        "SOTA",
-        "VAE",
-        "VIT",
-        "VLM",
-        "VQA",
-    }
-)
 _FULL_TITLE_MIN_ALNUM_CHARS = 20
 _ALIAS_MIN_ALNUM_CHARS = 3
 
@@ -132,7 +82,7 @@ def _conservative_title_alias(title: str) -> str | None:
         return None
 
     generic_key = re.sub(r"[^A-Z0-9]+", "", alias.upper())
-    if generic_key in _GENERIC_TITLE_ALIASES:
+    if generic_key in GENERIC_TITLE_ALIASES:
         return None
 
     letters = [character for character in alias if character.isalpha()]
@@ -171,6 +121,46 @@ def _mention_strength(
         else False
     )
     return (2 if full_mentioned else 0) + (1 if alias_mentioned else 0)
+
+
+class _TitleGraph:
+    """Symmetric title-mention strengths between candidates, computed once.
+
+    Both the direct and the two-hop lane ask for the same pairs, so every edge
+    is memoized under an order-independent key.
+    """
+
+    def __init__(
+        self,
+        patterns: list[tuple[Pattern[str] | None, Pattern[str] | None]],
+        texts: list[str],
+    ) -> None:
+        self._patterns = patterns
+        self._texts = texts
+        self._cache: dict[tuple[int, int], int] = {}
+
+    def strength(self, left: int, right: int) -> int:
+        """Return one symmetric edge score, computing each pair once."""
+
+        key = (left, right) if left < right else (right, left)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        left_full, left_alias = self._patterns[left]
+        right_full, right_alias = self._patterns[right]
+        strength = _mention_strength(
+            right_full,
+            right_alias,
+            self._texts[left],
+        )
+        strength += _mention_strength(
+            left_full,
+            left_alias,
+            self._texts[right],
+        )
+        self._cache[key] = strength
+        return strength
 
 
 class PaperNeighborhoodReranker:
@@ -249,83 +239,101 @@ class PaperNeighborhoodReranker:
         if top_k <= 0 or not candidates:
             return []
 
-        unique_candidates: list[RetrievalResult] = []
+        candidates = self._unique_by_paper(candidates)
+        fallback = list(candidates[:top_k])
+
+        titled = self._load_titled_documents(candidates)
+        if titled is None:
+            return fallback
+
+        graph = _TitleGraph(
+            [self._title_patterns(title) for title, _ in titled],
+            [text for _, text in titled],
+        )
+        strengths = {
+            index: graph.strength(0, index)
+            for index in range(1, len(candidates))
+        }
+        relation_ranks = self._direct_ranks(strengths, candidates)
+        two_hop_stats, two_hop_ranks = self._two_hop_ranks(
+            graph,
+            strengths,
+            candidates,
+        )
+        return self._score(
+            candidates,
+            strengths,
+            relation_ranks,
+            two_hop_stats,
+            two_hop_ranks,
+        )[:top_k]
+
+    @staticmethod
+    def _unique_by_paper(
+        candidates: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        """Keep the first result per paper while preserving rank order."""
+
+        unique: list[RetrievalResult] = []
         seen_paper_ids: set[str] = set()
         for candidate in candidates:
             if candidate.paper_id in seen_paper_ids:
                 continue
             seen_paper_ids.add(candidate.paper_id)
-            unique_candidates.append(candidate)
-        candidates = unique_candidates
-        fallback = list(candidates[:top_k])
-        documents: dict[str, Chunk] = {}
-        titles: list[str] = []
-        normalized_texts: list[str] = []
+            unique.append(candidate)
+        return unique
+
+    def _load_titled_documents(
+        self,
+        candidates: list[RetrievalResult],
+    ) -> list[tuple[str, str]] | None:
+        """Return one (title, normalized text) pair per candidate.
+
+        Returns ``None`` when any document or title is unavailable, so the
+        caller falls back to the original ranking instead of applying partial
+        scores.
+        """
+
+        titled: list[tuple[str, str]] = []
         try:
             for candidate in candidates:
-                document = documents.get(candidate.paper_id)
-                if document is None:
-                    document = self._get_document(candidate.paper_id)
-                    if not isinstance(document, Chunk) or not document.text.strip():
-                        return fallback
-                    documents[candidate.paper_id] = document
+                document = self._get_document(candidate.paper_id)
+                if not isinstance(document, Chunk) or not document.text.strip():
+                    return None
                 title = _title_from(candidate, document)
                 if title is None:
-                    return fallback
-                titles.append(title)
-                normalized_texts.append(
-                    unicodedata.normalize("NFKC", document.text)
+                    return None
+                titled.append(
+                    (title, unicodedata.normalize("NFKC", document.text))
                 )
         except Exception:
-            return fallback
+            return None
+        return titled
 
-        title_patterns: list[
-            tuple[Pattern[str] | None, Pattern[str] | None]
-        ] = []
-        for title in titles:
-            full_pattern = _title_pattern(
-                title,
-                min_alnum_chars=_FULL_TITLE_MIN_ALNUM_CHARS,
-            )
-            alias = _conservative_title_alias(title)
-            alias_pattern = (
-                _title_pattern(
-                    alias,
-                    min_alnum_chars=_ALIAS_MIN_ALNUM_CHARS,
-                )
-                if alias is not None
-                else None
-            )
-            title_patterns.append((full_pattern, alias_pattern))
+    @staticmethod
+    def _title_patterns(
+        title: str,
+    ) -> tuple[Pattern[str] | None, Pattern[str] | None]:
+        """Compile the full-title and conservative-alias patterns for one paper."""
 
-        edge_cache: dict[tuple[int, int], int] = {}
+        full_pattern = _title_pattern(
+            title,
+            min_alnum_chars=_FULL_TITLE_MIN_ALNUM_CHARS,
+        )
+        alias = _conservative_title_alias(title)
+        alias_pattern = (
+            _title_pattern(alias, min_alnum_chars=_ALIAS_MIN_ALNUM_CHARS)
+            if alias is not None
+            else None
+        )
+        return full_pattern, alias_pattern
 
-        def edge_strength(left: int, right: int) -> int:
-            """Return one symmetric edge score, computing each pair once."""
-
-            key = (left, right) if left < right else (right, left)
-            cached = edge_cache.get(key)
-            if cached is not None:
-                return cached
-
-            left_full, left_alias = title_patterns[left]
-            right_full, right_alias = title_patterns[right]
-            strength = _mention_strength(
-                right_full,
-                right_alias,
-                normalized_texts[left],
-            )
-            strength += _mention_strength(
-                left_full,
-                left_alias,
-                normalized_texts[right],
-            )
-            edge_cache[key] = strength
-            return strength
-
-        strengths: dict[int, int] = {}
-        for index in range(1, len(candidates)):
-            strengths[index] = edge_strength(0, index)
+    @staticmethod
+    def _direct_ranks(
+        strengths: dict[int, int],
+        candidates: list[RetrievalResult],
+    ) -> dict[int, int]:
+        """Rank the candidates that exchange a title mention with the seed."""
 
         related = sorted(
             (index for index, strength in strengths.items() if strength > 0),
@@ -335,63 +343,88 @@ class PaperNeighborhoodReranker:
                 candidates[index].paper_id,
             ),
         )
-        relation_ranks = {
+        return {
             candidate_index: rank
             for rank, candidate_index in enumerate(related, start=1)
         }
 
-        two_hop_stats: dict[int, tuple[int, int]] = {}
-        two_hop_ranks: dict[int, int] = {}
-        if self.two_hop_weight > 0:
-            direct = {
-                index for index, strength in strengths.items() if strength > 0
-            }
-            for hub in range(1, len(candidates)):
-                seed_to_hub = strengths[hub]
-                if seed_to_hub < 2:
+    def _two_hop_ranks(
+        self,
+        graph: _TitleGraph,
+        strengths: dict[int, int],
+        candidates: list[RetrievalResult],
+    ) -> tuple[dict[int, tuple[int, int]], dict[int, int]]:
+        """Recover papers reachable only through a strict, low-degree hub."""
+
+        if self.two_hop_weight <= 0:
+            return {}, {}
+
+        direct = {
+            index for index, strength in strengths.items() if strength > 0
+        }
+        stats: dict[int, tuple[int, int]] = {}
+        for hub in range(1, len(candidates)):
+            seed_to_hub = strengths[hub]
+            if seed_to_hub < 2:
+                continue
+
+            neighbors = self._hub_neighbors(graph, hub, len(candidates))
+            if neighbors is None:
+                continue
+
+            for target, hub_to_target in neighbors:
+                if target == 0 or target in direct or hub_to_target < 2:
                     continue
+                bottleneck = min(seed_to_hub, hub_to_target)
+                best, path_count = stats.get(target, (0, 0))
+                stats[target] = (max(best, bottleneck), path_count + 1)
 
-                neighbors: list[tuple[int, int]] = []
-                for neighbor in range(len(candidates)):
-                    if neighbor == hub:
-                        continue
-                    strength = edge_strength(hub, neighbor)
-                    if strength <= 0:
-                        continue
-                    neighbors.append((neighbor, strength))
-                    # High-degree papers are likely surveys or bibliography
-                    # hubs. Stop scanning as soon as they exceed the cap.
-                    if len(neighbors) > self.max_hub_degree:
-                        break
-                if len(neighbors) > self.max_hub_degree:
-                    continue
+        order = sorted(
+            stats,
+            key=lambda index: (
+                -stats[index][0],
+                -stats[index][1],
+                index + 1,
+                candidates[index].paper_id,
+            ),
+        )
+        ranks = {
+            candidate_index: rank
+            for rank, candidate_index in enumerate(order, start=1)
+        }
+        return stats, ranks
 
-                for target, hub_to_target in neighbors:
-                    if target == 0 or target in direct or hub_to_target < 2:
-                        continue
-                    bottleneck = min(seed_to_hub, hub_to_target)
-                    best, path_count = two_hop_stats.get(target, (0, 0))
-                    two_hop_stats[target] = (
-                        max(best, bottleneck),
-                        path_count + 1,
-                    )
+    def _hub_neighbors(
+        self,
+        graph: _TitleGraph,
+        hub: int,
+        count: int,
+    ) -> list[tuple[int, int]] | None:
+        """Return the hub's neighbors, or ``None`` when it exceeds the cap."""
 
-            two_hop_order = sorted(
-                two_hop_stats,
-                key=lambda index: (
-                    -two_hop_stats[index][0],
-                    -two_hop_stats[index][1],
-                    index + 1,
-                    candidates[index].paper_id,
-                ),
-            )
-            two_hop_ranks = {
-                candidate_index: rank
-                for rank, candidate_index in enumerate(
-                    two_hop_order,
-                    start=1,
-                )
-            }
+        neighbors: list[tuple[int, int]] = []
+        for neighbor in range(count):
+            if neighbor == hub:
+                continue
+            strength = graph.strength(hub, neighbor)
+            if strength <= 0:
+                continue
+            neighbors.append((neighbor, strength))
+            # High-degree papers are likely surveys or bibliography hubs.
+            # Stop scanning as soon as they exceed the cap.
+            if len(neighbors) > self.max_hub_degree:
+                return None
+        return neighbors
+
+    def _score(
+        self,
+        candidates: list[RetrievalResult],
+        strengths: dict[int, int],
+        relation_ranks: dict[int, int],
+        two_hop_stats: dict[int, tuple[int, int]],
+        two_hop_ranks: dict[int, int],
+    ) -> list[RetrievalResult]:
+        """Fuse the baseline, relation and two-hop ranks into one ordering."""
 
         scored: list[tuple[float, int, RetrievalResult]] = []
         for index, candidate in enumerate(candidates):
@@ -457,4 +490,4 @@ class PaperNeighborhoodReranker:
                 item[2].paper_id,
             )
         )
-        return [result for _, _, result in scored[:top_k]]
+        return [result for _, _, result in scored]
