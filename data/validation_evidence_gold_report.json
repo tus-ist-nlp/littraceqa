@@ -1,0 +1,630 @@
+{
+  "rule": "keep gold_papers whose paper_id appears as evidence[].paper_id",
+  "queries": 55,
+  "gold_before": 146,
+  "gold_after": 117,
+  "queries_with_drops": 16,
+  "queries_emptied": [],
+  "by_task_family": {
+    "hidden_source_single_paper": {
+      "queries": 26,
+      "gold_before": 26,
+      "gold_after": 26
+    },
+    "multi_paper": {
+      "queries": 29,
+      "gold_before": 120,
+      "gold_after": 91
+    }
+  },
+  "per_query": [
+    {
+      "query_id": "q_001",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_002",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_003",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "citation_context",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_004",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": [
+        "ev_001"
+      ]
+    },
+    {
+      "query_id": "q_005",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "citation_context",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_006",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_007",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_008",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_009",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_010",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_011",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 3,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_012",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": [
+        "ev_001"
+      ]
+    },
+    {
+      "query_id": "q_013",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": [
+        "ev_001"
+      ]
+    },
+    {
+      "query_id": "q_014",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 3,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_015",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_017",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "citation_context",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 5,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_018",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "equation_algorithm",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": [
+        "ev_001"
+      ]
+    },
+    {
+      "query_id": "q_019",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "citation_context",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 3,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_020",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_021",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_022",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "equation_algorithm",
+      "gold_before": 3,
+      "gold_after": 3,
+      "dropped_paper_ids": [],
+      "evidence_items": 3,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_023",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "citation_context",
+      "gold_before": 9,
+      "gold_after": 9,
+      "dropped_paper_ids": [],
+      "evidence_items": 9,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_024",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_025",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_026",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": [
+        "ev_001"
+      ]
+    },
+    {
+      "query_id": "q_027",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "citation_context",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_028",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_029",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_030",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_031",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "icml2025_01371"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_032",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 1,
+      "dropped_paper_ids": [
+        "iclr2025_00615",
+        "iclr2025_03031",
+        "icml2025_01371"
+      ],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_033",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 1,
+      "dropped_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031",
+        "icml2025_01371"
+      ],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_034",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 1,
+      "dropped_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031",
+        "iclr2025_00615"
+      ],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_035",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_036",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_037",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 4,
+      "gold_after": 1,
+      "dropped_paper_ids": [
+        "cvpr2025_00533",
+        "neurips2025_05262",
+        "cvpr2025_01683"
+      ],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_038",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 4,
+      "gold_after": 1,
+      "dropped_paper_ids": [
+        "icml2025_01821",
+        "iclr2025_02641",
+        "neurips2025_00003"
+      ],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_039",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "equation_algorithm",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "iclr2025_00615"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_040",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "equation_algorithm",
+      "gold_before": 4,
+      "gold_after": 1,
+      "dropped_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031",
+        "iclr2025_00615"
+      ],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_041",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "equation_algorithm",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "iclr2025_00615"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_042",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "citation_context",
+      "gold_before": 4,
+      "gold_after": 2,
+      "dropped_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_00615"
+      ],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_043",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_044",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_045",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_046",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "cvpr2025_01683"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_047",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "icml2025_00192"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_048",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "eccv2024_01567"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_049",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "text_span",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "cvpr2025_01683"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_050",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "equation_algorithm",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "icml2025_00192"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_051",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "equation_algorithm",
+      "gold_before": 4,
+      "gold_after": 3,
+      "dropped_paper_ids": [
+        "iclr2025_02715"
+      ],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_052",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 6,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_053",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_054",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 2,
+      "evidence_without_text": []
+    },
+    {
+      "query_id": "q_055",
+      "task_family": "hidden_source_single_paper",
+      "primary_evidence_type": "figure",
+      "gold_before": 1,
+      "gold_after": 1,
+      "dropped_paper_ids": [],
+      "evidence_items": 1,
+      "evidence_without_text": [
+        "ev_001"
+      ]
+    },
+    {
+      "query_id": "q_056",
+      "task_family": "multi_paper",
+      "primary_evidence_type": "table",
+      "gold_before": 4,
+      "gold_after": 4,
+      "dropped_paper_ids": [],
+      "evidence_items": 4,
+      "evidence_without_text": []
+    }
+  ],
+  "written_queries": 55
+}
