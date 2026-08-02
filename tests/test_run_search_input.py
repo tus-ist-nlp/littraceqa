@@ -10,22 +10,28 @@ import pytest
 
 from littraceqa.di_pipeline.contracts import Chunk
 from littraceqa.di_pipeline.preprocess.checkpoint import MergeResult, PreprocessCache
-from scripts.run_search import (
-    build_indexers_with_resume,
-    iter_chunks,
+from littraceqa.di_pipeline.build.index_state import build_indexers_with_resume
+from littraceqa.di_pipeline.build.paper_selection import (
     load_paper_ids_file,
-    load_queries,
     normalize_paper_ids,
-    override_max_chars_per_chunk,
-    preprocess_selected_papers,
-    resolve_preprocess_cache_root,
     select_papers_for_bounded_build,
     validate_build_ceiling,
     validate_build_mode,
     validate_large_build_selection,
+)
+from littraceqa.di_pipeline.build.write_guard import (
+    preprocessing_source_roots,
+    resolve_preprocess_cache_root,
     validate_preprocess_cache_root,
     validate_write_paths,
 )
+from littraceqa.di_pipeline.index.chunk_store import iter_chunks
+from littraceqa.di_pipeline.preprocess.orchestration import (
+    override_max_chars_per_chunk,
+    preprocess_selected_papers,
+    preprocessing_source_path,
+)
+from littraceqa.di_pipeline.query_input import load_queries
 
 
 def _write_query(path) -> None:
@@ -240,47 +246,47 @@ def test_bounded_selection_accepts_5000_but_rejects_5001(tmp_path) -> None:
         )
 
 
-def test_explicit_build_cap_accepts_exactly_10000(tmp_path) -> None:
+def test_explicit_build_cap_accepts_exactly_27487(tmp_path) -> None:
     path = tmp_path / "papers.jsonl"
     path.write_text(
         "".join(
             json.dumps({"paper_id": f"p{index:05d}"}) + "\n"
-            for index in range(10_000)
+            for index in range(27_487)
         ),
         encoding="utf-8",
     )
-    paper_ids = [f"p{index:05d}" for index in range(10_000)]
+    paper_ids = [f"p{index:05d}" for index in range(27_487)]
 
     papers = select_papers_for_bounded_build(
         path,
         paper_ids,
-        10_000,
-        max_build_papers=10_000,
+        27_487,
+        max_build_papers=27_487,
     )
 
-    assert len(papers) == 10_000
+    assert len(papers) == 27_487
 
 
 def test_extended_build_requires_all_exact_count_confirmations(tmp_path) -> None:
     id_file = tmp_path / "paper_ids.txt"
     id_file.write_text("p1\n", encoding="utf-8")
     common = {
-        "selected_count": 10_000,
+        "selected_count": 27_487,
         "paper_ids_file": id_file,
-        "confirm_paper_count": 10_000,
-        "limit": 10_000,
-        "max_build_papers": 10_000,
+        "confirm_paper_count": 27_487,
+        "limit": 27_487,
+        "max_build_papers": 27_487,
     }
 
     validate_large_build_selection(**common)
     for key, value in (
         ("paper_ids_file", None),
         ("confirm_paper_count", None),
-        ("confirm_paper_count", 9_999),
+        ("confirm_paper_count", 27_486),
         ("limit", None),
-        ("limit", 9_999),
+        ("limit", 27_486),
         ("max_build_papers", 5_000),
-        ("max_build_papers", 9_999),
+        ("max_build_papers", 27_486),
     ):
         invalid = dict(common)
         invalid[key] = value
@@ -296,29 +302,29 @@ def test_extended_build_requires_all_exact_count_confirmations(tmp_path) -> None
 def test_absolute_build_cap_is_rejected_before_metadata_access() -> None:
     missing = Path("/path/that/must/not/be/read.jsonl")
 
-    with pytest.raises(ValueError, match="between 1 and 10000"):
+    with pytest.raises(ValueError, match="between 1 and 27487"):
         select_papers_for_bounded_build(
             missing,
             [],
             1,
-            max_build_papers=10_001,
+            max_build_papers=27_488,
         )
-    with pytest.raises(ValueError, match="between 1 and 10000"):
+    with pytest.raises(ValueError, match="between 1 and 27487"):
         select_papers_for_bounded_build(
             missing,
             [],
-            10_001,
-            max_build_papers=10_000,
+            27_488,
+            max_build_papers=27_487,
         )
-    with pytest.raises(ValueError, match="at most 10000 distinct"):
+    with pytest.raises(ValueError, match="at most 27487 distinct"):
         select_papers_for_bounded_build(
             missing,
-            [f"p{index:05d}" for index in range(10_001)],
+            [f"p{index:05d}" for index in range(27_488)],
             None,
-            max_build_papers=10_000,
+            max_build_papers=27_487,
         )
-    with pytest.raises(ValueError, match="between 1 and 10000"):
-        validate_build_ceiling(10_001)
+    with pytest.raises(ValueError, match="between 1 and 27487"):
+        validate_build_ceiling(27_488)
 
 
 def test_mineru_chunk_size_override_does_not_mutate_source_config() -> None:
@@ -339,6 +345,38 @@ def test_mineru_chunk_size_override_rejects_unsafe_values(value: int) -> None:
 def test_chunk_size_override_rejects_other_preprocessors() -> None:
     with pytest.raises(ValueError, match="supports MinerU only"):
         override_max_chars_per_chunk({"name": "marker", "params": {}}, 4000)
+
+
+def test_mineru_source_path_and_roots_come_from_the_content_list(tmp_path) -> None:
+    class MinerUPreprocessor:
+        mineru_dir = tmp_path / "mineru"
+        pdf_dir = tmp_path / "pdfs"
+
+        def content_list_path(self, paper_id: str) -> Path:
+            return self.mineru_dir / paper_id / "auto" / f"{paper_id}_content_list.json"
+
+    preprocessor = MinerUPreprocessor()
+
+    assert preprocessing_source_path(preprocessor, {"paper_id": "p1"}) == (
+        tmp_path / "mineru" / "p1" / "auto" / "p1_content_list.json"
+    )
+    assert preprocessing_source_roots(preprocessor) == [
+        (tmp_path / "mineru").resolve()
+    ]
+
+
+def test_pdf_preprocessor_falls_back_to_the_pdf_directory(tmp_path) -> None:
+    class PDFPreprocessor:
+        pdf_dir = tmp_path / "pdfs"
+
+    preprocessor = PDFPreprocessor()
+
+    assert preprocessing_source_path(preprocessor, {"paper_id": "p1"}) == (
+        tmp_path / "pdfs" / "p1.pdf"
+    )
+    assert preprocessing_source_roots(preprocessor) == [
+        (tmp_path / "pdfs").resolve()
+    ]
 
 
 def test_resume_requires_build_mode() -> None:

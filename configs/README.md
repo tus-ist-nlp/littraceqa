@@ -43,10 +43,12 @@ uv run python scripts/run_search.py \
 ```
 
 `--build` always requires `--artifact-root` and either `--paper-id` or
-`--limit` (maximum 5,000). Selecting more than 200 papers additionally requires
-`--paper-ids-file` and an exact `--confirm-paper-count`. `--build-only` avoids
-constructing or calling an LLM agent. Prebuilt shared indexes are read-only and
-normally do not need rebuilding.
+`--limit` (default maximum 5,000; explicit absolute maximum 27,487). Selecting
+more than 200 papers additionally requires `--paper-ids-file` and an exact
+`--confirm-paper-count`. Builds above 5,000 also require `--limit`,
+`--max-build-papers`, and `--confirm-paper-count` to equal the selected paper
+count. `--build-only` avoids constructing or calling an LLM agent. Prebuilt
+shared indexes are read-only and normally do not need rebuilding.
 
 `--resume` validates and reuses an atomic Chunk file for each paper. It also
 loads each completed Indexer after verifying the merged-corpus, config, and
@@ -64,6 +66,22 @@ settings. Concurrent builders for one BM25 index root are rejected.
 
 Components also declare implementation dependencies, so changing method-alias
 extraction or a parser helper invalidates stale output.
+
+### Bounded build implementation roles
+
+The bounded test-build path is split by responsibility so each safety rule can
+be tested independently.
+
+| File | Responsibility |
+|---|---|
+| `scripts/run_search.py` | Coordinates config loading, bounded builds, agent execution, scoring, and reporting. |
+| `build/paper_selection.py` | Selects papers deterministically and requires redundant confirmation for large builds. |
+| `build/write_guard.py` | Prevents output and cache paths from overlapping shared or source data. |
+| `preprocess/orchestration.py` | Processes and checkpoints one paper at a time, records failures, and publishes merged chunks only after full success. |
+| `build/index_state.py` | Fingerprints the corpus, config, and implementation before reusing or rebuilding each index. |
+| `index/chunk_store.py` | Streams merged Chunk JSONL into index builders without materializing the complete corpus. |
+| `query_input.py` | Loads the four production fields and keeps validation-only options behind an explicit oracle mode. |
+| `experiment_log.py` | Records resolved settings and metrics after an end-to-end agent run. |
 
 By default, paper checkpoints are stored below
 `<artifact-root>/preprocess`. Pass a user-owned

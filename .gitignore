@@ -24,6 +24,10 @@ pdfs/
 # Local Codex working notes
 /codex.md
 
+# Local AI refactoring instructions
+/docs/claude_code_refactoring_prompt.md
+/docs/mineru_submission_refactoring_spec.md
+
 # 実行ログ（索引構築・検索の進捗。巨大かつ再現可能なので追跡しない）
 logs/
 # 予測結果（実験の生成物。results/experiments.jsonl に config とスコアが残るので再現可能）

@@ -1,4 +1,8 @@
-"""Read-only random access to Chunk records stored as JSON Lines."""
+"""Read Chunk records stored as JSON Lines.
+
+``ChunkJsonlStore`` gives offset-indexed random access; ``iter_chunks``
+streams the same format for callers that only need one forward pass.
+"""
 
 from __future__ import annotations
 
@@ -240,3 +244,21 @@ class ChunkJsonlStore(Sequence[Chunk]):
                 "the Chunk contract: invalid field type"
             )
         return chunk
+
+
+def iter_chunks(path: Path) -> Iterator[Chunk]:
+    """Stream chunk records from JSONL without retaining the whole corpus."""
+    with path.open(encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError("chunk record must be a JSON object")
+                yield Chunk(**record)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{path}:{line_number} is not a valid Chunk record"
+                ) from exc
