@@ -1,4 +1,4 @@
-# Experimental baseline: rerank a fixed 20-paper candidate set.
+# Validation-selected baseline: rerank a fixed 50-paper candidate set.
 # Several weights were selected on the current validation queries and require
 # confirmation on a separate held-out set.
 per_index_k: 100
@@ -39,10 +39,10 @@ reranker:
     batch_size: 4
     max_tokens: 1024
     local_files_only: true
-    # An official-gold validation sweep selected a slight preference for the
-    # original order across cutoffs 5, 8, and 10. Treat this as
-    # validation-selected until held-out data becomes available.
-    base_rank_weight: 0.56
+    # A conservative validation replay selected the stable 0.583-0.590
+    # plateau. Unlike the unconstrained optimum, 0.59 had no per-query
+    # regressions at cutoffs 1, 3, 5, 8, 10, or 20.
+    base_rank_weight: 0.59
     rank_fusion_k: 60.0
     instruction: >-
       Given a scientific question, determine whether the document contains
@@ -53,13 +53,21 @@ retriever_wrapper:
     candidate_k: 50
     seed_text_chars: 512
     rrf_k: 60
-    max_results: 20
+    max_results: 50
     stable_prefix_k: 10
     protect_explicit_title_matches: true
     max_protected_titles: 4
     local_expansion_weight: 0.5
     literal_attribute_hints: true
     literal_method_hints: true
+    # Only open-set enumeration questions run four additional seed searches.
+    # A paper must appear in at least two independent runs and reach the top
+    # two in one of them before it can fill rank 20 after final reranking.
+    # This preserves the baseline's final top 19 exactly.
+    open_set_seed_k: 5
+    open_set_min_support: 2
+    open_set_max_seed_rank: 2
+    open_set_slot_k: 20
     method_owner_weight: 0.35
     method_relation_weight: 0.35
     method_relation_seed_k: 3
@@ -95,6 +103,11 @@ retriever_wrapper:
     paper_dense_reciprocal_min_support: 6
     paper_dense_reciprocal_max_candidates: 32
     # Dense-tail and consensus candidates are fixed before model scoring.
+    # The caller can still request a smaller output, such as the 20 papers
+    # consumed by the reading agent.
     rerank_final_candidates: true
     final_rerank_document_chars: 2000
-    rerank_pool_k: 20
+    rerank_pool_k: 50
+    # Qwen can reorder the original top 20, but papers below that boundary
+    # cannot displace a paper that the reading agent would otherwise receive.
+    final_rerank_protected_top_k: 20

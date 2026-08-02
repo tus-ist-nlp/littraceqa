@@ -7,12 +7,40 @@ retrieval lanes and only applied during final ranking.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from littraceqa.di_pipeline.contracts import RetrievalResult, SearchHints
 from littraceqa.di_pipeline.retrieve.attributes import (
     extract_literal_search_hints,
 )
+
+_OPEN_SET_PAPER_PATTERN = re.compile(
+    r"\bwhich\b[^?]{0,200}\bpapers\b",
+    re.IGNORECASE,
+)
+_OPEN_SET_EACH_METHOD_PATTERN = re.compile(
+    r"(?:"
+    r"\beach\s+proposed\s+(?:method|approach|system)\b"
+    r"|"
+    r"\b(?:among|across)\b[^?]{0,240}"
+    r"\b(?:methods|approaches|systems|papers)\b[^?]{0,240}"
+    r"\beach\s+(?:method|approach|system)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_open_set_enumeration(query: str) -> bool:
+    """Detect questions that ask for an unknown set of papers or methods."""
+
+    normalized = " ".join(query.split())
+    if not normalized:
+        return False
+    return bool(
+        _OPEN_SET_PAPER_PATTERN.search(normalized)
+        or _OPEN_SET_EACH_METHOD_PATTERN.search(normalized)
+    )
 
 
 def paper_context(seed: RetrievalResult) -> str | None:

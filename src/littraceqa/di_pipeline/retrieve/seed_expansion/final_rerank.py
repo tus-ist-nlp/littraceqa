@@ -24,6 +24,18 @@ class FinalCandidateReranker:
 
     reranker: Reranker | None
     document_chars: int
+    protected_top_k: int = 0
+
+    def __post_init__(self) -> None:
+        """Validate the protected prefix size."""
+
+        if isinstance(self.protected_top_k, bool) or not isinstance(
+            self.protected_top_k,
+            int,
+        ):
+            raise TypeError("protected_top_k must be an integer")
+        if self.protected_top_k < 0:
+            raise ValueError("protected_top_k must be non-negative")
 
     def rerank(
         self,
@@ -91,6 +103,7 @@ class FinalCandidateReranker:
         proxies = self._build_proxies(paper_index, candidates)
         reranked = list(self.reranker.rerank(query, proxies, len(proxies)))
         self._validate(reranked, candidates, original_ids)
+        reranked = self._protect_prefix(reranked, original_ids)
 
         original_by_id = {
             candidate.paper_id: candidate for candidate in candidates
@@ -103,7 +116,12 @@ class FinalCandidateReranker:
                 raise TypeError("final reranker returned invalid metadata")
             for key, value in result.metadata.items():
                 if key not in original.metadata or key.startswith(
-                    ("pre_rerank_", "qwen3_", "rank_fusion_")
+                    (
+                        "pre_rerank_",
+                        "final_rerank_",
+                        "qwen3_",
+                        "rank_fusion_",
+                    )
                 ):
                     metadata[key] = value
             preserved.append(
@@ -115,12 +133,61 @@ class FinalCandidateReranker:
             )
         return preserved
 
+    def _protect_prefix(
+        self,
+        reranked: list[RetrievalResult],
+        original_ids: list[str],
+    ) -> list[RetrievalResult]:
+        """Keep the original top-K paper set while reranking within that set."""
+
+        protected_k = min(self.protected_top_k, len(original_ids))
+        if protected_k == 0:
+            return reranked
+
+        protected_ids = set(original_ids[:protected_k])
+        original_rerank_positions = {
+            result.paper_id: rank
+            for rank, result in enumerate(reranked, start=1)
+        }
+        reordered = [
+            result for result in reranked if result.paper_id in protected_ids
+        ]
+        reordered.extend(
+            result
+            for result in reranked
+            if result.paper_id not in protected_ids
+        )
+
+        descending_scores = sorted(
+            (float(result.score) for result in reranked),
+            reverse=True,
+        )
+        protected: list[RetrievalResult] = []
+        for index, (result, score) in enumerate(
+            zip(reordered, descending_scores, strict=True)
+        ):
+            metadata = dict(result.metadata)
+            metadata.update(
+                {
+                    "final_rerank_pre_protection_rank": (
+                        original_rerank_positions[result.paper_id]
+                    ),
+                    "final_rerank_pre_protection_score": float(result.score),
+                    "final_rerank_protected_top_k": protected_k,
+                    "final_rerank_prefix_protected": index < protected_k,
+                }
+            )
+            protected.append(
+                replace(result, score=score, metadata=metadata)
+            )
+        return protected
+
     def _build_proxies(
         self,
         paper_index,
         candidates: list[RetrievalResult],
     ) -> list[RetrievalResult]:
-        """Swap each candidate's text for its full paper-level document."""
+        """Use the bounded head of each paper-level document for scoring."""
 
         proxies: list[RetrievalResult] = []
         for candidate in candidates:

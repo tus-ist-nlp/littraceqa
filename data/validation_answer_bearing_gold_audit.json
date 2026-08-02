@@ -1,0 +1,3961 @@
+{
+  "audit_name": "LitTraceQA answer-bearing gold audit",
+  "audit_version": "1.0",
+  "determinism": "Every classification is a hand-authored constant keyed by (query_id, paper_id). Query order, paper order and JSON key order all follow the input file, so re-running the builder reproduces byte-identical outputs.",
+  "criteria": {
+    "required": "Removing this paper makes at least one requested answer element (value, intermediate quantity used in a calculation, count, title, row of the requested table, or side of the requested comparison) underivable from the remaining gold set.",
+    "supportive": "The paper's evidence reports the SAME class of quantity/design the question asks for, but for a system other than the one the question targets. A human can use it as contrast or confirmation; the requested answer does not depend on it.",
+    "irrelevant": "The paper's evidence reports a different quantity/design class than the question asks for (different metric, different component, or no comparable value at all), so it contributes nothing to the requested answer.",
+    "uncertain": "Question, answer, evidence text and locator together are insufficient to decide between required and not-required safely.",
+    "notes": [
+      "Single-gold-paper queries are required by construction: the gold set has no other source for any answer element.",
+      "Figure / table / equation / algorithm / citation-count questions with an empty evidence_text_or_value stay required when the locator is what answers the question (rule 3).",
+      "Enumeration and per-method-row questions map every requested answer element to its own source paper (rule 4); no multi-paper query is collapsed onto one paper (rule 5).",
+      "task_family, primary_evidence_type, retrieval rankings, Recall scores and prediction files were not consulted (rules 8, 9)."
+    ]
+  },
+  "files": {
+    "input": {
+      "path": "data/validation_evidence_gold.jsonl",
+      "sha256": "2e71668f7e72305b44834766c13ce187f627ecd75bb663c93d696e09d184003d",
+      "queries": 55,
+      "gold_papers": 117
+    },
+    "draft_jsonl": {
+      "path": "data/validation_answer_bearing_gold_draft.jsonl",
+      "sha256": "0a5d950d98861340c50a97ad80ede7492ecee769d5d55c8b07cd82153bbff451",
+      "queries": 55,
+      "gold_papers": 87
+    },
+    "audit_json": {
+      "path": "data/validation_answer_bearing_gold_audit.json",
+      "sha256": "bd7fb2f15032736190d6c4c158818635d1a8f6865a474e0307594906facdf519",
+      "sha256_note": "SHA-256 of this file's own serialization with this field set to null (a file cannot contain its own hash). Filled in by a second pass."
+    }
+  },
+  "counts": {
+    "queries_before": 55,
+    "queries_after": 55,
+    "gold_papers_before": 117,
+    "gold_papers_after": 87,
+    "gold_papers_removed": 30,
+    "classifications": {
+      "required": 87,
+      "supportive": 18,
+      "irrelevant": 12,
+      "uncertain": 0
+    },
+    "queries_changed": 14,
+    "queries_requiring_human_review": 9
+  },
+  "changed_queries": [
+    "q_031",
+    "q_035",
+    "q_036",
+    "q_039",
+    "q_041",
+    "q_043",
+    "q_044",
+    "q_045",
+    "q_046",
+    "q_047",
+    "q_048",
+    "q_049",
+    "q_050",
+    "q_051"
+  ],
+  "uncertain_decisions": [],
+  "zero_required_fallback_queries": [],
+  "multi_paper_queries": [
+    {
+      "query_id": "q_020",
+      "required_paper_ids": [
+        "naacl2025_00043",
+        "naacl2025_00361",
+        "naacl2025_00280",
+        "naacl2025_00895"
+      ],
+      "why": "enumeration of qualifying papers; one answer row per paper"
+    },
+    {
+      "query_id": "q_022",
+      "required_paper_ids": [
+        "icml2025_01625",
+        "icml2025_00526",
+        "icml2025_00189"
+      ],
+      "why": "one method + objective row per paper"
+    },
+    {
+      "query_id": "q_023",
+      "required_paper_ids": [
+        "cvpr2025_00297",
+        "cvpr2025_00656",
+        "cvpr2025_00622",
+        "cvpr2025_02360",
+        "cvpr2025_01112",
+        "cvpr2025_00593",
+        "cvpr2025_01796",
+        "cvpr2025_02317",
+        "cvpr2025_02174"
+      ],
+      "why": "enumeration of qualifying papers; one answer row per paper"
+    },
+    {
+      "query_id": "q_025",
+      "required_paper_ids": [
+        "iccv2025_01943",
+        "neurips2025_04876",
+        "neurips2025_02748",
+        "icml2025_02399"
+      ],
+      "why": "one method + base-model row per paper"
+    },
+    {
+      "query_id": "q_028",
+      "required_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031",
+        "iclr2025_00615",
+        "icml2025_01371"
+      ],
+      "why": "one FID row per paper"
+    },
+    {
+      "query_id": "q_029",
+      "required_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_00615",
+        "icml2025_01371",
+        "iclr2025_03031"
+      ],
+      "why": "one FID row per paper"
+    },
+    {
+      "query_id": "q_030",
+      "required_paper_ids": [
+        "cvpr2025_01664",
+        "cvpr2025_01931",
+        "cvpr2025_01939",
+        "eccv2024_01801"
+      ],
+      "why": "one accuracy row per paper"
+    },
+    {
+      "query_id": "q_042",
+      "required_paper_ids": [
+        "iclr2025_03031",
+        "icml2025_01371"
+      ],
+      "why": "two-sided comparison; both values needed for the match verdict"
+    },
+    {
+      "query_id": "q_043",
+      "required_paper_ids": [
+        "cvpr2025_00533",
+        "cvpr2025_01683"
+      ],
+      "why": "two requested values from two different papers"
+    },
+    {
+      "query_id": "q_044",
+      "required_paper_ids": [
+        "iclr2025_00978",
+        "icml2025_00188"
+      ],
+      "why": "two requested values from two different papers"
+    },
+    {
+      "query_id": "q_045",
+      "required_paper_ids": [
+        "iclr2025_02715",
+        "acl2025_01863"
+      ],
+      "why": "two requested values from two different papers"
+    },
+    {
+      "query_id": "q_056",
+      "required_paper_ids": [
+        "eccv2024_00426",
+        "neurips2025_00496",
+        "iccv2025_00615",
+        "cvpr2025_00503"
+      ],
+      "why": "one accuracy row per paper"
+    }
+  ],
+  "requires_human_review": [
+    {
+      "query_id": "q_001",
+      "reasons": [
+        "The recorded evidence value is the Absolute Delta cell 15.66, but the gold answer is 14.70. The requested gap appears to be derived from other cells of Table 4, so the evidence entry does not pin down the answer. Gold membership is unaffected (single gold paper), but the evidence needs fixing."
+      ]
+    },
+    {
+      "query_id": "q_020",
+      "reasons": [
+        "Enumeration question: whether these four NAACL 2025 papers are the complete set cannot be verified from the gold data alone. All four listed papers are answer-bearing, but completeness needs a human check."
+      ]
+    },
+    {
+      "query_id": "q_021",
+      "reasons": [
+        "Cross-venue superlative ('across all venues, which paper achieves the highest driving score'). Confirming the maximum requires the competing papers, which are not in gold_papers, and rule 10 forbids adding them. Kept as a single required paper; scope needs a human decision."
+      ]
+    },
+    {
+      "query_id": "q_022",
+      "reasons": [
+        "The FPO evidence locator says Equation 11 (section 3) while the answer table row says Equation 8. The paper is still the only source of the FPO row, but one of the two equation IDs is wrong."
+      ]
+    },
+    {
+      "query_id": "q_023",
+      "reasons": [
+        "Enumeration question: whether these nine CVPR 2025 papers are the complete set of UniAD-baseline papers cannot be verified from the gold data alone. All nine listed papers are answer-bearing."
+      ]
+    },
+    {
+      "query_id": "q_025",
+      "reasons": [
+        "Enumeration question: whether these four methods are the complete set of 2025 inference/test-time scaling methods evaluated on GenEval cannot be verified from the gold data alone. All four are answer-bearing."
+      ]
+    },
+    {
+      "query_id": "q_029",
+      "reasons": [
+        "The question says 'as reported in their respective papers', but the iCT-deep and SiD values are located in the IMM and sCM baseline tables, not in the original iCT / SiD papers (absent from gold). Both papers are kept as required on the strength of their locators; the wording should be reconciled."
+      ]
+    },
+    {
+      "query_id": "q_054",
+      "reasons": [
+        "The question asks for AP^{kit}_{3D}, but both evidence rows and every answer row report AP^{nus}_{3D}. Gold membership is unaffected (single gold paper), but question and answer disagree on the metric."
+      ]
+    },
+    {
+      "query_id": "q_055",
+      "reasons": [
+        "Multiple-choice options C and D are both 'Cannot determine' (duplicated distractor). Gold membership is unaffected; the option set needs fixing."
+      ]
+    }
+  ],
+  "anchor_verification": [
+    {
+      "query_id": "q_020",
+      "anchor": "all four papers appear answer-bearing",
+      "required_paper_ids": [
+        "naacl2025_00043",
+        "naacl2025_00361",
+        "naacl2025_00280",
+        "naacl2025_00895"
+      ],
+      "excluded_paper_ids": [],
+      "result": "confirmed",
+      "note": null
+    },
+    {
+      "query_id": "q_025",
+      "anchor": "all four papers appear answer-bearing",
+      "required_paper_ids": [
+        "iccv2025_01943",
+        "neurips2025_04876",
+        "neurips2025_02748",
+        "icml2025_02399"
+      ],
+      "excluded_paper_ids": [],
+      "result": "confirmed",
+      "note": null
+    },
+    {
+      "query_id": "q_041",
+      "anchor": "sCM required; TCM, IMM and the paper without evidence not required",
+      "required_paper_ids": [
+        "iclr2025_03031"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_03463",
+        "icml2025_01371"
+      ],
+      "result": "confirmed",
+      "note": "The paper without evidence named in the anchor is not present in this input; the input already carries only the three evidence-backed papers."
+    },
+    {
+      "query_id": "q_043",
+      "anchor": "DEIM and Mr. DETR required; D-FINE and YOLOv12 not",
+      "required_paper_ids": [
+        "cvpr2025_00533",
+        "cvpr2025_01683"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_00706",
+        "neurips2025_05262"
+      ],
+      "result": "confirmed",
+      "note": null
+    },
+    {
+      "query_id": "q_044",
+      "anchor": "D2PO and AlphaDPO required; AMPO and gamma-SimPO not",
+      "required_paper_ids": [
+        "iclr2025_00978",
+        "icml2025_00188"
+      ],
+      "excluded_paper_ids": [
+        "icml2025_00192",
+        "acl2025_02365"
+      ],
+      "result": "confirmed",
+      "note": null
+    },
+    {
+      "query_id": "q_045",
+      "anchor": "VTI and MoD required; SID and PAI not",
+      "required_paper_ids": [
+        "iclr2025_02715",
+        "acl2025_01863"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_02963",
+        "eccv2024_01567"
+      ],
+      "result": "confirmed",
+      "note": null
+    },
+    {
+      "query_id": "q_051",
+      "anchor": "VAP required; PAI and SID not",
+      "required_paper_ids": [
+        "neurips2025_03461"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_02963",
+        "eccv2024_01567"
+      ],
+      "result": "confirmed",
+      "note": null
+    }
+  ],
+  "queries": [
+    {
+      "query_id": "q_001",
+      "question": "Among the two prompt compression methods, how much does 500xCompressor outperform ICAE on the NaturalQ benchmark in terms of F1 score under the 500-to-1 compression setting?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "acl2025_00005",
+          "title": "500x C ompressor: Generalized Prompt Compression for Large Language Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "F1 gap between 500xCompressor and ICAE on NaturalQ at 500:1 compression (answer 14.70)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "15.66",
+              "locator": "page=6, table_id=Table 4, row=Absolute ∆, column=NaturalQ"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "acl2025_00005"
+      ],
+      "conservative_gold_paper_ids": [
+        "acl2025_00005"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "acl2025_00005"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "The recorded evidence value is the Absolute Delta cell 15.66, but the gold answer is 14.70. The requested gap appears to be derived from other cells of Table 4, so the evidence entry does not pin down the answer. Gold membership is unaffected (single gold paper), but the evidence needs fixing."
+      ],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_002",
+      "question": "In Shadow RAG Auditing Data Provenance (S-RAG) framework, what kind of hardware configure was used.",
+      "answer_types": [
+        "freeform"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "acl2025_02422",
+          "title": "S - RAG : A Novel Audit Framework for Detecting Unauthorized Use of Personal Data in RAG Systems",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "hardware configuration used by S-RAG (a single NVIDIA RTX 4090 GPU)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "We implement it using a standard third-party RAG framework (Chroma), and all experiments are run on a single NVIDIA RTX 4090 GPU.",
+              "locator": "page=9, section=5.6, paragraph_id=3, sentence_start=We, sentence_end=GPU"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "acl2025_02422"
+      ],
+      "conservative_gold_paper_ids": [
+        "acl2025_02422"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "acl2025_02422"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_003",
+      "question": "Who is the first author of the 24th reference cited in the EasySpec paper?",
+      "answer_types": [
+        "freeform"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_01320",
+          "title": "EasySpec: Layer-Parallel Speculative Decoding for Efficient Multi-GPU Utilization",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "first author of the 24th reference of EasySpec (Freda Shi)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "citation_context",
+              "evidence_text_or_value": "Freda Shi, Mirac Suzgun, Markus Freitag, Xuezhi Wang, Suraj Srivats, Soroush Vosoughi, Hyung Won Chung, Yi Tay, Sebastian Ruder, Denny Zhou, et al. Language models are multilingual chain-of-thought reasoners. arXiv preprint arXiv:2210.03057, 2022.",
+              "locator": "citation_id=24, page=12, section=References, cited_paper=Language Models are Multilingual Chain-of-Thought Reasoners"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_01320"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_01320"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_01320"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_004",
+      "question": "How many subfigures are there in Figure 4 of the DynaPipe paper?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_01307",
+          "title": "DynaPipe: Dynamic Layer Redistribution for Efficient Serving of LLMs with Pipeline Parallelism",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "number of subfigures in Figure 4 of DynaPipe (8)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "",
+              "locator": "page=7, figure_id=Figure 4"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_01307"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_01307"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_01307"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_005",
+      "question": "What is the index of the last reference in FedRACE: A Hierarchical and Statistical Framework for Robust Federated Learning?",
+      "answer_types": [
+        "freeform"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_01635",
+          "title": "FedRACE: A Hierarchical and Statistical Framework for Robust Federated Learning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "index of the last reference in FedRACE (67)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "citation_context",
+              "evidence_text_or_value": "[67] Annette J. Dobson and Adrian G. Barnett. An Introduction to Generalized Linear Models. Chapman & Hall/CRC, 2018.",
+              "locator": "citation_id=67, page=14, section=References, cited_paper=An Introduction to Generalized Linear Models"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_01635"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_01635"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_01635"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_006",
+      "question": "In Figure 2 of From Replication to Redesign: Exploring Pairwise Comparisons for LLM-Based Peer Review, which system performs better as the number of agents increases?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_01787",
+          "title": "From Replication to Redesign: Exploring Pairwise Comparisons for LLM-Based Peer Review",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "system that improves as agent count grows in Figure 2 (GPT Ranking System without Area Control)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "GPT Ranking System without Area Control",
+              "locator": "page=5, figure_id=Figure 2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_01787"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_01787"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_01787"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_007",
+      "question": "In GUI exploration lab, figure 2, what is the example assitant reply?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_02000",
+          "title": "GUI Exploration Lab: Enhancing Screen Navigation in Agents via Multi-Turn Reinforcement Learning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "example assistant reply shown in Figure 2 (Explain: click Hotel icon on page_0. Action: click(835,65))",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "Assistant: “ Explain: click Hotel icon on page_0. Action: click(835,65) \"",
+              "locator": "page=5, figure_id=Figure 2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_02000"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_02000"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_02000"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_008",
+      "question": "In HOI-Dyn paper, which dataset is used to show interaction synthesis results?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_02080",
+          "title": "HOI-Dyn: Learning Interaction Dynamics for Human-Object Motion Diffusion",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "dataset used for the interaction synthesis results (3D-FUTURE)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Interaction synthesis results on the 3D-FUTURE dataset",
+              "locator": "page=8, section=4.2, paragraph_id=2, sentence_start=Interaction, sentence_end=dataset"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_02080"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_02080"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_02080"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_009",
+      "question": "What is the standard deviation of the NRMSE achieved by the PFNN model on the Lorenz 96 dynamical system with m = 80 in the paper Learning Chaos in a Leaner Way?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_01778",
+          "title": "Learning Chaos In A Linear Way",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "standard deviation of NRMSE for PFNN on Lorenz 96 with m=80 (0.09)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "0.09",
+              "locator": "page=8, table_id=Table 1, row=11, column=7"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_01778"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_01778"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_01778"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_010",
+      "question": "Among all dynamical systems evaluated in Learning Chaos in a Linear Way, which one exhibits the lowest standard deviation of NRMSE under the PFNN model?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_01778",
+          "title": "Learning Chaos In A Linear Way",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "dynamical system with the lowest NRMSE standard deviation under PFNN (Lorenz 96)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "0.05",
+              "locator": "page=8, table_id=Table 1, row=14, column=7"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_01778"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_01778"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_01778"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_011",
+      "question": "In the real-world experiments of Fast-in-Slow, for which task do $\\pi_0$ and FiS-VLA achieve the same performance?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_01597",
+          "title": "Fast-in-Slow: A Dual-System VLA Model Unifying Fast Manipulation within Slow Reasoning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "task where pi_0 and FiS-VLA tie in the real-world experiments (Lift ball and place)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "0.75",
+              "locator": "page=9, table_id=Table 2, row=4, column=3"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "0.75",
+              "locator": "page=9, table_id=Table 2, row=5, column=3"
+            },
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "Lift ball and place",
+              "locator": "page=9, table_id=Table 2, row=2, column=3"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_01597"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_01597"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_01597"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_012",
+      "question": "According to Figure 2(f) in the MamKO paper, which model exhibits the highest mean loss when the frequency is set to 10 rad/s?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_01984",
+          "title": "MamKO: Mamba-based Koopman operator for modeling and predictive control",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "model with the highest mean loss at 10 rad/s in Figure 2(f) (DKO)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "",
+              "locator": "page=8, figure_id=Figure 2, region=f"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_01984"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_01984"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_01984"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_013",
+      "question": "In Figure 1 of the AgentNet paper, three sample pre-defined agents are illustrated. How many of these agents fail to interact with the central controller?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_00264",
+          "title": "AgentNet: Decentralized Evolutionary Coordination for LLM-based Multi-Agent Systems",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "how many of the three sample agents fail to reach the central controller (1)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "",
+              "locator": "page=2, figure_id=Figure 1"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_014",
+      "question": "In the AgentNet paper, which backbone model achieves the highest performance on the API-Bank benchmark when integrated with AgentNet?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_00264",
+          "title": "AgentNet: Decentralized Evolutionary Coordination for LLM-based Multi-Agent Systems",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "backbone with the highest API-Bank score under AgentNet (Qwen-turbo)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "32",
+              "locator": "page=7, table_id=Table 1, row=31, column=6"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "30",
+              "locator": "page=7, table_id=Table 1, row=11, column=6"
+            },
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "29",
+              "locator": "page=7, table_id=Table 1, row=21, column=6"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_015",
+      "question": "Which feature of AgentNet, further ensure secure cooperation across organizations?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_00264",
+          "title": "AgentNet: Decentralized Evolutionary Coordination for LLM-based Multi-Agent Systems",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "feature securing cross-organization cooperation (privacy-preserving features)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "With its decentralized architecture, dynamic task allocation, and adaptive learning mechanisms, AgentNet improves scalability, fault tolerance, and task efficiency in collaborative environments. Its privacy-preserving features further ensure secure cooperation across organizations.",
+              "locator": "page=10, section=5, paragraph_id=1, sentence_start=With, sentence_end=organizations"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_00264"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_017",
+      "question": "How many papers were cited in Introduction Section of paper SecEmb?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "icml2025_02443",
+          "title": "SecEmb: Sparsity-Aware Secure Federated Learning of On-Device Recommender System with Large Embedding",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "number of papers cited in the Introduction of SecEmb (9)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "To understand the underlying preferences of users and properties of items, various model-based approaches have been developed to learn hidden representations of both users and items (Koren et al., 2009; Xue et al., 2017; Rendle, 2010).",
+              "locator": "page=1, section=Introduction, paragraph_id=1, sentence_start=To, sentence_end=2010"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Recent\nadvancements in edge computing have provided a potential solution through federated learning (FL), which allows\nusers to collaboratively train models on their local devices\nwithout exposing personal data (McMahan et al., 2017).",
+              "locator": "page=1, section=Introduction, paragraph_id=2"
+            },
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Despite its effectiveness in preserving privacy, the above paradigm suffers significant communication and computation overheads as it requires transmission of the full model and complete updates (Bonawitz et al., 2019)",
+              "locator": "page=1, section=Introduction, paragraph_id=3, sentence_start=Despite, sentence_end=2019"
+            },
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Existing sparsityaware FL protocols reduce communication overhead at the cost of increased privacy leakage (Lin et al., 2022; Liu et al., 2023; Lu et al., 2023), as they inevitably reveal the coordinates of non-zero elements or significantly narrow the set of potential non-zero updates.",
+              "locator": "page=1, section=Introduction, paragraph_id=5, sentence_start=Existing, sentence_end=updates"
+            },
+            {
+              "evidence_id": "ev_005",
+              "source_type": "text_span",
+              "evidence_text_or_value": "To mitigate this risk, secure aggregation (SecAgg) (Bonawitz et al., 2017) is adopted to prevent the server from inspecting individual updates during training",
+              "locator": "page=1, section=Introduction, paragraph_id=2, sentence_start=To, sentence_end=training"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "icml2025_02443"
+      ],
+      "conservative_gold_paper_ids": [
+        "icml2025_02443"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "icml2025_02443"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_018",
+      "question": "How many Parentheses does it have in equation 6 of paper Continuity-Preserving Convolutional Autoencoders for Learning Continuous Latent Dynamical Models from Images?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_00630",
+          "title": "Continuity-Preserving  Convolutional Autoencoders for Learning Continuous Latent Dynamical Models from Images",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "number of parentheses in Equation 6 (4)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "equation_algorithm",
+              "evidence_text_or_value": "",
+              "locator": "page=7, section=3.5, equation_id=Equation 6"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_00630"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_00630"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_00630"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_019",
+      "question": "How many references in the SecEmb paper include Bonawitz as an author?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "icml2025_02443",
+          "title": "SecEmb: Sparsity-Aware Secure Federated Learning of On-Device Recommender System with Large Embedding",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "number of references authored by Bonawitz (3)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "citation_context",
+              "evidence_text_or_value": "Bell, J. H., Bonawitz, K. A., Gasc´ on, A., Lepoint, T., and Raykova, M. Secure single-server aggregation with (poly) logarithmic overhead. In Proceedings of the 2020 ACM SIGSAC Conference on Computer and Communications Security, pp. 1253–1269, 2020.",
+              "locator": "citation_id=5, page=10, section=References, cited_paper=Secure single-server aggregation with (poly) logarithmic overhead"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "citation_context",
+              "evidence_text_or_value": "Bonawitz, K., Ivanov, V., Kreuter, B., Marcedone, A., McMahan, H. B., Patel, S., Ramage, D., Segal, A., and Seth, K. Practical secure aggregation for privacy-preserving machine learning. In proceedings of the 2017 ACM SIGSAC Conference on Computer and Communications Security, pp. 1175–1191, 2017.",
+              "locator": "citation_id=6, page=10, section=References, cited_paper=Practical secure aggregation for privacy- preserving machine learning."
+            },
+            {
+              "evidence_id": "ev_003",
+              "source_type": "citation_context",
+              "evidence_text_or_value": "Bonawitz, K., Eichner, H., Grieskamp, W., Huba, D., Inger-\nman, A., Ivanov, V., Kiddon, C., Konecny, J., Mazzocchi, S., McMahan, B., et al. Towards federated learning at scale: System design. Proceedings of Machine Learning and Systems, 1:374–388, 2019.",
+              "locator": "citation_id=7, page=10, section=References, cited_paper=Towards federated learning at scale: System design."
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "icml2025_02443"
+      ],
+      "conservative_gold_paper_ids": [
+        "icml2025_02443"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "icml2025_02443"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_020",
+      "question": "Which NAACL 2025 papers explicitly mention or reference MCTS (Monte Carlo Tree Search)  in their primary method/framework figure?",
+      "answer_types": [
+        "freeform",
+        "table"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 4,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "naacl2025_00043",
+          "title": "A Systematic Examination of Preference Learning through the Lens of Instruction-Following",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Its Figure 1 caption is the source that puts this title in the requested list; dropping it removes one of the four answer rows.",
+          "answer_element_supported": "answer table row 1 (A Systematic Examination of Preference Learning...)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "Monte Carlo Tree Search (MCTS, right).",
+              "locator": "page=2, figure_id=Figure 1, region=Figure Caption"
+            }
+          ]
+        },
+        {
+          "paper_id": "naacl2025_00361",
+          "title": "Ensembling Large Language Models with Process Reward-Guided Tree Search for Better Complex Reasoning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Figure 2 caption naming LE-MCTS is the source for this title in the requested list; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 2 (Ensembling LLMs with Process Reward-Guided Tree Search)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "figure",
+              "evidence_text_or_value": "LE-MCTS.",
+              "locator": "page=3, figure_id=Figure 2, region=Figure Caption"
+            }
+          ]
+        },
+        {
+          "paper_id": "naacl2025_00280",
+          "title": "DAWN - ICL : Strategic Planning of Problem-solving Trajectories for Zero-Shot In-Context Learning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Figure 2 right panel and caption carry the MCTS mention that qualifies this title; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 3 (DAWN-ICL)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "figure",
+              "evidence_text_or_value": "MCTS",
+              "locator": "page=3, figure_id=Figure 2, region=Figure right panel and Figure Caption"
+            }
+          ]
+        },
+        {
+          "paper_id": "naacl2025_00895",
+          "title": "RAG -Star: Enhancing Deliberative Reasoning with Retrieval Augmented Verification and Refinement",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Figure 1 shows the MCTS Procedure that qualifies this title; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 4 (RAG-Star)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "figure",
+              "evidence_text_or_value": "MCTS Procedure",
+              "locator": "page=4, figure_id=Figure 1, region=Figure"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "naacl2025_00043",
+        "naacl2025_00361",
+        "naacl2025_00280",
+        "naacl2025_00895"
+      ],
+      "conservative_gold_paper_ids": [
+        "naacl2025_00043",
+        "naacl2025_00361",
+        "naacl2025_00280",
+        "naacl2025_00895"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "naacl2025_00043",
+        "naacl2025_00361",
+        "naacl2025_00280",
+        "naacl2025_00895"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "Enumeration question: whether these four NAACL 2025 papers are the complete set cannot be verified from the gold data alone. All four listed papers are answer-bearing, but completeness needs a human check."
+      ],
+      "multi_paper_answer": "enumeration of qualifying papers; one answer row per paper"
+    },
+    {
+      "query_id": "q_021",
+      "question": "Across all venues, which VLM-based driving paper trained only on the Bench2Drive Base dataset (1000 clips) achieves the highest driving score on the Bench2Drive benchmark?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iccv2025_01741",
+          "title": "ORION: A Holistic End-to-End Autonomous Driving Framework by Vision-Language Instructed Action Generation",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "paper with the highest Bench2Drive driving score trained on the base 1000-clip set (ORION, DS 77.74)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "77.74",
+              "locator": "page=6, table_id=Table 1, row=DS↑, column=ORION (Ours)"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "the base set (1000 clips)",
+              "locator": "page=5, section=4.1. Dataset and Evaluation Metrics, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iccv2025_01741"
+      ],
+      "conservative_gold_paper_ids": [
+        "iccv2025_01741"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iccv2025_01741"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "Cross-venue superlative ('across all venues, which paper achieves the highest driving score'). Confirming the maximum requires the competing papers, which are not in gold_papers, and rule 10 forbids adding them. Kept as a single required paper; scope needs a human decision."
+      ],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_022",
+      "question": "Among ICML 2025 papers that propose a reference-free preference-optimization objective for LLM alignment without using a frozen reference model, what is each proposed method and what training objective does each optimize?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 3,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "icml2025_01625",
+          "title": "LOGO --- Long cOntext aliGnment via efficient preference Optimization",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Supplies the LOGO row: its training-objective equation is the requested per-method objective.",
+          "answer_element_supported": "answer table row LOGO / Equation 3",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "equation_algorithm",
+              "evidence_text_or_value": "The training objective of LOGO can be written as:",
+              "locator": "page=5, section=3.2.2 TRAINING OBJECTIVE OF LOGO, equation_id=Equation 3"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_00526",
+          "title": "Constrain Alignment with Sparse Autoencoders",
+          "classification": "required",
+          "confidence": "medium",
+          "reason": "Only source of the FPO row (method name and its loss equation). Confidence reduced because the evidence locator says Equation 11 while the answer table says Equation 8; the paper is still the sole source of this row.",
+          "answer_element_supported": "answer table row FPO / Equation 8",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "equation_algorithm",
+              "evidence_text_or_value": "By combining all the above results, we arrive at the loss function for FPO:",
+              "locator": "page=4, section=3 Feature-Level Direct Preference Optimization, equation_id=Equation 11"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_00189",
+          "title": "AlphaPO: Reward Shape Matters for LLM Alignment",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Supplies the AlphaPO row: the margin-based BT preference loss is the requested objective.",
+          "answer_element_supported": "answer table row AlphaPO / Equation 4",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "equation_algorithm",
+              "evidence_text_or_value": "This yields the following preference loss in the context of the margin-based BT model:",
+              "locator": "page=4, section=3.2 The AlphaPO reward function, equation_id=Equation 4"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "icml2025_01625",
+        "icml2025_00526",
+        "icml2025_00189"
+      ],
+      "conservative_gold_paper_ids": [
+        "icml2025_01625",
+        "icml2025_00526",
+        "icml2025_00189"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "icml2025_01625",
+        "icml2025_00526",
+        "icml2025_00189"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "The FPO evidence locator says Equation 11 (section 3) while the answer table row says Equation 8. The paper is still the only source of the FPO row, but one of the two equation IDs is wrong."
+      ],
+      "multi_paper_answer": "one method + objective row per paper"
+    },
+    {
+      "query_id": "q_023",
+      "question": "Which CVPR 2025 papers cite UniAD (Planning-oriented Autonomous Driving, CVPR2023) and use it as a baseline in their main comparison table?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 9,
+      "gold_paper_count_after": 9,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "cvpr2025_00297",
+          "title": "Bridging Past and Future: End-to-End Autonomous Driving with Historical Prediction and Planning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Its Table 1 lists UniAD as a baseline row, which is exactly the qualifying condition; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 1 (Bridging Past and Future)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=6, table_id=Table 1, row=UniAD, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_00656",
+          "title": "Don&#x27;t Shake the Wheel: Momentum-Aware Planning in End-to-End Autonomous Driving",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 contains the UniAD baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 2 (Don't Shake the Wheel)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=6, table_id=Table 1, row=UniAD, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_00622",
+          "title": "Distilling Multi-modal Large Language Models for Autonomous Driving",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 contains the UniAD baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 3 (Distilling Multi-modal LLMs for Autonomous Driving)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=6, table_id=Table 1, row=UniAD, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_02360",
+          "title": "SOLVE: Synergy of Language-Vision and End-to-End Networks for Autonomous Driving",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 contains the UniAD baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 4 (SOLVE)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=6, table_id=Table 1, row=UniAD, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_01112",
+          "title": "GoalFlow: Goal-Driven Flow Matching for Multimodal Trajectories Generation in End-to-End Autonomous Driving",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 contains the UniAD baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 5 (GoalFlow)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_005",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=7, table_id=Table 1, row=UniAD, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_00593",
+          "title": "DiffusionDrive: Truncated Diffusion Model for End-to-End Autonomous Driving",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 contains the UniAD baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 6 (DiffusionDrive)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_006",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=6, table_id=Table 1, row=UniAD, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_01796",
+          "title": "OmniDrive: A Holistic Vision-Language Dataset for Autonomous Driving with Counterfactual Reasoning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 contains the UniAD baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 7 (OmniDrive)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_007",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=6, table_id=Table 1, row=UniAD, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_02317",
+          "title": "SimLingo: Vision-Only Closed-Loop Autonomous Driving with Language-Action Alignment",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 2 contains the UniAD-Base baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 8 (SimLingo)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_008",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD-Base",
+              "locator": "page=7, table_id=Table 2, row=UniAD-Base, column=Method"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_02174",
+          "title": "S4-Driver: Scalable Self-Supervised Driving Multimodal Large Language Model with Spatio-Temporal Visual Representation",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 2 contains the UniAD baseline row that qualifies this paper; dropping it removes one answer row.",
+          "answer_element_supported": "answer table row 9 (S4-Driver)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_009",
+              "source_type": "table",
+              "evidence_text_or_value": "UniAD",
+              "locator": "page=7, table_id=Table 2, row=UniAD, column=Methods"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "cvpr2025_00297",
+        "cvpr2025_00656",
+        "cvpr2025_00622",
+        "cvpr2025_02360",
+        "cvpr2025_01112",
+        "cvpr2025_00593",
+        "cvpr2025_01796",
+        "cvpr2025_02317",
+        "cvpr2025_02174"
+      ],
+      "conservative_gold_paper_ids": [
+        "cvpr2025_00297",
+        "cvpr2025_00656",
+        "cvpr2025_00622",
+        "cvpr2025_02360",
+        "cvpr2025_01112",
+        "cvpr2025_00593",
+        "cvpr2025_01796",
+        "cvpr2025_02317",
+        "cvpr2025_02174"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "cvpr2025_00297",
+        "cvpr2025_00656",
+        "cvpr2025_00622",
+        "cvpr2025_02360",
+        "cvpr2025_01112",
+        "cvpr2025_00593",
+        "cvpr2025_01796",
+        "cvpr2025_02317",
+        "cvpr2025_02174"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "Enumeration question: whether these nine CVPR 2025 papers are the complete set of UniAD-baseline papers cannot be verified from the gold data alone. All nine listed papers are answer-bearing."
+      ],
+      "multi_paper_answer": "enumeration of qualifying papers; one answer row per paper"
+    },
+    {
+      "query_id": "q_024",
+      "question": "By how much does a 2025 NeurIPS method that improves a math LLM's reasoning at test time using reinforcement learning whose reward is the majority-vote consensus over the model's own outputs on unlabeled test data increase Qwen2.5-Math-7B's Avg@64 on AIME 2024?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_04875",
+          "title": "TTRL: Test-Time Reinforcement Learning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "Avg@64 on AIME 2024 before and after TTRL for Qwen2.5-Math-7B (11.7 -> 32.3, difference 20.6)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "11.7",
+              "locator": "page=7, figure_id=Figure 7, region=AIME 2024 group, 'Qwen2.5-Math-7B Avg@64' bar"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "figure",
+              "evidence_text_or_value": "32.3",
+              "locator": "page=7, figure_id=Figure 7, region=AIME 2024 group, 'w/ TTRL Avg@64' bar"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_04875"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_04875"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_04875"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_025",
+      "question": "Across all venues, among 2025 inference-time / test-time scaling methods for text-to-image generation evaluated on the GenEval benchmark, what base model does each method build on?",
+      "answer_types": [
+        "freeform",
+        "table"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 4,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iccv2025_01943",
+          "title": "Reflect-DiT: Inference-Time Scaling for Text-to-Image Diffusion Transformers via In-Context Reflection",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "States the base model this method builds on; it is the only source of the Reflect-DiT row.",
+          "answer_element_supported": "answer table row Reflect-DiT / SANA-1.0-1.6B",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Compared to the naive best-of-N approach, Reflect-DiT improves performance by +0.19 on the\nGenEval benchmark using SANA-1.0-1.6B as the base model.",
+              "locator": "page=2, section=1 Introduction, paragraph_id=5, sentence_start=2, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "neurips2025_04876",
+          "title": "TTS-VAR: A Test-Time Scaling Framework for Visual Auto-Regressive Generation",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "States the base model this method builds on; it is the only source of the TTS-VAR row.",
+          "answer_element_supported": "answer table row TTS-VAR / Infinity-2B",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Experiments on the powerful VAR model Infinity2B show a notable 8.7% GenEval score improvement (0.69→0.75)",
+              "locator": "page=6, section=Abstract, paragraph_id=1, sentence_start=9, sentence_end=9"
+            }
+          ]
+        },
+        {
+          "paper_id": "neurips2025_02748",
+          "title": "Memory-Efficient Visual Autoregressive Modeling with Scale-Aware KV Cache Compression",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "States the two base models this method is evaluated on; it is the only source of the ScaleKV row.",
+          "answer_element_supported": "answer table row ScaleKV / Infinity-2B/8B",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "We evaluated ScaleKV on two VAR-based text-to-image models of different capacities: Infinity-2B and Infinity-8B [16], to validate our method’s generalizability across model scales.",
+              "locator": "page=6, section=4.1 Experimental Setup, paragraph_id=1, sentence_start=1, sentence_end=1"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_02399",
+          "title": "SANA 1.5: Efficient Scaling of Training-Time and Inference-Time Compute in Linear Diffusion Transformer",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "States the base model used for its inference scaling on GenEval; it is the only source of the SANA-1.5 row.",
+          "answer_element_supported": "answer table row SANA-1.5 / SANA-1.5 4.8B v2",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "We incorporate inference scaling with the SANA-1.5 4.8B v2 model and compare it against other large image generation models on the GenEval benchmark (Table 2).",
+              "locator": "page=6, section=3.2. Main Results, paragraph_id=3, sentence_start=1, sentence_end=1"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iccv2025_01943",
+        "neurips2025_04876",
+        "neurips2025_02748",
+        "icml2025_02399"
+      ],
+      "conservative_gold_paper_ids": [
+        "iccv2025_01943",
+        "neurips2025_04876",
+        "neurips2025_02748",
+        "icml2025_02399"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iccv2025_01943",
+        "neurips2025_04876",
+        "neurips2025_02748",
+        "icml2025_02399"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "Enumeration question: whether these four methods are the complete set of 2025 inference/test-time scaling methods evaluated on GenEval cannot be verified from the gold data alone. All four are answer-bearing."
+      ],
+      "multi_paper_answer": "one method + base-model row per paper"
+    },
+    {
+      "query_id": "q_026",
+      "question": "In Figure 4 of the Program Synthesis via Test-Time Transduction paper, what happens to the accuracy on the unseen test set as the number of visible test inputs increases?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_03561",
+          "title": "Program Synthesis via Test-Time Transduction",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "trend of unseen-test accuracy as visible test inputs increase (it improves)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "",
+              "locator": "page=8, figure_id=Figure 4, region=right panel"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_03561"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_03561"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_03561"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_027",
+      "question": "Who is the first author of the third reference cited in a CVPR 2025 paper on compositional human motion generation that uses an energy-based diffusion model in latent space?",
+      "answer_types": [
+        "freeform",
+        "table"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "cvpr2025_00798",
+          "title": "EnergyMoGen: Compositional Human Motion Generation with Energy-Based Diffusion Model in Latent Space",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "first author of the third reference of EnergyMoGen (Nikos Athanasiou)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "citation_context",
+              "evidence_text_or_value": "Nikos Athanasiou",
+              "locator": "citation_id=3, page=9, section=References, cited_paper=SINC: Spatial composition of 3D human motions for simultaneous action generation."
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "cvpr2025_00798"
+      ],
+      "conservative_gold_paper_ids": [
+        "cvpr2025_00798"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "cvpr2025_00798"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_028",
+      "question": "What are the 2-step FID scores on unconditional CIFAR-10 for TCM, sCT, ECM-XL (100k iterations), and IMM?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 4,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the 2-step CIFAR-10 FID of TCM; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row TCM / 2.05",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "2.05",
+              "locator": "page=7, table_id=Table 1, row=TCM (ours), column=FID (2-step)"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the 2-step CIFAR-10 FID of sCT; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row sCT / 2.06",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "2.06",
+              "locator": "page=8, table_id=Table 1, row=sCT, column=FID (CIFAR-10, 2-step)"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00615",
+          "title": "Consistency Models Made Easy",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the 2-step CIFAR-10 FID of ECM-XL at 100k iterations; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row ECM-XL / 1.96",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "1.96",
+              "locator": "page=6, table_id=Table 1, row=ECM-XL (100k iters), column=FID (CIFAR-10, 2 NFE)"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the 2-step CIFAR-10 FID of IMM; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row IMM / 1.98",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "1.98",
+              "locator": "page=7, table_id=Table 1, row=IMM, column=FID (2-step)"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031",
+        "iclr2025_00615",
+        "icml2025_01371"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031",
+        "iclr2025_00615",
+        "icml2025_01371"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031",
+        "iclr2025_00615",
+        "icml2025_01371"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": "one FID row per paper"
+    },
+    {
+      "query_id": "q_029",
+      "question": "What are the 1-step FID scores on unconditional CIFAR-10 for TCM, ECM-XL (with 102.4M training budget), iCT-deep, and SiD as reported in their respective papers?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 4,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the 1-step CIFAR-10 FID of TCM; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row TCM / 2.46",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "2.46",
+              "locator": "page=7, table_id=Table 1, row=TCM (ours), column=FID (1-step)"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00615",
+          "title": "Consistency Models Made Easy",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the 1-step FID of ECM-XL under the 102.4M budget; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row ECM-XL (102.4M) / 2.49",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "2.49",
+              "locator": "page=8, table_id=Table 1, row=ECM-XL (102.4M budget), column=FID (1 NFE)"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "required",
+          "confidence": "medium",
+          "reason": "Its Table 1 is the located source of the iCT-deep 1-step FID. Confidence reduced by the 'respective papers' wording: the value is read from this paper's baseline table rather than from the original iCT paper, which is absent from gold.",
+          "answer_element_supported": "answer table row iCT-deep / 2.51",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "2.51",
+              "locator": "page=7, table_id=Table 1, row=iCT-deep, column=FID (1-step)"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "required",
+          "confidence": "medium",
+          "reason": "Its Table 1 is the located source of the SiD 1-step FID. Same 'respective papers' caveat: the value is read from this paper's baseline table, not from the original SiD paper.",
+          "answer_element_supported": "answer table row SiD / 1.92",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "1.92",
+              "locator": "page=8, table_id=Table 1, row=SiD, column=FID (CIFAR-10, 1-step)"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_00615",
+        "icml2025_01371",
+        "iclr2025_03031"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_00615",
+        "icml2025_01371",
+        "iclr2025_03031"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_00615",
+        "icml2025_01371",
+        "iclr2025_03031"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "The question says 'as reported in their respective papers', but the iCT-deep and SiD values are located in the IMM and sCM baseline tables, not in the original iCT / SiD papers (absent from gold). Both papers are kept as required on the strength of their locators; the wording should be reconciled."
+      ],
+      "multi_paper_answer": "one FID row per paper"
+    },
+    {
+      "query_id": "q_030",
+      "question": "What are the overall classification accuracy (%) on ModelNet40 for MoST, PMA, PointLoRA, and RISurConv as reported in their respective papers?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 4,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "cvpr2025_01664",
+          "title": "MoST: Efficient Monarch Sparse Tuning for 3D Representation Learning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 2 holds the ModelNet40 overall accuracy of MoST; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row MoST / 96.2",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "96.2",
+              "locator": "page=7, table_id=Table 2, row=MoST, column=ModelNet40 OA"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_01931",
+          "title": "PMA: Towards Parameter-Efficient Point Cloud Understanding via Point Mamba Adapter",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the ModelNet40 overall accuracy of PMA; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row PMA / 93.8",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "93.8",
+              "locator": "page=6, table_id=Table 1, row=PMA, column=ModelNet40 OA"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_01939",
+          "title": "PointLoRA: Low-Rank Adaptation with Token Selection for Point Cloud Learning",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the ModelNet40 overall accuracy of PointLoRA; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row PointLoRA / 93.9",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "93.9",
+              "locator": "page=6, table_id=Table 1, row=PointLoRA, column=ModelNet40 OA"
+            }
+          ]
+        },
+        {
+          "paper_id": "eccv2024_01801",
+          "title": "RISurConv: Rotation Invariant Surface Attention-Augmented Convolutions for 3D Point Cloud Classification and Segmentation",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the ModelNet40 overall accuracy of RISurConv; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row RISurConv / 96.0",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "96.0",
+              "locator": "page=5, table_id=Table 1, row=RISurConv, column=Overall Accuracy"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "cvpr2025_01664",
+        "cvpr2025_01931",
+        "cvpr2025_01939",
+        "eccv2024_01801"
+      ],
+      "conservative_gold_paper_ids": [
+        "cvpr2025_01664",
+        "cvpr2025_01931",
+        "cvpr2025_01939",
+        "eccv2024_01801"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "cvpr2025_01664",
+        "cvpr2025_01931",
+        "cvpr2025_01939",
+        "eccv2024_01801"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": "one accuracy row per paper"
+    },
+    {
+      "query_id": "q_031",
+      "question": "In the TCM paper, does the denoising FID (dFID) at t=0.2 during truncated training (Stage 2) increase above 3.0 according to Figure 2?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "The question is explicitly about this paper's Figure 2; its figure and the accompanying analysis sentence give the dFID value at t=0.2.",
+          "answer_element_supported": "dFID at t=0.2 rises to 3.5 during truncated training (option B)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "dFID at t=0.2 increases up to 3.5 in the truncated training",
+              "locator": "page=6, figure_id=Figure 2, region=left panel, t=0.2 curve"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "dFID at t = 0.2 increases up to 3.5 in the 1-step truncated training, whereas it remains below 1 in the standard consistency training",
+              "locator": "page=6, section=Analysis, paragraph_id=2, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00615",
+          "title": "Consistency Models Made Easy",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence only states that ECM training is untruncated; it reports no dFID measurement and cannot support or refute the requested value.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "ECM training uses standard consistency training without truncation",
+              "locator": "page=3, section=Method, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence describes tangent normalization in continuous-time training; it reports no dFID measurement relevant to the requested value.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "sCM uses continuous-time consistency training with tangent normalization",
+              "locator": "page=4, section=Method, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_00615",
+        "iclr2025_03031"
+      ],
+      "draft_gold_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_032",
+      "question": "In the TCM paper Figure 4(a), which log-Student-t distribution parameters (sigma, nu) achieve the best FID for boundary loss sampling on CIFAR-10?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "log-Student-t parameters achieving the best boundary-loss FID (sigma=0.2, nu=0.01)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "Three parameter sets compared: (2,10000), (0.2,0.01), (0.2,2); sigma=0.2, nu=0.01 achieves best FID",
+              "locator": "page=8, figure_id=Figure 4, region=panel (a)"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Heavy-tailed distribution with small nu concentrates probability near small t values",
+              "locator": "page=7, section=Method, paragraph_id=4, sentence_start=2, sentence_end=3"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_033",
+      "question": "In the ECM paper Table 3, what 1-step FID does w_bar(t) = 1/t^2 + 1 achieve on ImageNet 64x64, compared to w_bar(t) = 1/t^2 + 1/sigma_data^2?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_00615",
+          "title": "Consistency Models Made Easy",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "1-step FID of both weighting functions on ImageNet 64x64 (190.80 and 5.51)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "190.80",
+              "locator": "page=5, table_id=Table 3, row=1/t^2+1, column=1-step FID"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "5.51",
+              "locator": "page=5, table_id=Table 3, row=1/t^2+1/sigma_data^2, column=1-step FID"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_00615"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_00615"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_00615"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_034",
+      "question": "In the IMM paper Table 3, what 2-step FID does the identity parameterization with cosine schedule achieve on ImageNet-256, and what is the best 2-step FID from the Euler-FM parameterization with FM schedule?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "2-step FID on ImageNet-256 for id/cos and eFM/FM (46.44 and 2.53)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "46.44",
+              "locator": "page=8, table_id=Table 3, row=id/cos, column=ImageNet-256 2-step FID"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "2.53",
+              "locator": "page=8, table_id=Table 3, row=eFM/FM, column=ImageNet-256 2-step FID"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "icml2025_01371"
+      ],
+      "conservative_gold_paper_ids": [
+        "icml2025_01371"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "icml2025_01371"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_035",
+      "question": "What optimizer and learning rate does sCT use for training on CIFAR-10 as described in its paper?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the sCT/sCM paper the question targets; its appendix states the RAdam optimizer and the 0.0001 learning rate.",
+          "answer_element_supported": "optimizer and learning rate (RAdam, 1e-4)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "use RAdam optimizer with learning rate of 0.0001, beta1 = 0.9, beta2 = 0.99, epsilon = 10^-8, and without learning rate schedulers",
+              "locator": "page=22, section=Appendix G.2, paragraph_id=2, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00615",
+          "title": "Consistency Models Made Easy",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports its own CIFAR-10 optimizer choice (RAdam) — the same quantity class the question asks for, useful as contrast but not the target system.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "We use RAdam optimizer for experiments on CIFAR-10 and Adam optimizer for experiments on ImageNet 64x64. We set the beta to (0.9, 0.999) for CIFAR-10",
+              "locator": "page=14, section=Training Details, paragraph_id=1, sentence_start=1, sentence_end=3"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence only says it follows ECT hyperparameters (curriculum and schedule) and names neither an optimizer nor a learning rate.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "we mostly follow the hyperparameters in ECT, including the discretization curriculum and continuous-time training schedule",
+              "locator": "page=6, section=Experiments, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence describes the DDIM interpolant schedule, a different setting class from optimizer and learning rate.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "IMM uses DDIM interpolant schedule for training",
+              "locator": "page=5, section=Method, paragraph_id=3, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03031"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03031"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_00615",
+        "iclr2025_03463",
+        "icml2025_01371"
+      ],
+      "draft_gold_paper_ids": [
+        "iclr2025_03031"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_036",
+      "question": "What batch size does TCM use for the first training stage on CIFAR-10, and what batch size is used for the second stage?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the TCM paper the question targets; its experiments section gives both stage-1 (512) and stage-2 (1024) CIFAR-10 batch sizes.",
+          "answer_element_supported": "stage-1 and stage-2 batch sizes (512 and 1024)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "On CIFAR-10, we use a batch size of 512 and 1024 for the first and the second stage, respectively",
+              "locator": "page=6, section=Experiments, paragraph_id=1, sentence_start=4, sentence_end=5"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00615",
+          "title": "Consistency Models Made Easy",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports its own batch size (128) — the same quantity class, usable as contrast but not the requested two-stage figures.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "We use a budget of 12.8M training images (batch size 128 and 100k iterations) for ECMs",
+              "locator": "page=6, section=Table 1 caption, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports its own batch size (128, matching ECT) — the same quantity class, usable as contrast but not the requested two-stage figures.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "use the same batch size (128) as ECT",
+              "locator": "page=21, section=Appendix G.2, paragraph_id=1, sentence_start=2, sentence_end=3"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence is a training-compute formula that mentions batch size as a symbol but reports no batch-size value.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "model GFLOPs x batch size x training steps x 4 for training compute",
+              "locator": "page=22, section=Appendix, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_00615",
+        "iclr2025_03031",
+        "icml2025_01371"
+      ],
+      "draft_gold_paper_ids": [
+        "iclr2025_03463"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_037",
+      "question": "In the D-FINE paper, what Bin Number N and softmax Temperature T are used for the Fine-grained Distribution Refinement (FDR) module as optimal settings?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_00706",
+          "title": "D-FINE: Redefine Regression Task of DETRs as Fine-grained Distribution Refinement",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "optimal FDR settings Bin Number N and Temperature T (N=32, T=5)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "We set Bin Number N=32 and Temperature T=5 as the optimal configuration for FDR.",
+              "locator": "page=7, section=Ablation Studies"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_00706"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_00706"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_00706"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_038",
+      "question": "In the Dobi-SVD paper, how many total trainable parameters does Dobi-SVD use for compressing Llama-7B, and how many trainable parameters does LLM-Pruner require?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_00911",
+          "title": "Dobi-SVD: Differentiable SVD for LLM Compression and Some New Perspectives",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "trainable parameter counts for Dobi-SVD and LLM-Pruner (224 and 1.2B)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Dobi-SVD uses only 224 trainable parameters",
+              "locator": "page=6, section=Method, paragraph_id=5, sentence_start=2, sentence_end=3"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "LLM-Pruner requires training 1.2B additional parameters",
+              "locator": "page=6, section=Comparison, paragraph_id=3, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_00911"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_00911"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_00911"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_039",
+      "question": "In the IMM paper, what kernel function form does IMM use for the moment matching loss, and what is the expression for the kernel width w_tilde(s,t)?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the IMM paper the question targets; its equation gives the Laplace kernel form and w_tilde(s,t)=1/|c_out(s,t)|.",
+          "answer_element_supported": "kernel form and kernel width expression (option B)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "equation_algorithm",
+              "evidence_text_or_value": "k_{s,t}(x,y) = exp(-w_tilde(s,t) * max(||x-y||_2, epsilon) / D) with w_tilde(s,t) = 1/|c_out(s,t)|",
+              "locator": "page=5, section=Method, equation_id=Equation 0"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "We use time-dependent Laplace kernels. We find Laplace kernels provide better gradient signals than RBF kernels.",
+              "locator": "page=5, section=Method, paragraph_id=5, sentence_start=1, sentence_end=3"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Describes its own consistency training loss with boundary condition — the same design class (loss formulation) usable as contrast, but it defines no kernel.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "TCM uses consistency training loss with boundary condition",
+              "locator": "page=4, section=Method, paragraph_id=2, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Describes its own continuous-time consistency loss with tangent normalization — the same design class usable as contrast, but it defines no kernel.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "sCM uses continuous-time consistency loss with tangent normalization",
+              "locator": "page=5, section=Method, paragraph_id=3, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "icml2025_01371"
+      ],
+      "conservative_gold_paper_ids": [
+        "icml2025_01371"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_03463",
+        "iclr2025_03031"
+      ],
+      "draft_gold_paper_ids": [
+        "icml2025_01371"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_040",
+      "question": "In the IMM paper, what value of k is used in the eta-space constant-decay mapping function r(s,t) for CIFAR-10 versus ImageNet-256 experiments?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "k of the eta-space constant-decay mapping for CIFAR-10 and ImageNet-256 (15 and 12)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "CIFAR-10: k=15",
+              "locator": "page=25, section=Appendix I.1, paragraph_id=1, sentence_start=5, sentence_end=6"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "ImageNet-256: k=12",
+              "locator": "page=26, section=Appendix I.1, paragraph_id=3, sentence_start=2, sentence_end=3"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "icml2025_01371"
+      ],
+      "conservative_gold_paper_ids": [
+        "icml2025_01371"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "icml2025_01371"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_041",
+      "question": "In the sCM paper, what proposal distribution parameters (P_mean, P_std) are used for timestep sampling during CIFAR-10 training?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the sCM paper the question targets; its appendix gives Pmean=-1.0 and Pstd=1.4 for CIFAR-10.",
+          "answer_element_supported": "proposal distribution parameters (P_mean=-1.0, P_std=1.4)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "proposal distribution of Pmean = -1.0, Pstd = 1.4",
+              "locator": "page=22, section=Appendix G.2, paragraph_id=2, sentence_start=3, sentence_end=4"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "the proposal distribution should have small Pmean, i.e. close to the clean data, to ensure the training stability",
+              "locator": "page=22, section=Appendix G.2, paragraph_id=1, sentence_start=2, sentence_end=3"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_03463",
+          "title": "Truncated Consistency Models",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Describes its own timestep weighting distribution (log-Student-t) — the same design class as a timestep proposal, usable as contrast but giving no P_mean/P_std.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "TCM uses log-Student-t distribution for time weighting with psi_bar_t",
+              "locator": "page=6, section=Experiments, paragraph_id=1, sentence_start=3, sentence_end=4"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Describes its own timestep mapping function r(s,t) — the same design class, usable as contrast but giving no P_mean/P_std.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "IMM uses mapping function r(s,t) via constant decrement in eta_t",
+              "locator": "page=5, section=Method, paragraph_id=7, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03031"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03031"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_03463",
+        "icml2025_01371"
+      ],
+      "draft_gold_paper_ids": [
+        "iclr2025_03031"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_042",
+      "question": "What VAE latent channel mean normalization values do sCM and IMM use for their ImageNet experiments, and do they match?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 2,
+      "gold_paper_count_after": 2,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iclr2025_03031",
+          "title": "Simplifying, Stabilizing and Scaling Continuous-time Consistency Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Supplies the sCM side of the requested value pair; the 'do they match' judgement cannot be made without it.",
+          "answer_element_supported": "sCM VAE channel mean [1.56, -0.695, 0.483, 0.729] and the match/no-match verdict",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "VAE latent mu_c = [1.56, -0.695, 0.483, 0.729]",
+              "locator": "page=27, section=Appendix Table 5, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_01371",
+          "title": "Inductive Moment Matching",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Supplies the IMM side of the requested value pair; the 'do they match' judgement cannot be made without it.",
+          "answer_element_supported": "IMM VAE channel mean [0.86488, -0.27787, 0.21617, 0.37384] and the match/no-match verdict",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "Channel mean = [0.86488, -0.27787, 0.21617, 0.37384]",
+              "locator": "page=26, section=Appendix I.1, paragraph_id=2, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_03031",
+        "icml2025_01371"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_03031",
+        "icml2025_01371"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iclr2025_03031",
+        "icml2025_01371"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": "two-sided comparison; both values needed for the match verdict"
+    },
+    {
+      "query_id": "q_043",
+      "question": "What COCO val2017 mAP does DEIM-D-FINE-X achieve in 50 epochs, and what mAP does Mr. DETR with Swin-L achieve in 12 epochs?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 2,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "cvpr2025_00533",
+          "title": "DEIM: DETR with Improved Matching for Fast Convergence",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the DEIM-D-FINE-X 50-epoch COCO val2017 AP, the first requested value.",
+          "answer_element_supported": "first value of the pair (56.5)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "DEIM-D-FINE-X achieves 56.5 AP on COCO val2017 in 50 epochs",
+              "locator": "page=7, table_id=Table 1, row=DEIM-D-FINE-X, column=AP (50 epochs)"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_01683",
+          "title": "Mr. DETR: Instructive Multi-Route Training for Detection Transformers",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 3 holds the Mr. DETR Swin-L 12-epoch COCO val2017 mAP, the second requested value.",
+          "answer_element_supported": "second value of the pair (58.4)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "Mr. DETR with Swin-L backbone achieves 58.4 mAP on COCO val2017 in 12 epochs",
+              "locator": "page=7, table_id=Table 3, row=Mr. DETR (Swin-L), column=mAP"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00706",
+          "title": "D-FINE: Redefine Regression Task of DETRs as Fine-grained Distribution Refinement",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports a COCO val2017 AP for its own D-FINE-X (55.8), the same metric family, so it is usable as contrast; the question asks about DEIM and Mr. DETR only.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "D-FINE-X achieves 55.8 AP on COCO val2017",
+              "locator": "page=7, table_id=Table 1, row=D-FINE-X, column=AP"
+            }
+          ]
+        },
+        {
+          "paper_id": "neurips2025_05262",
+          "title": "YOLOv12: Attention-Centric Real-Time Object Detectors",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports a COCO val2017 AP for YOLOv12-N (40.5), the same metric family, so it is usable as contrast; the question asks about DEIM and Mr. DETR only.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "YOLOv12-N achieves 40.5 AP on COCO val2017",
+              "locator": "page=7, table_id=Table 1, row=YOLOv12-N, column=AP"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "cvpr2025_00533",
+        "cvpr2025_01683"
+      ],
+      "conservative_gold_paper_ids": [
+        "cvpr2025_00533",
+        "cvpr2025_01683"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_00706",
+        "neurips2025_05262"
+      ],
+      "draft_gold_paper_ids": [
+        "cvpr2025_00533",
+        "cvpr2025_01683"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": "two requested values from two different papers"
+    },
+    {
+      "query_id": "q_044",
+      "question": "What is the AlpacaEval 2 LC win rate of D²PO on Gemma2-9B-Instruct (on-policy), and what LC win rate does AlphaDPO achieve on Gemma2-9B-Instruct?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 2,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "iclr2025_00978",
+          "title": "Earlier Tokens Contribute More: Learning Direct Preference Optimization From Temporal Decay Perspective",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 2 holds the D2PO on-policy AlpacaEval 2 LC win rate on Gemma2-9B-Instruct, the first requested value.",
+          "answer_element_supported": "first value of the pair (59.7%)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "D²PO on Gemma2-9B-Instruct achieves 59.7% LC win rate on AlpacaEval 2 (on-policy)",
+              "locator": "page=6, table_id=Table 2, row=D²PO (on-policy), column=LC Win Rate (%)"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_00188",
+          "title": "AlphaDPO: Adaptive Reward Margin for Direct Preference Optimization",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the AlphaDPO AlpacaEval 2 LC win rate on Gemma2-9B-Instruct, the second requested value.",
+          "answer_element_supported": "second value of the pair (73.4%)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "AlphaDPO on Gemma2-9B-Instruct achieves 73.4% LC win rate on AlpacaEval 2",
+              "locator": "page=6, table_id=Table 1, row=AlphaDPO, column=LC Win Rate (%)"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_00192",
+          "title": "AMPO: Active Multi Preference Optimization for Self-play Preference Selection",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports an AlpacaEval 2 LC win rate for AMPO Coreset (52.4%), the same metric, so it is usable as contrast; the question names only D2PO and AlphaDPO.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "AMPO Coreset achieves 52.4% LC win rate",
+              "locator": "page=6, table_id=Table 1, row=AMPO (Coreset), column=LC Win Rate (%)"
+            }
+          ]
+        },
+        {
+          "paper_id": "acl2025_02365",
+          "title": "Robust Preference Optimization via Dynamic Target Margins",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence reports an MT-Bench score for gamma-SimPO, a different metric from the requested AlpacaEval 2 LC win rate, and nothing in it bears on either requested value.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "γ-SimPO achieves MT-Bench score of 9.18",
+              "locator": "page=7, table_id=Table 3, row=γ-SimPO, column=MT-Bench"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_00978",
+        "icml2025_00188"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_00978",
+        "icml2025_00188"
+      ],
+      "excluded_paper_ids": [
+        "icml2025_00192",
+        "acl2025_02365"
+      ],
+      "draft_gold_paper_ids": [
+        "iclr2025_00978",
+        "icml2025_00188"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": "two requested values from two different papers"
+    },
+    {
+      "query_id": "q_045",
+      "question": "What POPE adversarial accuracy does VTI achieve on LLaVA-1.5, and what adversarial accuracy does MoD achieve on LLaVA-1.5?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 2,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "iclr2025_02715",
+          "title": "Reducing Hallucinations in Large Vision-Language Models via Latent Space Steering",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 4 holds the VTI POPE adversarial accuracy on LLaVA-1.5, the first requested value.",
+          "answer_element_supported": "first value of the pair (82.57)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "VTI achieves 82.57 accuracy on POPE Adversarial with LLaVA-1.5",
+              "locator": "page=7, table_id=Table 4, row=VTI (LLaVA-1.5), column=POPE Adversarial Acc"
+            }
+          ]
+        },
+        {
+          "paper_id": "acl2025_01863",
+          "title": "Mixture of Decoding: An Attention-Inspired Adaptive Decoding Strategy to Mitigate Hallucinations in Large Vision-Language Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the MoD POPE adversarial accuracy on LLaVA-1.5, the second requested value.",
+          "answer_element_supported": "second value of the pair (79.7)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "MoD achieves 79.7 accuracy on POPE Adversarial with LLaVA-1.5",
+              "locator": "page=5, table_id=Table 1, row=MoD (LLaVA-1.5), column=POPE Adversarial Acc"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_02963",
+          "title": "Self-Introspective Decoding: Alleviating Hallucinations for Large Vision-Language Models",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence reports token-retention ratio and inference time, not POPE adversarial accuracy; it contributes to neither requested value.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "SID retains top 10% least important tokens, inference time 668s",
+              "locator": "page=6, table_id=Table 2, row=SID (LLaVA-1.5), column=Inference Time"
+            }
+          ]
+        },
+        {
+          "paper_id": "eccv2024_01567",
+          "title": "Paying More Attention to Images: A Training-Free Method for Alleviating Hallucination in LVLMs",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence reports CHAIR_S reduction, a different hallucination metric from the requested POPE adversarial accuracy.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "PAI reduces CHAIR_S from 46.6 to 24.8 on LLaVA-1.5",
+              "locator": "page=6, table_id=Table 1, row=PAI (LLaVA-1.5), column=CHAIR_S"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_02715",
+        "acl2025_01863"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_02715",
+        "acl2025_01863"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_02963",
+        "eccv2024_01567"
+      ],
+      "draft_gold_paper_ids": [
+        "iclr2025_02715",
+        "acl2025_01863"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": "two requested values from two different papers"
+    },
+    {
+      "query_id": "q_046",
+      "question": "In the DEIM paper, what is the optimal gamma value for the MAL (Matchability-Aware Loss) on RT-DETRv2-R50 at 24 epochs?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "cvpr2025_00533",
+          "title": "DEIM: DETR with Improved Matching for Fast Convergence",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the DEIM paper the question targets; its Table 5 and Figure 4 ablation identify gamma=1.5 as optimal on RT-DETRv2-R50 at 24 epochs.",
+          "answer_element_supported": "optimal MAL gamma (1.5)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "MAL with γ=1.5 achieves AP=52.4, γ=2.0 gives AP=51.9 on RT-DETRv2-R50 at 24 epochs",
+              "locator": "page=8, table_id=Table 5, row=γ=1.5, column=AP"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "figure",
+              "evidence_text_or_value": "Ablation curve shows γ=1.5 as optimal for matchability-aware loss",
+              "locator": "page=8, figure_id=Figure 4, region=gamma ablation plot"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00706",
+          "title": "D-FINE: Redefine Regression Task of DETRs as Fine-grained Distribution Refinement",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports its own ablation-optimal module hyperparameter (FDR bin number N=32) — the same design class, usable as contrast but not the requested MAL gamma.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "D-FINE uses FDR with bin number N=32 for fine-grained distribution refinement",
+              "locator": "page=6, section=Experiments, paragraph_id=3, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "neurips2025_05262",
+          "title": "YOLOv12: Attention-Centric Real-Time Object Detectors",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports its own architecture hyperparameter (R-ELAN scaling factor 0.01) — the same design class, usable as contrast but not the requested MAL gamma.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "YOLOv12 uses R-ELAN with scaling factor 0.01 for stable attention training",
+              "locator": "page=5, section=Method, paragraph_id=4, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "cvpr2025_00533"
+      ],
+      "conservative_gold_paper_ids": [
+        "cvpr2025_00533"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_00706",
+        "neurips2025_05262"
+      ],
+      "draft_gold_paper_ids": [
+        "cvpr2025_00533"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_047",
+      "question": "In the D²PO paper, what optimal temporal decay factor gamma achieves the best performance across three base models, and what happens when gamma exceeds 1.0?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "iclr2025_00978",
+          "title": "Earlier Tokens Contribute More: Learning Direct Preference Optimization From Temporal Decay Perspective",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the D2PO paper the question targets; its Figure 3 and ablation text give gamma=0.98 and the degradation above 1.0.",
+          "answer_element_supported": "optimal gamma (0.98) and the gamma>1.0 degradation",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "Ablation shows γ=0.98 is optimal across Llama-3-8B, Gemma-2-9B, Qwen-2.5-7B; γ>1.0 degrades below vanilla DPO",
+              "locator": "page=7, figure_id=Figure 3, region=gamma sensitivity plot"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "When γ>1.0, later tokens are weighted more heavily which harms generation quality, performing worse than standard DPO",
+              "locator": "page=7, section=Ablation Studies, paragraph_id=2, sentence_start=1, sentence_end=3"
+            }
+          ]
+        },
+        {
+          "paper_id": "icml2025_00188",
+          "title": "AlphaDPO: Adaptive Reward Margin for Direct Preference Optimization",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence describes adaptive reward-margin adjustment; it reports no decay factor and no behaviour at gamma>1.0.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "AlphaDPO adaptively adjusts reward margin based on preference pair quality",
+              "locator": "page=4, section=Method, paragraph_id=2, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "acl2025_02365",
+          "title": "Robust Preference Optimization via Dynamic Target Margins",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence describes model-specific tau values for a controllable margin, a different hyperparameter from the requested temporal decay gamma, with no gamma>1.0 behaviour.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "γ-PO uses controllable margin with model-specific tau values for fine-grained preference optimization",
+              "locator": "page=5, section=Method, paragraph_id=3, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iclr2025_00978"
+      ],
+      "conservative_gold_paper_ids": [
+        "iclr2025_00978"
+      ],
+      "excluded_paper_ids": [
+        "icml2025_00188",
+        "acl2025_02365"
+      ],
+      "draft_gold_paper_ids": [
+        "iclr2025_00978"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_048",
+      "question": "In the MoD paper, what is the Pearson correlation coefficient between JS divergence and hallucination severity as shown in Figure 1?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "acl2025_01863",
+          "title": "Mixture of Decoding: An Attention-Inspired Adaptive Decoding Strategy to Mitigate Hallucinations in Large Vision-Language Models",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the MoD paper the question targets; its Figure 1 and analysis text give the Pearson r=0.85.",
+          "answer_element_supported": "Pearson correlation coefficient (r=0.85)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "Pearson correlation r=0.85 (p<0.01) between JS divergence and hallucination severity",
+              "locator": "page=3, figure_id=Figure 1, region=scatter plot with regression line"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "text_span",
+              "evidence_text_or_value": "The JS divergence between attended image content and output distribution shows strong positive correlation (r=0.85, p<0.01) with hallucination rate",
+              "locator": "page=3, section=Analysis, paragraph_id=2, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_02963",
+          "title": "Self-Introspective Decoding: Alleviating Hallucinations for Large Vision-Language Models",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence attributes hallucination to spurious vision-token correlations but reports no correlation coefficient for JS divergence.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "SID identifies spurious correlations in vision tokens as a key contributor to hallucination",
+              "locator": "page=3, section=Introduction, paragraph_id=3, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_02715",
+          "title": "Reducing Hallucinations in Large Vision-Language Models via Latent Space Steering",
+          "classification": "irrelevant",
+          "confidence": "high",
+          "reason": "Its evidence describes measuring visual-textual misalignment but reports no correlation coefficient for JS divergence.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "VTI measures misalignment between visual and textual representations to quantify hallucination risk",
+              "locator": "page=4, section=Method, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "acl2025_01863"
+      ],
+      "conservative_gold_paper_ids": [
+        "acl2025_01863"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_02963",
+        "iclr2025_02715"
+      ],
+      "draft_gold_paper_ids": [
+        "acl2025_01863"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_049",
+      "question": "What optimizer and total training epochs does YOLOv12 use, and what MLP ratio replaces the traditional value of 4.0?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "neurips2025_05262",
+          "title": "YOLOv12: Attention-Centric Real-Time Object Detectors",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the YOLOv12 paper the question targets; its implementation details and Table 6 give SGD, 600 epochs and MLP ratio 1.5.",
+          "answer_element_supported": "optimizer, epoch count and MLP ratio (SGD, 600, 1.5)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "text_span",
+              "evidence_text_or_value": "YOLOv12 is trained using SGD optimizer for 600 epochs with MLP ratio reduced to 1.5 instead of the traditional 4.0",
+              "locator": "page=6, section=Implementation Details, paragraph_id=1, sentence_start=1, sentence_end=3"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "Training configuration: SGD, 600 epochs, MLP ratio=1.5",
+              "locator": "page=6, table_id=Table 6, row=YOLOv12, column=Training Config"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_00533",
+          "title": "DEIM: DETR with Improved Matching for Fast Convergence",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports its own optimizer and learning rate (AdamW, 1e-4) — the same setting class, usable as contrast but not YOLOv12's configuration.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "DEIM uses AdamW optimizer with learning rate 1e-4",
+              "locator": "page=6, section=Implementation Details, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00706",
+          "title": "D-FINE: Redefine Regression Task of DETRs as Fine-grained Distribution Refinement",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Reports its own optimizer and schedule (AdamW, cosine) — the same setting class, usable as contrast but not YOLOv12's configuration.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "D-FINE uses AdamW optimizer with cosine learning rate schedule",
+              "locator": "page=6, section=Implementation Details, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_05262"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_05262"
+      ],
+      "excluded_paper_ids": [
+        "cvpr2025_00533",
+        "iclr2025_00706"
+      ],
+      "draft_gold_paper_ids": [
+        "neurips2025_05262"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_050",
+      "question": "In the AlphaDPO paper, what happens to AlpacaEval 2 LC win rate when the stop-gradient operation is removed from the loss function?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "icml2025_00188",
+          "title": "AlphaDPO: Adaptive Reward Margin for Direct Preference Optimization",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the AlphaDPO paper the question targets; its ablation equation and Table 2 give the LC collapse from 58.7 to 2.7.",
+          "answer_element_supported": "LC win rate collapse when stop-gradient is removed (58.7 -> 2.7)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "equation_algorithm",
+              "evidence_text_or_value": "Removing stop-gradient (sg) from the adaptive margin term causes LC win rate to collapse from 58.7 to 2.7",
+              "locator": "page=7, section=Ablation Studies, equation_id=Equation 0"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "Without sg: LC=2.7; With sg: LC=58.7 (Table 2 ablation)",
+              "locator": "page=7, table_id=Table 2, row=w/o stop-gradient, column=LC Win Rate (%)"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_00978",
+          "title": "Earlier Tokens Contribute More: Learning Direct Preference Optimization From Temporal Decay Perspective",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "Comments on its own formulation being free of stop-gradient issues — the same design aspect, usable as contrast but reporting no LC win rate for the ablation.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "D²PO applies temporal decay weighting without stop-gradient issues due to its discriminator-based formulation",
+              "locator": "page=5, section=Method, paragraph_id=4, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "acl2025_02365",
+          "title": "Robust Preference Optimization via Dynamic Target Margins",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "States its margin is computed with detached gradients — the same design aspect (stop-gradient), usable as contrast but reporting no LC win rate for the ablation.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "γ-PO margin is computed with detached gradients to ensure stable training",
+              "locator": "page=4, section=Method, paragraph_id=3, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "icml2025_00188"
+      ],
+      "conservative_gold_paper_ids": [
+        "icml2025_00188"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_00978",
+        "acl2025_02365"
+      ],
+      "draft_gold_paper_ids": [
+        "icml2025_00188"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_051",
+      "question": "In the VAP paper, what perturbation budget epsilon, learning rate alpha, and sampling variance beta are used for the visual noise optimization?",
+      "answer_types": [
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 3,
+      "gold_paper_count_after": 1,
+      "changed": true,
+      "papers": [
+        {
+          "paper_id": "neurips2025_03461",
+          "title": "Poison as Cure: Visual Noise for Mitigating Object Hallucinations in LVMs",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "This is the VAP paper the question targets; its method equation gives epsilon=2, alpha=1/255 and beta=8/255.",
+          "answer_element_supported": "perturbation budget, learning rate and sampling variance (2, 1/255, 8/255)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "equation_algorithm",
+              "evidence_text_or_value": "VAP uses perturbation budget ε=2, learning rate α=1/255, sampling variance β=8/255 for visual noise optimization",
+              "locator": "page=5, section=Method, equation_id=Equation 0"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "Intern-VL2 with VAP achieves +2.81 accuracy improvement on adversarial POPE",
+              "locator": "page=7, table_id=Table 3, row=Intern-VL2 + VAP, column=Adversarial Acc Δ"
+            }
+          ]
+        },
+        {
+          "paper_id": "iclr2025_02963",
+          "title": "Self-Introspective Decoding: Alleviating Hallucinations for Large Vision-Language Models",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "States it uses no adversarial perturbation — the same design aspect as the requested perturbation settings, usable as contrast but supplying no hyperparameter values.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "text_span",
+              "evidence_text_or_value": "SID does not use adversarial perturbation, instead relying on token importance scoring for selective decoupling",
+              "locator": "page=4, section=Method, paragraph_id=2, sentence_start=1, sentence_end=2"
+            }
+          ]
+        },
+        {
+          "paper_id": "eccv2024_01567",
+          "title": "Paying More Attention to Images: A Training-Free Method for Alleviating Hallucination in LVLMs",
+          "classification": "supportive",
+          "confidence": "high",
+          "reason": "States it uses attention reweighting instead of input perturbation — the same design aspect, usable as contrast but supplying no hyperparameter values.",
+          "answer_element_supported": "none",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "text_span",
+              "evidence_text_or_value": "PAI uses attention reweighting rather than input perturbation to mitigate hallucination",
+              "locator": "page=4, section=Method, paragraph_id=1, sentence_start=1, sentence_end=2"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_03461"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_03461"
+      ],
+      "excluded_paper_ids": [
+        "iclr2025_02963",
+        "eccv2024_01567"
+      ],
+      "draft_gold_paper_ids": [
+        "neurips2025_03461"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_052",
+      "question": "What percentage of instances belong to the Kitchen super-category in SUN RGB-D, ARKitScenes, Hypersim, Objectron, KITTI, and nuScenes?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "neurips2025_02398",
+          "title": "LabelAny3D: Label Any Object 3D in the Wild",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "Kitchen super-category percentage for all six listed benchmarks (Table 5 row values)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "6",
+              "locator": "page=24, table_id=Table 5, row=SUN RGB-D, column=Kitchen"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "10.3",
+              "locator": "page=24, table_id=Table 5, row=ARKitScenes, column=Kitchen"
+            },
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "0.9",
+              "locator": "page=24, table_id=Table 5, row=Hypersim, column=Kitchen"
+            },
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "32.4",
+              "locator": "page=24, table_id=Table 5, row=Objectron, column=Kitchen"
+            },
+            {
+              "evidence_id": "ev_005",
+              "source_type": "table",
+              "evidence_text_or_value": "-",
+              "locator": "page=24, table_id=Table 5, row=KITTI, column=Kitchen"
+            },
+            {
+              "evidence_id": "ev_006",
+              "source_type": "table",
+              "evidence_text_or_value": "-",
+              "locator": "page=24, table_id=Table 5, row=nuScenes, column=Kitchen"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "neurips2025_02398"
+      ],
+      "conservative_gold_paper_ids": [
+        "neurips2025_02398"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "neurips2025_02398"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_053",
+      "question": "What is the $AP^{kit}_{3D}$ performance of DetAny3D on Omni3D with ground-truth prompts?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iccv2025_00545",
+          "title": "Detect Anything 3D in the Wild",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "AP^{kit}_{3D} of DetAny3D on Omni3D with ground-truth prompts (38.68)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "38.68",
+              "locator": "page=7, table_id=Table 2, row=$AP^{kit}_{3D}$, column=DetAny3D (ours)w/ Ground Truth"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iccv2025_00545"
+      ],
+      "conservative_gold_paper_ids": [
+        "iccv2025_00545"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iccv2025_00545"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_054",
+      "question": "What is the $AP^{kit}_{3D}$ performance of DetAny3D on Omni3D with ground-truth prompts and Cube R-CNN 2D detections?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "iccv2025_00545",
+          "title": "Detect Anything 3D in the Wild",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "DetAny3D Omni3D scores with ground-truth prompts and with Cube R-CNN detections (36.7 and 33.9)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "33.9",
+              "locator": "page=7, table_id=Table 2, row=$AP^{nus}_{3D}$, column=DetAny3D (ours)w/ Cube RCNN"
+            },
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "36.7",
+              "locator": "page=7, table_id=Table 2, row=$AP^{nus}_{3D}$, column=DetAny3D (ours)w/ Ground Truth"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "iccv2025_00545"
+      ],
+      "conservative_gold_paper_ids": [
+        "iccv2025_00545"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "iccv2025_00545"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "The question asks for AP^{kit}_{3D}, but both evidence rows and every answer row report AP^{nus}_{3D}. Gold membership is unaffected (single gold paper), but question and answer disagree on the metric."
+      ],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_055",
+      "question": "In MAGBIG, does Administrative & Office have more prompts than Business & Management?",
+      "answer_types": [
+        "freeform",
+        "multiple_choice"
+      ],
+      "gold_paper_count_before": 1,
+      "gold_paper_count_after": 1,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "acl2025_01931",
+          "title": "Multilingual Text-to-Image Generation Magnifies Gender Stereotypes",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Sole gold paper for this query; it is the only source in the gold set for the requested answer element, so removing it makes the answer impossible.",
+          "answer_element_supported": "whether Administrative & Office has more prompts than Business & Management (Yes)",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "figure",
+              "evidence_text_or_value": "",
+              "locator": "page=3, figure_id=Figure 2, region=Middle"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "acl2025_01931"
+      ],
+      "conservative_gold_paper_ids": [
+        "acl2025_01931"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "acl2025_01931"
+      ],
+      "requires_human_review": true,
+      "human_review_reasons": [
+        "Multiple-choice options C and D are both 'Cannot determine' (duplicated distractor). Gold membership is unaffected; the option set needs fixing."
+      ],
+      "multi_paper_answer": null
+    },
+    {
+      "query_id": "q_056",
+      "question": "What are the test accuracy on Tiny ImageNet of NCFM, AP-BPTT, ATT, and DEDA given IPC=10?",
+      "answer_types": [
+        "table"
+      ],
+      "gold_paper_count_before": 4,
+      "gold_paper_count_after": 4,
+      "changed": false,
+      "papers": [
+        {
+          "paper_id": "eccv2024_00426",
+          "title": "Dataset Distillation by Automatic Training Trajectories",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 2 holds the Tiny ImageNet IPC=10 accuracy of ATT; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row ATT / 25.8 +/- 0.4",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_001",
+              "source_type": "table",
+              "evidence_text_or_value": "25.8 ± 0.4",
+              "locator": "page=12, table_id=Table 2, row=Tiny ImageNet (10), column=ATT"
+            }
+          ]
+        },
+        {
+          "paper_id": "neurips2025_00496",
+          "title": "Beyond Random: Automatic Inner-loop Optimization in Dataset Distillation",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Its Table 1 'Ours' row is the AT-BPTT Tiny ImageNet IPC=10 accuracy; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row AT-BPTT / 32.7 +/- 0.5",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_002",
+              "source_type": "table",
+              "evidence_text_or_value": "32.7±0.5",
+              "locator": "page=8, table_id=Table 1, row=Tiny ImageNet (10), column=Ours"
+            }
+          ]
+        },
+        {
+          "paper_id": "iccv2025_00615",
+          "title": "Diversity-Enhanced Distribution Alignment for Dataset Distillation",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the Tiny ImageNet IPC=10 accuracy of DEDA; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row DEDA / 44.5 +/- 0.6",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_003",
+              "source_type": "table",
+              "evidence_text_or_value": "44.5 ± 0.6",
+              "locator": "page=6, table_id=Table 1, row=Tiny-ImageNet (IPC=10), column=DEDA"
+            }
+          ]
+        },
+        {
+          "paper_id": "cvpr2025_00503",
+          "title": "Dataset Distillation with Neural Characteristic Function: A Minmax Perspective",
+          "classification": "required",
+          "confidence": "high",
+          "reason": "Table 1 holds the Tiny ImageNet IPC=10 accuracy of NCFM; no other gold paper supplies this row.",
+          "answer_element_supported": "answer table row NCFM / 27.4 +/- 0.6",
+          "evidence_used": [
+            {
+              "evidence_id": "ev_004",
+              "source_type": "table",
+              "evidence_text_or_value": "27.4±0.6",
+              "locator": "page=6, table_id=Table 1, row=Tiny ImageNet (10), column=NCFM (Ours)"
+            }
+          ]
+        }
+      ],
+      "required_paper_ids": [
+        "eccv2024_00426",
+        "neurips2025_00496",
+        "iccv2025_00615",
+        "cvpr2025_00503"
+      ],
+      "conservative_gold_paper_ids": [
+        "eccv2024_00426",
+        "neurips2025_00496",
+        "iccv2025_00615",
+        "cvpr2025_00503"
+      ],
+      "excluded_paper_ids": [],
+      "draft_gold_paper_ids": [
+        "eccv2024_00426",
+        "neurips2025_00496",
+        "iccv2025_00615",
+        "cvpr2025_00503"
+      ],
+      "requires_human_review": false,
+      "human_review_reasons": [],
+      "multi_paper_answer": "one accuracy row per paper"
+    }
+  ]
+}

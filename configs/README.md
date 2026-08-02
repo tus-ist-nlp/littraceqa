@@ -147,15 +147,40 @@ on the current validation set, remain opt-in through these experimental
 configs, and require held-out verification. If either supporting index is
 absent or invalid, retrieval falls back to the original sparse candidate tail.
 
-`bm25_paper_rank_seed_expansion_qwen3_reranker.yaml` keeps that final set of 20
-papers fixed and reranks all of them only after dense-tail and consensus
-exploration finish. Qwen scores the first 2,000 characters of each paper-level
+`bm25_paper_rank_seed_expansion_qwen3_reranker.yaml` fixes a 50-paper candidate
+set and reranks all 50 papers only after dense-tail and consensus exploration
+finish. A caller can request a smaller final result, such as the 20 papers used
+by the reading agent. Qwen scores the first 2,000 characters of each paper-level
 document, while the returned retrieval results retain their original evidence
 chunks. The model revision and bfloat16 dtype are explicit, and the configured
-rank fusion gives a slight preference to the original retrieval rank. This
-weight was selected on the current validation set and should be rechecked on
-held-out data. Run it with the local model cache in offline mode so evaluation
-cannot trigger a download.
+rank fusion gives a slight preference to the original retrieval rank. Qwen can
+reorder the original top 20, but those 20 papers remain protected from
+lower-ranked candidates because the reading agent consumes 20 papers. The
+weight and protection boundary were selected conservatively on the current
+validation set and should be rechecked on held-out data. Run the model from a
+local cache in offline mode so evaluation cannot trigger a download.
+
+The same config also enables a guarded exploration slot for open-set
+enumeration questions such as `Which ... papers` or `what ... does each
+method`. Only those questions expand from the next four unique seed papers.
+A new paper must occur in at least two independent searches and reach rank two
+in one of them. The selected paper is inserted at rank 20 after Qwen reranking,
+so the baseline's final top 19 papers remain unchanged. The gate reads only the
+question text and does not use gold papers, `task_family`, or
+`primary_evidence_type`. Disable this lane by setting `open_set_seed_k: 1`.
+
+Evaluate the fixed retrieval baseline directly against the working
+answer-bearing gold without calling an answer-generation agent:
+
+```bash
+uv run python scripts/eval_retrieval.py \
+  --paths <user-owned-paths.yaml> \
+  --process configs/process_style/mineru.yaml \
+  --search configs/search_style/bm25_paper_rank_seed_expansion_qwen3_reranker.yaml \
+  --queries data/validation_answer_bearing_gold_draft.jsonl \
+  --ks 1,5,8,10,20,50 \
+  --output <user-owned-output.json>
+```
 
 組み合わせを変えたいときは、該当する引数だけ差し替える。他の3つはそのままでよい。
 

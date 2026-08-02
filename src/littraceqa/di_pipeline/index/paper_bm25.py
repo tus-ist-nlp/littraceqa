@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
-import os
 import re
-import tempfile
 import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
@@ -16,6 +13,26 @@ from typing import Any
 
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
 from littraceqa.di_pipeline.index.bm25_index import BM25Index
+from littraceqa.di_pipeline.index.method_sidecar import (
+    method_sidecar_path,
+    save_method_sidecar,
+    validate_method_sidecar,
+)
+from littraceqa.di_pipeline.index.method_matching import (
+    METHOD_TOKEN_RE,
+    alias_alnum_length,
+    case_preserving_lookup_text,
+    distinctive_context_words,
+    first_method_token,
+    generic_alias_key,
+    is_mixed_case_alias,
+    mention_has_method_context,
+    method_context_pattern,
+    normalized_lookup_text,
+    owner_literal_alias_pattern,
+    require_positive_limit,
+    standalone_alias_pattern,
+)
 from littraceqa.di_pipeline.registry import register
 from littraceqa.di_pipeline.retrieve.method_aliases import (
     GENERIC_METHOD_ALIASES,
@@ -33,58 +50,6 @@ _REFERENCE_HEADING_RE = re.compile(
 )
 _PAPERS_FILENAME = "papers.jsonl"
 _LEGACY_RECORDS_FILENAME = "chunks.jsonl"
-_METHOD_GRAPH_FILENAME = "method_alias_graph.json"
-_METHOD_GRAPH_SCHEMA_VERSION = 3
-_METHOD_CONTEXT_CHARS = 200
-_METHOD_FIRST_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
-_METHOD_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9]*(?![A-Za-z0-9_])"
-)
-_METHOD_CONTEXT_WORD_RE = re.compile(r"[a-z][a-z0-9]*")
-_GENERIC_METHOD_CONTEXT_WORDS = frozenset(
-    {
-        "algorithm",
-        "algorithms",
-        "approach",
-        "approaches",
-        "based",
-        "effective",
-        "efficient",
-        "framework",
-        "frameworks",
-        "general",
-        "learning",
-        "loss",
-        "losses",
-        "method",
-        "methods",
-        "model",
-        "models",
-        "module",
-        "modules",
-        "new",
-        "novel",
-        "objective",
-        "objectives",
-        "paper",
-        "proposed",
-        "simple",
-        "strategy",
-        "strategies",
-        "system",
-        "systems",
-        "task",
-        "tasks",
-        "technique",
-        "techniques",
-        "training",
-        "unified",
-        "using",
-        "with",
-        "without",
-        "work",
-    }
-)
 
 
 def _body_text(chunk: Chunk) -> str:
@@ -186,132 +151,6 @@ def aggregate_papers(
         )
 
 
-def _require_positive_limit(value: int, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} must be an integer")
-    if value <= 0:
-        raise ValueError(f"{name} must be positive")
-
-
-def _generic_alias_key(alias: str) -> str:
-    return re.sub(r"[^A-Z0-9]+", "", alias.upper())
-
-
-def _first_method_token(alias: str) -> str | None:
-    match = _METHOD_FIRST_TOKEN_RE.search(alias)
-    return match.group(0) if match is not None else None
-
-
-def _standalone_alias_pattern(alias: str) -> re.Pattern[str]:
-    body = r"\s+".join(
-        re.escape(part) for part in alias.split()
-    )
-    return re.compile(rf"(?<![A-Za-z0-9_]){body}(?![A-Za-z0-9_])")
-
-
-def _owner_literal_alias_pattern(alias: str) -> re.Pattern[str]:
-    body = r"\s+".join(re.escape(part) for part in alias.split())
-    return re.compile(
-        rf"(?<![A-Za-z0-9_+./-]){body}(?![A-Za-z0-9_])"
-    )
-
-
-def _normalized_lookup_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return " ".join(re.findall(r"[a-z0-9]+", normalized))
-
-
-def _case_preserving_lookup_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value)
-    return " ".join(re.findall(r"[A-Za-z0-9]+", normalized))
-
-
-def _is_mixed_case_alias(alias: str) -> bool:
-    letters = [character for character in alias if character.isalpha()]
-    return (
-        any(character.islower() for character in letters)
-        and any(character.isupper() for character in letters)
-    )
-
-
-def _alias_alnum_length(alias: str) -> int:
-    return sum(character.isalnum() for character in alias)
-
-
-def _distinctive_context_words(value: object) -> frozenset[str]:
-    if not isinstance(value, str):
-        return frozenset()
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return frozenset(
-        word
-        for word in _METHOD_CONTEXT_WORD_RE.findall(normalized)
-        if len(word) >= 4 and word not in _GENERIC_METHOD_CONTEXT_WORDS
-    )
-
-
-def _mention_has_method_context(
-    text: str,
-    start: int,
-    end: int,
-    context_pattern: re.Pattern[str] | None,
-    required_word_count: int,
-) -> bool:
-    if context_pattern is None:
-        return True
-    observed: set[str] = set()
-    for match in context_pattern.finditer(
-        text,
-        max(0, start - _METHOD_CONTEXT_CHARS),
-        min(len(text), end + _METHOD_CONTEXT_CHARS),
-    ):
-        observed.add(match.group(0).casefold())
-        if len(observed) >= required_word_count:
-            return True
-    return False
-
-
-def _method_context_pattern(
-    context_words: frozenset[str],
-) -> re.Pattern[str] | None:
-    if not context_words:
-        return None
-    alternatives = "|".join(
-        re.escape(word)
-        for word in sorted(context_words, key=lambda word: (-len(word), word))
-    )
-    return re.compile(
-        rf"(?<![A-Za-z0-9_])(?:{alternatives})(?![A-Za-z0-9_])",
-        re.IGNORECASE,
-    )
-
-
-def _method_corpus_signature(documents: list[Chunk]) -> str:
-    """Return a deterministic signature for validating the graph sidecar."""
-    digest = hashlib.sha256()
-    for document in documents:
-        metadata = document.metadata
-        record = {
-            "paper_id": document.paper_id,
-            "chunk_id": document.chunk_id,
-            "method_names": metadata.get("method_names") or [],
-            "method_alias_evidence": (
-                metadata.get("method_alias_evidence") or []
-            ),
-        }
-        digest.update(
-            json.dumps(
-                record,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
-        digest.update(b"\n")
-        digest.update(document.text.encode("utf-8"))
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
 @register("indexer", "paper_bm25")
 class PaperBM25Index:
     """Search one aggregated BM25 document per paper as a coarse retrieval stage."""
@@ -331,7 +170,7 @@ class PaperBM25Index:
             raise ValueError("result_text_chars must be positive")
         if not isinstance(extract_method_names, bool):
             raise TypeError("extract_method_names must be a boolean")
-        _require_positive_limit(method_max_degree, "method_max_degree")
+        require_positive_limit(method_max_degree, "method_max_degree")
         self.exclude_references = exclude_references
         self.result_text_chars = result_text_chars
         self.extract_method_names = extract_method_names
@@ -357,7 +196,13 @@ class PaperBM25Index:
         )
         if self.extract_method_names:
             self._build_method_index_from_documents()
-            self._save_method_sidecar()
+            save_method_sidecar(
+                self._delegate.index_dir,
+                self._delegate._chunks,
+                self._method_owner_by_alias,
+                self._method_neighbors_by_paper_id,
+                self.method_max_degree,
+            )
 
     def load(self) -> None:
         self._reset_caches()
@@ -394,7 +239,7 @@ class PaperBM25Index:
         limit: int = 10,
     ) -> tuple[dict[str, Any], ...]:
         """Return deterministic explicit-alias neighbors of one paper."""
-        _require_positive_limit(limit, "limit")
+        require_positive_limit(limit, "limit")
         self._ensure_method_index()
         if self._method_neighbors_by_paper_id is None:
             return ()
@@ -406,7 +251,7 @@ class PaperBM25Index:
         limit: int = 10,
     ) -> tuple[dict[str, Any], ...]:
         """Find unique paper owners for literal or normalized method hints."""
-        _require_positive_limit(limit, "limit")
+        require_positive_limit(limit, "limit")
         self._ensure_method_index()
         if not self._method_owner_by_alias:
             return ()
@@ -418,11 +263,11 @@ class PaperBM25Index:
             if isinstance(value, str) and value.strip()
         ]
         normalized_values = [
-            _normalized_lookup_text(value)
+            normalized_lookup_text(value)
             for value in literal_values
         ]
         case_preserving_values = [
-            _case_preserving_lookup_text(value)
+            case_preserving_lookup_text(value)
             for value in literal_values
         ]
         matches_by_paper: dict[str, dict[str, int]] = defaultdict(dict)
@@ -430,10 +275,10 @@ class PaperBM25Index:
             (
                 alias,
                 paper_id,
-                _owner_literal_alias_pattern(alias),
-                _normalized_lookup_text(alias),
-                _case_preserving_lookup_text(alias),
-                _is_mixed_case_alias(alias),
+                owner_literal_alias_pattern(alias),
+                normalized_lookup_text(alias),
+                case_preserving_lookup_text(alias),
+                is_mixed_case_alias(alias),
             )
             for alias, paper_id in self._method_owner_by_alias.items()
         ]
@@ -443,7 +288,7 @@ class PaperBM25Index:
             normalized_values,
             case_preserving_values,
         ):
-            value_is_mixed_case = _is_mixed_case_alias(literal_value)
+            value_is_mixed_case = is_mixed_case_alias(literal_value)
             value_matches: list[
                 tuple[str, str, str, int, bool]
             ] = []
@@ -527,7 +372,7 @@ class PaperBM25Index:
         An alias is accepted only when it identifies one candidate paper.
         """
 
-        _require_positive_limit(limit, "limit")
+        require_positive_limit(limit, "limit")
         values = (methods,) if isinstance(methods, str) else tuple(methods)
         method_values = tuple(
             value
@@ -640,7 +485,7 @@ class PaperBM25Index:
             for value in document.metadata.get("method_names") or ():
                 if not isinstance(value, str) or not value:
                     continue
-                if _generic_alias_key(value) in GENERIC_METHOD_ALIASES:
+                if generic_alias_key(value) in GENERIC_METHOD_ALIASES:
                     continue
                 owners_by_alias[value].add(document.paper_id)
 
@@ -665,23 +510,23 @@ class PaperBM25Index:
                         and evidence.get("alias") == alias
                     ):
                         context_words.update(
-                            _distinctive_context_words(
+                            distinctive_context_words(
                                 evidence.get("long_name")
                             )
                         )
             context_words.difference_update(
-                _distinctive_context_words(alias)
+                distinctive_context_words(alias)
             )
             if context_words:
                 context_words_by_alias[alias] = frozenset(context_words)
         context_patterns_by_alias = {
-            alias: _method_context_pattern(context_words)
+            alias: method_context_pattern(context_words)
             for alias, context_words in context_words_by_alias.items()
         }
         context_word_requirements = {
             alias: (
                 min(2, len(context_words))
-                if _alias_alnum_length(alias) <= 4
+                if alias_alnum_length(alias) <= 4
                 else 1
             )
             for alias, context_words in context_words_by_alias.items()
@@ -690,11 +535,11 @@ class PaperBM25Index:
         aliases_by_first_token: dict[str, list[str]] = defaultdict(list)
         alias_patterns: dict[str, re.Pattern[str]] = {}
         for alias in sorted(unique_owners):
-            first_token = _first_method_token(alias)
+            first_token = first_method_token(alias)
             if first_token is None:
                 continue
             aliases_by_first_token[first_token].append(alias)
-            alias_patterns[alias] = _standalone_alias_pattern(alias)
+            alias_patterns[alias] = standalone_alias_pattern(alias)
         owned_aliases_by_paper: dict[str, set[str]] = defaultdict(set)
         for alias, paper_id in unique_owners.items():
             owned_aliases_by_paper[paper_id].add(alias)
@@ -705,7 +550,7 @@ class PaperBM25Index:
             mentioned_aliases = set(
                 owned_aliases_by_paper.get(document.paper_id, ())
             )
-            for token_match in _METHOD_TOKEN_RE.finditer(body):
+            for token_match in METHOD_TOKEN_RE.finditer(body):
                 candidates = aliases_by_first_token.get(token_match.group(0))
                 if not candidates:
                     continue
@@ -718,7 +563,7 @@ class PaperBM25Index:
                     )
                     if (
                         alias_match is not None
-                        and _mention_has_method_context(
+                        and mention_has_method_context(
                             body,
                             alias_match.start(),
                             alias_match.end(),
@@ -776,176 +621,18 @@ class PaperBM25Index:
             for paper_id, items in sorted(neighbors.items())
         }
 
-    @property
-    def _method_sidecar_path(self) -> Path:
-        return self._delegate.index_dir / _METHOD_GRAPH_FILENAME
-
-    def _save_method_sidecar(self) -> None:
-        if (
-            self._method_owner_by_alias is None
-            or self._method_neighbors_by_paper_id is None
-        ):
-            return
-        payload = {
-            "schema_version": _METHOD_GRAPH_SCHEMA_VERSION,
-            "method_max_degree": self.method_max_degree,
-            "corpus_signature": _method_corpus_signature(
-                self._delegate._chunks
-            ),
-            "owners": self._method_owner_by_alias,
-            "neighbors": {
-                paper_id: list(items)
-                for paper_id, items
-                in self._method_neighbors_by_paper_id.items()
-            },
-        }
-        self._delegate.index_dir.mkdir(parents=True, exist_ok=True)
-        temporary_path: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                dir=self._delegate.index_dir,
-                prefix=f".{_METHOD_GRAPH_FILENAME}.",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary_path = handle.name
-                json.dump(
-                    payload,
-                    handle,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_path, self._method_sidecar_path)
-            temporary_path = None
-        finally:
-            if temporary_path is not None:
-                try:
-                    os.unlink(temporary_path)
-                except FileNotFoundError:
-                    pass
-
     def _load_method_sidecar(self) -> bool:
-        path = self._method_sidecar_path
+        path = method_sidecar_path(self._delegate.index_dir)
         try:
             with path.open(encoding="utf-8") as handle:
                 payload = json.load(handle)
-            owners, neighbors = self._validate_method_sidecar(payload)
+            owners, neighbors = validate_method_sidecar(
+                payload,
+                self._delegate._chunks,
+                self.method_max_degree,
+            )
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return False
         self._method_owner_by_alias = owners
         self._method_neighbors_by_paper_id = neighbors
         return True
-
-    def _validate_method_sidecar(
-        self,
-        payload: object,
-    ) -> tuple[
-        dict[str, str],
-        dict[str, tuple[dict[str, Any], ...]],
-    ]:
-        if not isinstance(payload, dict):
-            raise ValueError("method graph sidecar must be an object")
-        if payload.get("schema_version") != _METHOD_GRAPH_SCHEMA_VERSION:
-            raise ValueError("method graph sidecar schema is incompatible")
-        if payload.get("method_max_degree") != self.method_max_degree:
-            raise ValueError("method graph sidecar degree limit differs")
-        if payload.get("corpus_signature") != _method_corpus_signature(
-            self._delegate._chunks
-        ):
-            raise ValueError("method graph sidecar corpus differs")
-
-        paper_ids = {chunk.paper_id for chunk in self._delegate._chunks}
-        raw_owners = payload.get("owners")
-        raw_neighbors = payload.get("neighbors")
-        if not isinstance(raw_owners, dict) or not isinstance(
-            raw_neighbors,
-            dict,
-        ):
-            raise ValueError("method graph sidecar fields are invalid")
-
-        owners: dict[str, str] = {}
-        for alias, paper_id in raw_owners.items():
-            if (
-                not isinstance(alias, str)
-                or not alias
-                or not isinstance(paper_id, str)
-                or paper_id not in paper_ids
-            ):
-                raise ValueError("method graph owner is invalid")
-            owners[alias] = paper_id
-
-        neighbors: dict[str, tuple[dict[str, Any], ...]] = {}
-        directed_relations: set[
-            tuple[str, str, tuple[str, ...], int]
-        ] = set()
-        for paper_id, items in raw_neighbors.items():
-            if paper_id not in paper_ids or not isinstance(items, list):
-                raise ValueError("method graph neighbor list is invalid")
-            checked_items: list[dict[str, Any]] = []
-            seen_neighbors: set[str] = set()
-            for item in items:
-                if not isinstance(item, dict):
-                    raise ValueError("method graph neighbor is invalid")
-                neighbor_id = item.get("paper_id")
-                aliases = item.get("aliases")
-                strength = item.get("strength")
-                if (
-                    not isinstance(neighbor_id, str)
-                    or neighbor_id not in paper_ids
-                    or neighbor_id == paper_id
-                    or not isinstance(aliases, list)
-                    or not aliases
-                    or aliases != sorted(set(aliases))
-                    or any(
-                        not isinstance(alias, str)
-                        or alias not in owners
-                        or owners[alias] not in {paper_id, neighbor_id}
-                        for alias in aliases
-                    )
-                    or isinstance(strength, bool)
-                    or not isinstance(strength, int)
-                    or strength != len(aliases)
-                    or neighbor_id in seen_neighbors
-                ):
-                    raise ValueError("method graph neighbor is invalid")
-                seen_neighbors.add(neighbor_id)
-                checked_items.append(
-                    {
-                        "paper_id": neighbor_id,
-                        "aliases": list(aliases),
-                        "strength": strength,
-                    }
-                )
-                directed_relations.add(
-                    (
-                        paper_id,
-                        neighbor_id,
-                        tuple(aliases),
-                        strength,
-                    )
-                )
-            if checked_items != sorted(
-                checked_items,
-                key=lambda item: (
-                    -item["strength"],
-                    item["paper_id"],
-                    item["aliases"],
-                ),
-            ):
-                raise ValueError("method graph neighbors are not deterministic")
-            neighbors[paper_id] = tuple(checked_items)
-        for paper_id, neighbor_id, aliases, strength in directed_relations:
-            if (
-                neighbor_id,
-                paper_id,
-                aliases,
-                strength,
-            ) not in directed_relations:
-                raise ValueError("method graph relation is not undirected")
-        return dict(sorted(owners.items())), neighbors

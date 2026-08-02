@@ -249,8 +249,9 @@ assert agent is None
 assert type(retriever).__name__ == "SeedExpansionRetriever"
 assert retriever.retriever.reranker is None
 assert type(retriever.reranker).__name__ == "Qwen3Reranker"
-assert retriever.rerank_pool_k == 20
-assert retriever.max_results == 20
+assert retriever.rerank_pool_k == 50
+assert retriever.max_results == 50
+assert retriever.final_rerank_protected_top_k == 20
 assert retriever.stable_prefix_k == 10
 assert retriever.rerank_final_candidates is True
 assert retriever.final_rerank_document_chars == 2000
@@ -260,10 +261,14 @@ assert retriever.paper_dense_reciprocal_forward_k == 20
 assert retriever.paper_dense_reciprocal_reverse_k == 10
 assert retriever.paper_dense_reciprocal_min_support == 6
 assert retriever.paper_dense_reciprocal_max_candidates == 32
+assert retriever.open_set_seed_k == 5
+assert retriever.open_set_min_support == 2
+assert retriever.open_set_max_seed_rank == 2
+assert retriever.open_set_slot_k == 20
 assert retriever.reranker.device == "cuda:0"
 assert retriever.reranker.dtype == "bfloat16"
 assert retriever.reranker.batch_size == 4
-assert retriever.reranker.base_rank_weight == 0.56
+assert retriever.reranker.base_rank_weight == 0.59
 assert retriever.reranker._model is None
 assert "torch" not in sys.modules
 assert "transformers" not in sys.modules

@@ -10,22 +10,28 @@ from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-from eval_retrieval import (
-    aggregate_rankings,
+from littraceqa.di_pipeline.evaluation.checkpoint import (
     build_checkpoint,
-    build_output_payload,
     load_resume_state,
+)
+from littraceqa.di_pipeline.evaluation.diagnostics import (
     paper_ranking_details,
-    parse_ks,
     pre_rerank_papers,
     query_diagnostic,
-    select_records,
+)
+from littraceqa.di_pipeline.evaluation.gold import parse_ks, select_records
+from littraceqa.di_pipeline.evaluation.metrics import aggregate_rankings
+from littraceqa.di_pipeline.evaluation.output import (
+    build_output_payload,
     validate_output_path,
+    write_output_atomic,
+)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from eval_retrieval import (  # noqa: E402  (CLI-only guards stay in the script)
     validate_retrieval_cutoffs,
     validate_shared_index_load,
-    write_output_atomic,
 )
 
 
@@ -214,6 +220,20 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
             "final_rerank_status": "applied",
             "final_rerank_candidate_set_preserved": True,
             "final_rerank_error_type": None,
+            "attribute_matches": ["venue"],
+            "final_rerank_pre_protection_rank": 4,
+            "final_rerank_pre_protection_score": 0.625,
+            "final_rerank_protected_top_k": 20,
+            "final_rerank_prefix_protected": True,
+            "open_set_expansion_attempted": True,
+            "open_set_expansion_best_rank": 2,
+            "open_set_expansion_original_rank": None,
+            "open_set_expansion_run_count": 4,
+            "open_set_expansion_selected": True,
+            "open_set_expansion_selected_paper_id": "reranked",
+            "open_set_expansion_slot_k": 20,
+            "open_set_expansion_support": 2,
+            "open_set_expansion_via_papers": ["seed-2", "seed-4"],
         },
     )
 
@@ -226,6 +246,20 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
     assert detail["final_rerank_status"] == "applied"
     assert detail["final_rerank_candidate_set_preserved"] is True
     assert detail["final_rerank_error_type"] is None
+    assert detail["attribute_matches"] == ["venue"]
+    assert detail["final_rerank_pre_protection_rank"] == 4
+    assert detail["final_rerank_pre_protection_score"] == 0.625
+    assert detail["final_rerank_protected_top_k"] == 20
+    assert detail["final_rerank_prefix_protected"] is True
+    assert detail["open_set_expansion_attempted"] is True
+    assert detail["open_set_expansion_best_rank"] == 2
+    assert detail["open_set_expansion_original_rank"] is None
+    assert detail["open_set_expansion_run_count"] == 4
+    assert detail["open_set_expansion_selected"] is True
+    assert detail["open_set_expansion_selected_paper_id"] == "reranked"
+    assert detail["open_set_expansion_slot_k"] == 20
+    assert detail["open_set_expansion_support"] == 2
+    assert detail["open_set_expansion_via_papers"] == ["seed-2", "seed-4"]
     json.dumps(detail)
 
 

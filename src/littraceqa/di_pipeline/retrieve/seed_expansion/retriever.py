@@ -1,50 +1,104 @@
 """Opt-in retrieval expansion using the highest-ranked paper as a seed.
 
-This module owns parameter validation and the order the stages run in.  The
-stages themselves live in sibling modules: :mod:`query`, :mod:`candidates`,
-:mod:`relations`, :mod:`dense`, :mod:`protection` and :mod:`final_rerank`.
+This module owns parameter validation and the order the stages run in.  Each
+stage lives in its own sibling module: :mod:`query`, :mod:`candidates`,
+:mod:`neighborhood`, :mod:`method_relations`, :mod:`method_bridge`,
+:mod:`dense_tail`, :mod:`dense_reciprocal`, :mod:`dense_consensus`,
+:mod:`protection` and :mod:`final_rerank`.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import replace
-from numbers import Real
+from dataclasses import dataclass, fields, replace
 
 from littraceqa.di_pipeline import registry
 from littraceqa.di_pipeline.contracts import RetrievalResult, SearchHints
 from littraceqa.di_pipeline.retrieve.base import Reranker, Retriever
 from littraceqa.di_pipeline.retrieve.seed_expansion.candidates import (
     CandidateGeneration,
+    OpenSetExploration,
     align_scores_with_output_order,
     append_result_tail,
     unique_papers,
 )
-from littraceqa.di_pipeline.retrieve.seed_expansion.dense import (
-    MAX_DENSE_RECIPROCAL_CANDIDATES,
-    MAX_DENSE_TAIL_NEW_PAPERS,
+from littraceqa.di_pipeline.retrieve.seed_expansion.dense_consensus import (
     DenseConsensusExploration,
+)
+from littraceqa.di_pipeline.retrieve.seed_expansion.dense_reciprocal import (
     DenseReciprocalExploration,
+)
+from littraceqa.di_pipeline.retrieve.seed_expansion.dense_tail import (
     DenseTailFusion,
 )
 from littraceqa.di_pipeline.retrieve.seed_expansion.final_rerank import (
     FinalCandidateReranker,
 )
+from littraceqa.di_pipeline.retrieve.seed_expansion.method_bridge import (
+    MethodBridgeExploration,
+)
+from littraceqa.di_pipeline.retrieve.seed_expansion.method_relations import (
+    MethodRelationExpansion,
+)
+from littraceqa.di_pipeline.retrieve.seed_expansion.neighborhood import (
+    PaperNeighborhoodExpansion,
+)
 from littraceqa.di_pipeline.retrieve.seed_expansion.protection import (
-    MAX_PROTECTED_TITLES,
     ExplicitTitleGuard,
     restore_method_protected_candidates,
 )
 from littraceqa.di_pipeline.retrieve.seed_expansion.query import (
     QueryPreparation,
+    is_open_set_enumeration,
     paper_context,
     without_method_hints,
 )
-from littraceqa.di_pipeline.retrieve.seed_expansion.relations import (
-    MethodBridgeExploration,
-    MethodRelationExpansion,
-    PaperNeighborhoodExpansion,
+from littraceqa.di_pipeline.retrieve.seed_expansion.settings import (
+    CandidateSettings,
+    DenseSettings,
+    MethodSettings,
+    NeighborhoodSettings,
+    OpenSetSettings,
+    OutputSettings,
+    SeedExpansionSettings,
+    validate_settings,
 )
+
+
+@dataclass(frozen=True)
+class _FinalizeContext:
+    """Everything one finalization pass needs besides the candidate list.
+
+    ``requested_output_k`` is what the caller asked for, ``output_k`` is what
+    the pipeline assembles (wider when a final reranker inspects a fixed pool)
+    and ``selection_k`` is the prefix the selection stages may reorder.
+    """
+
+    query: str
+    hints: SearchHints | None
+    indexers: object
+    requested_output_k: int
+    output_k: int
+    selection_k: int
+    open_set_runs: tuple[tuple[str, list[RetrievalResult]], ...]
+
+    def restore_titles(
+        self,
+        title_guard: ExplicitTitleGuard,
+        pool: list[RetrievalResult],
+        selected: list[RetrievalResult],
+        method_protected: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        """Re-admit explicit title matches without evicting method-protected papers."""
+
+        return title_guard.restore(
+            self.query,
+            pool,
+            selected,
+            self.selection_k,
+            reserved_paper_ids={
+                candidate.paper_id for candidate in method_protected
+            },
+        )
 
 
 @registry.register("retriever_wrapper", "seed_expansion")
@@ -63,11 +117,16 @@ class SeedExpansionRetriever:
         rerank_pool_k: int = 50,
         rerank_final_candidates: bool = False,
         final_rerank_document_chars: int = 2000,
+        final_rerank_protected_top_k: int = 0,
         protect_explicit_title_matches: bool = False,
         max_protected_titles: int = 4,
         local_expansion_weight: float = 0.0,
         literal_attribute_hints: bool = False,
         literal_method_hints: bool = False,
+        open_set_seed_k: int = 1,
+        open_set_min_support: int = 2,
+        open_set_max_seed_rank: int = 2,
+        open_set_slot_k: int = 20,
         paper_neighborhood_weight: float = 0.0,
         paper_neighborhood_two_hop_weight: float = 0.0,
         paper_neighborhood_max_hub_degree: int = 4,
@@ -99,411 +158,198 @@ class SeedExpansionRetriever:
         paper_dense_reciprocal_min_support: int = 6,
         paper_dense_reciprocal_max_candidates: int = 32,
     ) -> None:
-        if candidate_k <= 0:
-            raise ValueError("candidate_k must be positive")
-        if seed_text_chars <= 0:
-            raise ValueError("seed_text_chars must be positive")
-        if rrf_k < 0:
-            raise ValueError("rrf_k must be non-negative")
-        if max_results <= 0:
-            raise ValueError("max_results must be positive")
-        if stable_prefix_k is not None:
-            if isinstance(stable_prefix_k, bool) or not isinstance(
-                stable_prefix_k, int
-            ):
-                raise TypeError("stable_prefix_k must be an integer or None")
-            if stable_prefix_k <= 0:
-                raise ValueError("stable_prefix_k must be positive")
-        if rerank_pool_k <= 0:
-            raise ValueError("rerank_pool_k must be positive")
-        if not isinstance(rerank_final_candidates, bool):
-            raise TypeError("rerank_final_candidates must be a boolean")
-        if isinstance(final_rerank_document_chars, bool) or not isinstance(
-            final_rerank_document_chars,
-            int,
-        ):
-            raise TypeError("final_rerank_document_chars must be an integer")
-        if final_rerank_document_chars <= 0:
-            raise ValueError("final_rerank_document_chars must be positive")
-        if not isinstance(protect_explicit_title_matches, bool):
-            raise TypeError("protect_explicit_title_matches must be a boolean")
-        if isinstance(max_protected_titles, bool) or not isinstance(
-            max_protected_titles, int
-        ):
-            raise TypeError("max_protected_titles must be an integer")
-        if not 1 <= max_protected_titles <= MAX_PROTECTED_TITLES:
-            raise ValueError(
-                f"max_protected_titles must be between 1 and "
-                f"{MAX_PROTECTED_TITLES}"
-            )
-        if isinstance(local_expansion_weight, bool) or not isinstance(
-            local_expansion_weight, Real
-        ):
-            raise TypeError("local_expansion_weight must be a number")
-        if (
-            not math.isfinite(local_expansion_weight)
-            or local_expansion_weight < 0
-        ):
-            raise ValueError(
-                "local_expansion_weight must be a finite non-negative number"
-            )
-        if not isinstance(literal_attribute_hints, bool):
-            raise TypeError("literal_attribute_hints must be a boolean")
-        if not isinstance(literal_method_hints, bool):
-            raise TypeError("literal_method_hints must be a boolean")
-        if isinstance(paper_neighborhood_weight, bool) or not isinstance(
-            paper_neighborhood_weight, Real
-        ):
-            raise TypeError("paper_neighborhood_weight must be a number")
-        if (
-            not math.isfinite(paper_neighborhood_weight)
-            or paper_neighborhood_weight < 0
-        ):
-            raise ValueError(
-                "paper_neighborhood_weight must be a finite non-negative number"
-            )
-        if isinstance(paper_neighborhood_two_hop_weight, bool) or not isinstance(
-            paper_neighborhood_two_hop_weight, Real
-        ):
-            raise TypeError(
-                "paper_neighborhood_two_hop_weight must be a number"
-            )
-        if (
-            not math.isfinite(paper_neighborhood_two_hop_weight)
-            or paper_neighborhood_two_hop_weight < 0
-        ):
-            raise ValueError(
-                "paper_neighborhood_two_hop_weight must be a finite "
-                "non-negative number"
-            )
-        if isinstance(paper_neighborhood_max_hub_degree, bool) or not isinstance(
-            paper_neighborhood_max_hub_degree, int
-        ):
-            raise TypeError(
-                "paper_neighborhood_max_hub_degree must be an integer"
-            )
-        if paper_neighborhood_max_hub_degree <= 0:
-            raise ValueError(
-                "paper_neighborhood_max_hub_degree must be positive"
-            )
-        for name, value in (
-            ("method_owner_weight", method_owner_weight),
-            ("method_relation_weight", method_relation_weight),
-            ("method_topic_weight", method_topic_weight),
-            ("method_dense_tail_weight", method_dense_tail_weight),
-            ("paper_dense_tail_weight", paper_dense_tail_weight),
-        ):
-            if isinstance(value, bool) or not isinstance(value, Real):
-                raise TypeError(f"{name} must be a number")
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(
-                    f"{name} must be a finite non-negative number"
-                )
-        for name, value in (
-            ("method_topic_seed_chars", method_topic_seed_chars),
-            ("method_topic_seed_k", method_topic_seed_k),
-            ("method_topic_max_results", method_topic_max_results),
-            ("method_relation_seed_k", method_relation_seed_k),
-            ("method_relation_max_results", method_relation_max_results),
-            ("method_dense_tail_seed_k", method_dense_tail_seed_k),
-            ("method_dense_tail_max_results", method_dense_tail_max_results),
-            ("paper_dense_tail_seed_k", paper_dense_tail_seed_k),
-            ("paper_dense_tail_max_results", paper_dense_tail_max_results),
-            (
-                "paper_dense_consensus_max_results",
-                paper_dense_consensus_max_results,
-            ),
-            (
-                "paper_dense_consensus_min_support",
-                paper_dense_consensus_min_support,
-            ),
-            (
-                "paper_dense_reciprocal_forward_k",
-                paper_dense_reciprocal_forward_k,
-            ),
-            (
-                "paper_dense_reciprocal_reverse_k",
-                paper_dense_reciprocal_reverse_k,
-            ),
-            (
-                "paper_dense_reciprocal_min_support",
-                paper_dense_reciprocal_min_support,
-            ),
-            (
-                "paper_dense_reciprocal_max_candidates",
-                paper_dense_reciprocal_max_candidates,
-            ),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError(f"{name} must be an integer")
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-        if isinstance(paper_dense_consensus_seed_k, bool) or not isinstance(
-            paper_dense_consensus_seed_k,
-            int,
-        ):
-            raise TypeError("paper_dense_consensus_seed_k must be an integer")
-        if paper_dense_consensus_seed_k < 0:
-            raise ValueError(
-                "paper_dense_consensus_seed_k must be non-negative"
-            )
-        if isinstance(paper_dense_reciprocal_seed_k, bool) or not isinstance(
-            paper_dense_reciprocal_seed_k,
-            int,
-        ):
-            raise TypeError(
-                "paper_dense_reciprocal_seed_k must be an integer"
-            )
-        if paper_dense_reciprocal_seed_k < 0:
-            raise ValueError(
-                "paper_dense_reciprocal_seed_k must be non-negative"
-            )
-        if isinstance(method_bridge_topic_max_rank, bool) or not isinstance(
-            method_bridge_topic_max_rank,
-            int,
-        ):
-            raise TypeError(
-                "method_bridge_topic_max_rank must be an integer"
-            )
-        if method_bridge_topic_max_rank < 0:
-            raise ValueError(
-                "method_bridge_topic_max_rank must be non-negative"
-            )
-        if method_bridge_topic_max_rank > method_topic_max_results:
-            raise ValueError(
-                "method_bridge_topic_max_rank must not exceed "
-                "method_topic_max_results"
-            )
-        if (
-            paper_dense_consensus_seed_k > 0
-            and paper_dense_consensus_min_support
-            > paper_dense_consensus_seed_k
-        ):
-            raise ValueError(
-                "paper_dense_consensus_min_support must not exceed "
-                "paper_dense_consensus_seed_k when consensus is enabled"
-            )
-        if (
-            paper_dense_reciprocal_seed_k > 0
-            and paper_dense_reciprocal_min_support
-            > min(
-                paper_dense_reciprocal_seed_k,
-                paper_dense_reciprocal_reverse_k,
-                max_results,
-            )
-        ):
-            raise ValueError(
-                "paper_dense_reciprocal_min_support must not exceed "
-                "the seed count, reverse depth, or maximum result count "
-                "when reciprocal expansion is enabled"
-            )
-        if (
-            paper_dense_reciprocal_max_candidates
-            > MAX_DENSE_RECIPROCAL_CANDIDATES
-        ):
-            raise ValueError(
-                "paper_dense_reciprocal_max_candidates must not exceed "
-                f"{MAX_DENSE_RECIPROCAL_CANDIDATES}"
-            )
-        for name, value in (
-            ("method_relation_max_new_papers", method_relation_max_new_papers),
-            (
-                "method_relation_protected_top_k",
-                method_relation_protected_top_k,
-            ),
-            (
-                "method_dense_tail_max_new_papers",
-                method_dense_tail_max_new_papers,
-            ),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError(f"{name} must be an integer")
-            if value < 0:
-                raise ValueError(f"{name} must be non-negative")
-        if (
-            method_dense_tail_max_new_papers
-            > MAX_DENSE_TAIL_NEW_PAPERS
-        ):
-            raise ValueError(
-                "method_dense_tail_max_new_papers must not exceed "
-                f"{MAX_DENSE_TAIL_NEW_PAPERS}"
-            )
-        if paper_embedding_index_dir is not None:
-            if not isinstance(paper_embedding_index_dir, str):
-                raise TypeError(
-                    "paper_embedding_index_dir must be a string or None"
-                )
-            if not paper_embedding_index_dir.strip():
-                raise ValueError(
-                    "paper_embedding_index_dir must not be empty"
-                )
-        if getattr(retriever, "reranker", None) is not None:
-            raise ValueError(
-                "seed expansion cannot wrap a retriever with a reranker because "
-                "that would run the reranker twice"
-            )
-        if rerank_final_candidates and reranker is None:
-            raise ValueError(
-                "rerank_final_candidates requires an enabled reranker"
-            )
+        candidates = CandidateSettings(
+            candidate_k=candidate_k,
+            seed_text_chars=seed_text_chars,
+            rrf_k=rrf_k,
+            local_expansion_weight=local_expansion_weight,
+            literal_attribute_hints=literal_attribute_hints,
+            literal_method_hints=literal_method_hints,
+        )
+        output = OutputSettings(
+            max_results=max_results,
+            stable_prefix_k=stable_prefix_k,
+            rerank_pool_k=rerank_pool_k,
+            rerank_final_candidates=rerank_final_candidates,
+            final_rerank_document_chars=final_rerank_document_chars,
+            final_rerank_protected_top_k=final_rerank_protected_top_k,
+            protect_explicit_title_matches=protect_explicit_title_matches,
+            max_protected_titles=max_protected_titles,
+        )
+        open_set = OpenSetSettings(
+            open_set_seed_k=open_set_seed_k,
+            open_set_min_support=open_set_min_support,
+            open_set_max_seed_rank=open_set_max_seed_rank,
+            open_set_slot_k=open_set_slot_k,
+        )
+        neighborhood = NeighborhoodSettings(
+            paper_neighborhood_weight=paper_neighborhood_weight,
+            paper_neighborhood_two_hop_weight=paper_neighborhood_two_hop_weight,
+            paper_neighborhood_max_hub_degree=paper_neighborhood_max_hub_degree,
+        )
+        method = MethodSettings(
+            method_owner_weight=method_owner_weight,
+            method_relation_weight=method_relation_weight,
+            method_relation_seed_k=method_relation_seed_k,
+            method_relation_max_results=method_relation_max_results,
+            method_relation_max_new_papers=method_relation_max_new_papers,
+            method_relation_protected_top_k=method_relation_protected_top_k,
+            method_topic_weight=method_topic_weight,
+            method_topic_seed_chars=method_topic_seed_chars,
+            method_topic_seed_k=method_topic_seed_k,
+            method_topic_max_results=method_topic_max_results,
+            method_bridge_topic_max_rank=method_bridge_topic_max_rank,
+        )
+        dense = DenseSettings(
+            paper_embedding_index_dir=paper_embedding_index_dir,
+            method_dense_tail_weight=method_dense_tail_weight,
+            method_dense_tail_seed_k=method_dense_tail_seed_k,
+            method_dense_tail_max_results=method_dense_tail_max_results,
+            method_dense_tail_max_new_papers=method_dense_tail_max_new_papers,
+            paper_dense_tail_weight=paper_dense_tail_weight,
+            paper_dense_tail_seed_k=paper_dense_tail_seed_k,
+            paper_dense_tail_max_results=paper_dense_tail_max_results,
+            paper_dense_consensus_seed_k=paper_dense_consensus_seed_k,
+            paper_dense_consensus_max_results=paper_dense_consensus_max_results,
+            paper_dense_consensus_min_support=paper_dense_consensus_min_support,
+            paper_dense_reciprocal_seed_k=paper_dense_reciprocal_seed_k,
+            paper_dense_reciprocal_forward_k=paper_dense_reciprocal_forward_k,
+            paper_dense_reciprocal_reverse_k=paper_dense_reciprocal_reverse_k,
+            paper_dense_reciprocal_min_support=paper_dense_reciprocal_min_support,
+            paper_dense_reciprocal_max_candidates=paper_dense_reciprocal_max_candidates,
+        )
+        settings = SeedExpansionSettings(
+            candidates=candidates,
+            output=output,
+            open_set=open_set,
+            neighborhood=neighborhood,
+            method=method,
+            dense=dense,
+        )
+        validate_settings(settings, retriever=retriever, reranker=reranker)
 
         self.retriever = retriever
-        self.candidate_k = candidate_k
-        self.seed_text_chars = seed_text_chars
-        self.rrf_k = rrf_k
-        self.max_results = max_results
-        self.stable_prefix_k = stable_prefix_k
         self._reranker = reranker
-        self.rerank_pool_k = rerank_pool_k
-        self.rerank_final_candidates = rerank_final_candidates
-        self.final_rerank_document_chars = final_rerank_document_chars
-        self.protect_explicit_title_matches = protect_explicit_title_matches
-        self.max_protected_titles = max_protected_titles
-        self.local_expansion_weight = float(local_expansion_weight)
-        self.literal_attribute_hints = literal_attribute_hints
-        self.literal_method_hints = literal_method_hints
-        self.paper_neighborhood_weight = float(paper_neighborhood_weight)
-        self.paper_neighborhood_two_hop_weight = float(
-            paper_neighborhood_two_hop_weight
-        )
-        self.paper_neighborhood_max_hub_degree = (
-            paper_neighborhood_max_hub_degree
-        )
-        self.method_owner_weight = float(method_owner_weight)
-        self.method_relation_weight = float(method_relation_weight)
-        self.method_topic_weight = float(method_topic_weight)
-        self.method_topic_seed_chars = method_topic_seed_chars
-        self.method_topic_seed_k = method_topic_seed_k
-        self.method_topic_max_results = method_topic_max_results
-        self.method_bridge_topic_max_rank = (
-            method_bridge_topic_max_rank
-        )
-        self.paper_embedding_index_dir = paper_embedding_index_dir
-        self.method_dense_tail_weight = float(method_dense_tail_weight)
-        self.method_dense_tail_seed_k = method_dense_tail_seed_k
-        self.method_dense_tail_max_results = method_dense_tail_max_results
-        self.method_dense_tail_max_new_papers = (
-            method_dense_tail_max_new_papers
-        )
-        self.paper_dense_tail_weight = float(paper_dense_tail_weight)
-        self.paper_dense_tail_seed_k = paper_dense_tail_seed_k
-        self.paper_dense_tail_max_results = paper_dense_tail_max_results
-        self.paper_dense_consensus_seed_k = paper_dense_consensus_seed_k
-        self.paper_dense_consensus_max_results = (
-            paper_dense_consensus_max_results
-        )
-        self.paper_dense_consensus_min_support = (
-            paper_dense_consensus_min_support
-        )
-        self.paper_dense_reciprocal_seed_k = (
-            paper_dense_reciprocal_seed_k
-        )
-        self.paper_dense_reciprocal_forward_k = (
-            paper_dense_reciprocal_forward_k
-        )
-        self.paper_dense_reciprocal_reverse_k = (
-            paper_dense_reciprocal_reverse_k
-        )
-        self.paper_dense_reciprocal_min_support = (
-            paper_dense_reciprocal_min_support
-        )
-        self.paper_dense_reciprocal_max_candidates = (
-            paper_dense_reciprocal_max_candidates
-        )
+        self._settings = settings.with_float_weights()
         self._paper_embedding_store: object | None = None
         self._paper_embedding_store_unavailable = False
-        self.method_relation_seed_k = method_relation_seed_k
-        self.method_relation_max_results = method_relation_max_results
-        self.method_relation_max_new_papers = (
-            method_relation_max_new_papers
-        )
-        self.method_relation_protected_top_k = (
-            method_relation_protected_top_k
-        )
-
+        self._expose_flat_parameters()
         self._build_stages()
 
+    def _expose_flat_parameters(self) -> None:
+        """Mirror the grouped settings back onto the historical flat names.
+
+        Scripts and configuration tests read parameters straight off the
+        retriever (``retriever.rerank_pool_k`` and friends).  Every settings
+        field is named after the YAML key it comes from, so the flat surface is
+        exactly the union of the grouped fields.
+        """
+
+        for group in (
+            self._settings.candidates,
+            self._settings.output,
+            self._settings.open_set,
+            self._settings.neighborhood,
+            self._settings.method,
+            self._settings.dense,
+        ):
+            for parameter in fields(group):
+                setattr(self, parameter.name, getattr(group, parameter.name))
+
     def _build_stages(self) -> None:
-        """Wire the processing stages from the validated parameters."""
+        """Wire the processing stages from the validated settings groups."""
+
+        candidates = self._settings.candidates
+        output = self._settings.output
+        open_set = self._settings.open_set
+        neighborhood = self._settings.neighborhood
+        method = self._settings.method
+        dense = self._settings.dense
 
         self._query = QueryPreparation(
-            seed_text_chars=self.seed_text_chars,
-            literal_attribute_hints=self.literal_attribute_hints,
-            literal_method_hints=self.literal_method_hints,
+            seed_text_chars=candidates.seed_text_chars,
+            literal_attribute_hints=candidates.literal_attribute_hints,
+            literal_method_hints=candidates.literal_method_hints,
         )
         self._candidates = CandidateGeneration(
             retriever=self.retriever,
-            candidate_k=self.candidate_k,
-            rrf_k=self.rrf_k,
-            local_expansion_weight=self.local_expansion_weight,
+            candidate_k=candidates.candidate_k,
+            rrf_k=candidates.rrf_k,
+            local_expansion_weight=candidates.local_expansion_weight,
+        )
+        self._open_set = OpenSetExploration(
+            min_support=open_set.open_set_min_support,
+            max_seed_rank=open_set.open_set_max_seed_rank,
+            slot_k=open_set.open_set_slot_k,
         )
         self._neighborhood = PaperNeighborhoodExpansion(
-            rrf_k=self.rrf_k,
-            candidate_k=self.candidate_k,
-            relation_weight=self.paper_neighborhood_weight,
-            two_hop_weight=self.paper_neighborhood_two_hop_weight,
-            max_hub_degree=self.paper_neighborhood_max_hub_degree,
+            rrf_k=candidates.rrf_k,
+            candidate_k=candidates.candidate_k,
+            relation_weight=neighborhood.paper_neighborhood_weight,
+            two_hop_weight=neighborhood.paper_neighborhood_two_hop_weight,
+            max_hub_degree=neighborhood.paper_neighborhood_max_hub_degree,
         )
         self._method_relations = MethodRelationExpansion(
             retriever=self.retriever,
-            rrf_k=self.rrf_k,
-            candidate_k=self.candidate_k,
-            seed_text_chars=self.seed_text_chars,
-            owner_weight=self.method_owner_weight,
-            relation_weight=self.method_relation_weight,
-            topic_weight=self.method_topic_weight,
-            topic_seed_chars=self.method_topic_seed_chars,
-            topic_seed_k=self.method_topic_seed_k,
-            topic_max_results=self.method_topic_max_results,
-            relation_seed_k=self.method_relation_seed_k,
-            relation_max_results=self.method_relation_max_results,
-            relation_max_new_papers=self.method_relation_max_new_papers,
-            relation_protected_top_k=self.method_relation_protected_top_k,
+            rrf_k=candidates.rrf_k,
+            candidate_k=candidates.candidate_k,
+            seed_text_chars=candidates.seed_text_chars,
+            owner_weight=method.method_owner_weight,
+            relation_weight=method.method_relation_weight,
+            topic_weight=method.method_topic_weight,
+            topic_seed_chars=method.method_topic_seed_chars,
+            topic_seed_k=method.method_topic_seed_k,
+            topic_max_results=method.method_topic_max_results,
+            relation_seed_k=method.method_relation_seed_k,
+            relation_max_results=method.method_relation_max_results,
+            relation_max_new_papers=method.method_relation_max_new_papers,
+            relation_protected_top_k=method.method_relation_protected_top_k,
         )
         self._method_bridge = MethodBridgeExploration(
             retriever=self.retriever,
-            seed_text_chars=self.seed_text_chars,
-            stable_prefix_k=self.stable_prefix_k,
-            topic_seed_chars=self.method_topic_seed_chars,
-            topic_seed_k=self.method_topic_seed_k,
-            topic_max_results=self.method_topic_max_results,
-            bridge_topic_max_rank=self.method_bridge_topic_max_rank,
-            relation_max_results=self.method_relation_max_results,
+            seed_text_chars=candidates.seed_text_chars,
+            stable_prefix_k=output.stable_prefix_k,
+            topic_seed_chars=method.method_topic_seed_chars,
+            topic_seed_k=method.method_topic_seed_k,
+            topic_max_results=method.method_topic_max_results,
+            bridge_topic_max_rank=method.method_bridge_topic_max_rank,
+            relation_max_results=method.method_relation_max_results,
         )
         self._dense_tail = DenseTailFusion(
-            rrf_k=self.rrf_k,
-            seed_text_chars=self.seed_text_chars,
-            method_weight=self.method_dense_tail_weight,
-            method_seed_k=self.method_dense_tail_seed_k,
-            method_max_results=self.method_dense_tail_max_results,
-            method_max_new_papers=self.method_dense_tail_max_new_papers,
-            paper_weight=self.paper_dense_tail_weight,
-            paper_seed_k=self.paper_dense_tail_seed_k,
-            paper_max_results=self.paper_dense_tail_max_results,
+            rrf_k=candidates.rrf_k,
+            seed_text_chars=candidates.seed_text_chars,
+            method_weight=dense.method_dense_tail_weight,
+            method_seed_k=dense.method_dense_tail_seed_k,
+            method_max_results=dense.method_dense_tail_max_results,
+            method_max_new_papers=dense.method_dense_tail_max_new_papers,
+            paper_weight=dense.paper_dense_tail_weight,
+            paper_seed_k=dense.paper_dense_tail_seed_k,
+            paper_max_results=dense.paper_dense_tail_max_results,
         )
         self._dense_reciprocal = DenseReciprocalExploration(
-            rrf_k=self.rrf_k,
-            seed_text_chars=self.seed_text_chars,
-            seed_k=self.paper_dense_reciprocal_seed_k,
-            forward_k=self.paper_dense_reciprocal_forward_k,
-            reverse_k=self.paper_dense_reciprocal_reverse_k,
-            min_support=self.paper_dense_reciprocal_min_support,
-            max_candidates=self.paper_dense_reciprocal_max_candidates,
+            rrf_k=candidates.rrf_k,
+            seed_text_chars=candidates.seed_text_chars,
+            seed_k=dense.paper_dense_reciprocal_seed_k,
+            forward_k=dense.paper_dense_reciprocal_forward_k,
+            reverse_k=dense.paper_dense_reciprocal_reverse_k,
+            min_support=dense.paper_dense_reciprocal_min_support,
+            max_candidates=dense.paper_dense_reciprocal_max_candidates,
         )
         self._dense_consensus = DenseConsensusExploration(
-            rrf_k=self.rrf_k,
-            seed_text_chars=self.seed_text_chars,
-            seed_k=self.paper_dense_consensus_seed_k,
-            max_results=self.paper_dense_consensus_max_results,
-            min_support=self.paper_dense_consensus_min_support,
+            rrf_k=candidates.rrf_k,
+            seed_text_chars=candidates.seed_text_chars,
+            seed_k=dense.paper_dense_consensus_seed_k,
+            max_results=dense.paper_dense_consensus_max_results,
+            min_support=dense.paper_dense_consensus_min_support,
         )
         self._title_guard = ExplicitTitleGuard(
-            enabled=self.protect_explicit_title_matches,
-            max_protected_titles=self.max_protected_titles,
+            enabled=output.protect_explicit_title_matches,
+            max_protected_titles=output.max_protected_titles,
         )
         self._final_rerank = FinalCandidateReranker(
             reranker=self._reranker,
-            document_chars=self.final_rerank_document_chars,
+            document_chars=output.final_rerank_document_chars,
+            protected_top_k=output.final_rerank_protected_top_k,
         )
 
     @property
@@ -539,15 +385,23 @@ class SeedExpansionRetriever:
 
         expanded_query = self._query.expanded_query(query, initial[0])
         if expanded_query is None:
+            open_set_runs = self._open_set_runs(
+                query,
+                initial,
+                retrieval_hints,
+                excluded_queries=(),
+            )
             return self._finalize(
                 query,
                 unique_papers(initial),
                 top_k,
                 effective_hints,
+                open_set_runs=open_set_runs,
             )
 
         expanded = self._candidates.search(expanded_query, retrieval_hints)
         local_expanded: list[RetrievalResult] | None = None
+        local_query: str | None = None
         if (
             self.local_expansion_weight > 0
             and paper_context(initial[0]) is not None
@@ -559,16 +413,67 @@ class SeedExpansionRetriever:
                     retrieval_hints,
                 )
 
+        open_set_runs = self._open_set_runs(
+            query,
+            initial,
+            retrieval_hints,
+            excluded_queries=(expanded_query, local_query),
+        )
         if not expanded and local_expanded is None:
             return self._finalize(
                 query,
                 unique_papers(initial),
                 top_k,
                 effective_hints,
+                open_set_runs=open_set_runs,
             )
 
         fused = self._candidates.fuse_by_paper(initial, expanded, local_expanded)
-        return self._finalize(query, fused, top_k, effective_hints)
+        return self._finalize(
+            query,
+            fused,
+            top_k,
+            effective_hints,
+            open_set_runs=open_set_runs,
+        )
+
+    def _open_set_runs(
+        self,
+        query: str,
+        initial: list[RetrievalResult],
+        hints: SearchHints | None,
+        *,
+        excluded_queries: tuple[str | None, ...],
+    ) -> list[tuple[str, list[RetrievalResult]]]:
+        """Run bounded, fail-soft searches from additional paper seeds."""
+
+        if (
+            self.open_set_seed_k <= 1
+            or not is_open_set_enumeration(query)
+        ):
+            return []
+
+        seen_queries = {
+            " ".join(candidate_query.split()).casefold()
+            for candidate_query in excluded_queries
+            if isinstance(candidate_query, str) and candidate_query.strip()
+        }
+        runs: list[tuple[str, list[RetrievalResult]]] = []
+        seeds = unique_papers(initial)[: self.open_set_seed_k]
+        for seed in seeds[1:]:
+            expanded_query = self._query.expanded_query(query, seed)
+            if expanded_query is None:
+                continue
+            normalized_query = " ".join(expanded_query.split()).casefold()
+            if normalized_query in seen_queries:
+                continue
+            seen_queries.add(normalized_query)
+            try:
+                run = self._candidates.search(expanded_query, hints)
+            except Exception:
+                continue
+            runs.append((seed.paper_id, run))
+        return runs
 
     def _finalize(
         self,
@@ -576,56 +481,118 @@ class SeedExpansionRetriever:
         candidates: list[RetrievalResult],
         top_k: int,
         hints: SearchHints | None = None,
+        *,
+        open_set_runs: list[tuple[str, list[RetrievalResult]]] | None = None,
     ) -> list[RetrievalResult]:
-        """Apply the optional final reranker to a bounded paper candidate pool."""
+        """Rerank, protect and assemble the paper-level ranking to return."""
 
         indexers = self.indexers
         candidates = self._neighborhood.rerank(query, candidates, indexers)
-        output_k = min(top_k, self.max_results)
+        context = self._finalize_context(
+            query,
+            top_k,
+            hints,
+            indexers,
+            open_set_runs,
+        )
+        candidates, method_protected = self._method_relations.expand(
+            candidates,
+            hints,
+            indexers,
+            output_k=context.selection_k,
+        )
+        if self.reranker is None or self.rerank_final_candidates:
+            return self._finalize_in_candidate_order(
+                context,
+                candidates,
+                method_protected,
+            )
+        return self._finalize_by_pool_rerank(context, candidates, method_protected)
+
+    def _finalize_context(
+        self,
+        query: str,
+        top_k: int,
+        hints: SearchHints | None,
+        indexers,
+        open_set_runs: list[tuple[str, list[RetrievalResult]]] | None,
+    ) -> _FinalizeContext:
+        """Resolve how many papers this call selects, assembles and returns."""
+
+        requested_output_k = min(top_k, self.max_results)
+        output_k = requested_output_k
+        if self.rerank_final_candidates:
+            # The final model may inspect a wider fixed pool than the caller
+            # consumes. This lets a reader request 20 papers while the
+            # reranker scores up to ``rerank_pool_k`` candidates.
+            output_k = max(requested_output_k, self.rerank_pool_k)
         selection_k = min(
             output_k,
             self.stable_prefix_k
             if self.stable_prefix_k is not None
             else output_k,
         )
-        candidates, method_protected = self._method_relations.expand(
-            candidates,
-            hints,
-            indexers,
-            output_k=selection_k,
+        return _FinalizeContext(
+            query=query,
+            hints=hints,
+            indexers=indexers,
+            requested_output_k=requested_output_k,
+            output_k=output_k,
+            selection_k=selection_k,
+            open_set_runs=tuple(open_set_runs or ()),
         )
-        reserved_paper_ids = {
-            candidate.paper_id for candidate in method_protected
-        }
-        if self.reranker is None or self.rerank_final_candidates:
-            selected = restore_method_protected_candidates(
-                candidates,
-                candidates[:selection_k],
-                method_protected,
-                selection_k,
-            )
-            selected = self._title_guard.restore(
-                query,
-                candidates,
-                selected,
-                selection_k,
-                reserved_paper_ids=reserved_paper_ids,
-            )
-            finalized = self._assemble_output(
-                candidates,
-                selected,
-                hints,
-                indexers,
-                output_k=output_k,
-                selection_k=selection_k,
-            )
-            if self.rerank_final_candidates:
-                return self._final_rerank.rerank(query, finalized, indexers)
-            return finalized
 
+    def _finalize_in_candidate_order(
+        self,
+        context: _FinalizeContext,
+        candidates: list[RetrievalResult],
+        method_protected: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        """Keep the fused candidate order, optionally reranking the fixed pool."""
+
+        selection_k = context.selection_k
+        selected = restore_method_protected_candidates(
+            candidates,
+            candidates[:selection_k],
+            method_protected,
+            selection_k,
+        )
+        selected = context.restore_titles(
+            self._title_guard,
+            candidates,
+            selected,
+            method_protected,
+        )
+        finalized = self._assemble_output(
+            candidates,
+            selected,
+            context.hints,
+            context.indexers,
+            output_k=context.output_k,
+            selection_k=selection_k,
+        )
+        if self.rerank_final_candidates:
+            reranked = self._final_rerank.rerank(
+                context.query,
+                finalized,
+                context.indexers,
+            )
+            reranked = self._open_set.insert(reranked, context.open_set_runs)
+            return reranked[: context.requested_output_k]
+        return self._open_set.insert(finalized, context.open_set_runs)
+
+    def _finalize_by_pool_rerank(
+        self,
+        context: _FinalizeContext,
+        candidates: list[RetrievalResult],
+        method_protected: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        """Let the wrapped reranker choose the prefix from a bounded pool."""
+
+        selection_k = context.selection_k
         candidate_pool = candidates[: self.rerank_pool_k]
         selected = self.reranker.rerank(
-            query,
+            context.query,
             candidate_pool,
             selection_k,
         )[:selection_k]
@@ -635,12 +602,11 @@ class SeedExpansionRetriever:
             method_protected,
             selection_k,
         )
-        selected = self._title_guard.restore(
-            query,
+        selected = context.restore_titles(
+            self._title_guard,
             candidate_pool,
             selected,
-            selection_k,
-            reserved_paper_ids=reserved_paper_ids,
+            method_protected,
         )
         if not selected:
             return []
@@ -650,14 +616,15 @@ class SeedExpansionRetriever:
             candidate.paper_id for candidate in candidate_pool
         ]
         selected[0] = replace(selected[0], metadata=metadata)
-        return self._assemble_output(
+        finalized = self._assemble_output(
             candidates,
             selected,
-            hints,
-            indexers,
-            output_k=output_k,
+            context.hints,
+            context.indexers,
+            output_k=context.output_k,
             selection_k=selection_k,
         )
+        return self._open_set.insert(finalized, context.open_set_runs)
 
     def _assemble_output(
         self,
@@ -738,11 +705,3 @@ class SeedExpansionRetriever:
             return None
         self._paper_embedding_store = store
         return store
-
-    @staticmethod
-    def _align_scores_with_output_order(
-        results: list[RetrievalResult],
-    ) -> list[RetrievalResult]:
-        """Keep downstream score aggregation consistent with the final order."""
-
-        return align_scores_with_output_order(results)

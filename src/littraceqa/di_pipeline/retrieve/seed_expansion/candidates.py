@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
+from typing import Sequence
 
 from littraceqa.di_pipeline.contracts import RetrievalResult, SearchHints
 from littraceqa.di_pipeline.retrieve.base import Retriever
+
+MAX_OPEN_SET_SEEDS = 8
 
 
 def unique_papers(results: list[RetrievalResult]) -> list[RetrievalResult]:
@@ -177,3 +180,142 @@ class CandidateGeneration:
                 )
             )
         return fused
+
+
+@dataclass(frozen=True)
+class OpenSetExploration:
+    """Insert one candidate supported by several independent seed searches."""
+
+    min_support: int
+    max_seed_rank: int
+    slot_k: int
+
+    def insert(
+        self,
+        results: list[RetrievalResult],
+        runs: Sequence[tuple[str, list[RetrievalResult]]],
+    ) -> list[RetrievalResult]:
+        """Preserve the stable head and fill one exploration slot."""
+
+        if not runs or len(results) < self.slot_k:
+            return results
+
+        selected = self._select(
+            runs,
+            excluded_paper_ids={
+                result.paper_id for result in results[: self.slot_k]
+            },
+        )
+        attempted = self._mark_attempt(results, len(runs), selected)
+        if selected is None:
+            return attempted
+
+        original_rank = next(
+            (
+                rank
+                for rank, result in enumerate(attempted, start=1)
+                if result.paper_id == selected.paper_id
+            ),
+            None,
+        )
+        metadata = dict(selected.metadata)
+        metadata.update(
+            {
+                "open_set_expansion_original_rank": original_rank,
+                "open_set_expansion_selected": True,
+                "open_set_expansion_slot_k": self.slot_k,
+            }
+        )
+        selected = replace(
+            selected,
+            metadata=metadata,
+            source="open_set_seed_consensus",
+        )
+
+        without_selected = [
+            result
+            for result in attempted
+            if result.paper_id != selected.paper_id
+        ]
+        inserted = [
+            *without_selected[: self.slot_k - 1],
+            selected,
+            *without_selected[self.slot_k - 1 :],
+        ][: len(results)]
+        return align_scores_with_output_order(inserted)
+
+    def _select(
+        self,
+        runs: Sequence[tuple[str, list[RetrievalResult]]],
+        *,
+        excluded_paper_ids: set[str],
+    ) -> RetrievalResult | None:
+        """Choose the strongest consensus outside the protected head."""
+
+        representatives: dict[str, RetrievalResult] = {}
+        support: dict[str, int] = {}
+        best_rank: dict[str, int] = {}
+        via_papers: dict[str, list[str]] = {}
+        first_seen: dict[str, tuple[int, int]] = {}
+
+        for run_index, (seed_paper_id, run) in enumerate(runs):
+            for rank, result in enumerate(unique_papers(run), start=1):
+                paper_id = result.paper_id
+                support[paper_id] = support.get(paper_id, 0) + 1
+                previous_best_rank = best_rank.get(paper_id)
+                if previous_best_rank is None or rank < previous_best_rank:
+                    best_rank[paper_id] = rank
+                    representatives[paper_id] = result
+                via_papers.setdefault(paper_id, []).append(seed_paper_id)
+                first_seen.setdefault(paper_id, (run_index, rank))
+
+        eligible = [
+            paper_id
+            for paper_id in representatives
+            if paper_id not in excluded_paper_ids
+            and support[paper_id] >= self.min_support
+            and best_rank[paper_id] <= self.max_seed_rank
+        ]
+        if not eligible:
+            return None
+
+        paper_id = min(
+            eligible,
+            key=lambda candidate_id: (
+                best_rank[candidate_id],
+                -support[candidate_id],
+                first_seen[candidate_id],
+                candidate_id,
+            ),
+        )
+        representative = representatives[paper_id]
+        metadata = dict(representative.metadata)
+        metadata.update(
+            {
+                "open_set_expansion_best_rank": best_rank[paper_id],
+                "open_set_expansion_run_count": len(runs),
+                "open_set_expansion_support": support[paper_id],
+                "open_set_expansion_via_papers": via_papers[paper_id],
+            }
+        )
+        return replace(representative, metadata=metadata)
+
+    @staticmethod
+    def _mark_attempt(
+        results: list[RetrievalResult],
+        run_count: int,
+        selected: RetrievalResult | None,
+    ) -> list[RetrievalResult]:
+        """Record that the guarded exploration ran, even without a selection."""
+
+        metadata = dict(results[0].metadata)
+        metadata.update(
+            {
+                "open_set_expansion_attempted": True,
+                "open_set_expansion_run_count": run_count,
+                "open_set_expansion_selected_paper_id": (
+                    selected.paper_id if selected is not None else None
+                ),
+            }
+        )
+        return [replace(results[0], metadata=metadata), *results[1:]]

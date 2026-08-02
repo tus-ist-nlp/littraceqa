@@ -36,96 +36,69 @@ from bm25s.scoring import (
 )
 
 from littraceqa.di_pipeline.contracts import Chunk
-
-
-_EXPECTED_BM25S_VERSION = "0.3.9"
-_SCHEMA_VERSION = 2
-_MANIFEST_NAME = "resumable-build.json"
-_PARTS_DIR_NAME = ".resumable-bm25-parts"
-_SCORES_DIR_NAME = ".resumable-bm25-scores"
-_DATA_NAME = "data.csc.index.npy"
-_INDICES_NAME = "indices.csc.index.npy"
-_INDPTR_NAME = "indptr.csc.index.npy"
-_VOCAB_NAME = "vocab.index.json"
-_PARAMS_NAME = "params.index.json"
-_NONOCCURRENCE_NAME = "nonoccurrence_array.index.npy"
-_CHUNKS_NAME = "chunks.jsonl"
-_CHUNK_OFFSETS_NAME = "chunks.offsets.npy"
-_METHODS = frozenset({"lucene", "robertson", "atire", "bm25l", "bm25+"})
-_ROOT_KEYS = frozenset(
-    {
-        "schema_version",
-        "configuration",
-        "phase",
-        "batch_count",
-        "input_sha256",
-        "global_statistics",
-        "files",
-    }
+from littraceqa.di_pipeline.index import (
+    bm25_checkpoint_format,
+    bm25_checkpoint_layout,
+    bm25_completion_check,
 )
-_PART_META_KEYS = frozenset(
-    {
-        "schema_version",
-        "index",
-        "documents",
-        "input_sha256",
-        "part_sha256",
-        "part_size",
-    }
+from littraceqa.di_pipeline.index.bm25_completion_check import (
+    output_names,
+    validate_completed,
 )
-_PART_PAYLOAD_KEYS = frozenset(
-    {"schema_version", "index", "chunks", "tokens"}
+from littraceqa.di_pipeline.index.bm25_checkpoint_layout import (
+    BM25Parameters,
+    CheckpointLayout,
+    GlobalStatistics,
 )
-_SCORE_META_KEYS = frozenset(
-    {
-        "schema_version",
-        "index",
-        "documents",
-        "document_start",
-        "entries",
-        "part_sha256",
-        "statistics_signature",
-        "score_sha256",
-        "score_size",
-    }
+from littraceqa.di_pipeline.index.bm25_checkpoint_format import (
+    CHUNK_KEYS,
+    CHUNK_OFFSETS_NAME,
+    CHUNKS_NAME,
+    ConfigurationChangedError,
+    CorruptCheckpointError,
+    DATA_NAME,
+    EXPECTED_BM25S_VERSION,
+    INDICES_NAME,
+    INDPTR_NAME,
+    InputChangedError,
+    METHODS,
+    MIN_FREE_SPACE_BYTES,
+    NONOCCURRENCE_NAME,
+    PARAMS_NAME,
+    PART_META_KEYS,
+    PART_PAYLOAD_KEYS,
+    ResumableBM25Error,
+    ROOT_KEYS,
+    SCHEMA_VERSION,
+    SCORE_CONTAINER_OVERHEAD,
+    SCORE_META_KEYS,
+    STATISTICS_KEYS,
+    VOCAB_NAME,
+    atomic_json,
+    atomic_vocab,
+    atomic_write,
+    batched,
+    canonical_json,
+    finite_number,
+    is_sha256,
+    positive_integer,
+    read_bounded,
+    read_small_json,
+    sha256_bytes,
+    sha256_file,
+    sha256_int64_array,
+    sha256_ordered_strings,
 )
-_STATISTICS_KEYS = frozenset(
-    {
-        "signature",
-        "num_documents",
-        "vocabulary_size",
-        "nonzero_scores",
-        "total_document_length",
-        "average_document_length",
-        "vocabulary_sha256",
-        "document_frequencies_sha256",
-    }
-)
-_FILE_RECORD_KEYS = frozenset({"sha256", "size"})
-_CHUNK_KEYS = frozenset(
-    {"chunk_id", "paper_id", "text", "chunk_type", "metadata"}
-)
-_HEX_DIGITS = frozenset("0123456789abcdef")
-_METADATA_MAX_BYTES = 64 * 1024
-_SCORE_CONTAINER_OVERHEAD = 64 * 1024
-_MIN_FREE_SPACE_BYTES = 512 * 1024 * 1024
-_VALIDATION_BLOCK_ITEMS = 1_000_000
 
 
-class ResumableBM25Error(RuntimeError):
-    """Base class for resumable-index construction errors."""
-
-
-class InputChangedError(ResumableBM25Error):
-    """Raised when a generation is resumed with different ordered input."""
-
-
-class ConfigurationChangedError(ResumableBM25Error):
-    """Raised when a generation is resumed with different build parameters."""
-
-
-class CorruptCheckpointError(ResumableBM25Error):
-    """Raised when checkpoint metadata itself cannot be trusted."""
+__all__ = [
+    "BuildResult",
+    "ConfigurationChangedError",
+    "CorruptCheckpointError",
+    "InputChangedError",
+    "ResumableBM25Builder",
+    "ResumableBM25Error",
+]
 
 
 @dataclass(frozen=True)
@@ -146,69 +119,17 @@ class BuildResult:
     rebuilt_score_batches: int
 
 
-@dataclass(frozen=True)
-class _GlobalStatistics:
-    vocab: dict[str, int]
-    document_frequencies: np.ndarray
-    num_documents: int
-    total_document_length: int
-    average_document_length: np.float64
-    nonzero_scores: int
-    signature: str
-    record: dict[str, Any]
-
-
-def _canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _is_sha256(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in _HEX_DIGITS for character in value)
-    )
-
-
-def _sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while block := file.read(block_size):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _sha256_ordered_strings(values: Iterable[str]) -> str:
-    digest = hashlib.sha256()
-    for value in values:
-        encoded = value.encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    return digest.hexdigest()
-
-
-def _sha256_int64_array(values: np.ndarray) -> str:
-    normalized = np.asarray(values, dtype=np.dtype("<i8"))
-    digest = hashlib.sha256()
-    digest.update(memoryview(normalized).cast("B"))
-    return digest.hexdigest()
-
-
 def _implementation_signature() -> str:
     """Fingerprint code and runtime components that affect persisted scores."""
 
+    # Every module that holds build logic must be covered: a change in an
+    # extracted stage has to invalidate a resumable checkpoint just as a change
+    # in the builder itself does.
     source_objects = (
         ("builder", ResumableBM25Builder),
+        ("checkpoint_format", bm25_checkpoint_format),
+        ("checkpoint_layout", bm25_checkpoint_layout),
+        ("completion_check", bm25_completion_check),
         ("bm25", bm25s.BM25),
         ("tokenize", bm25s.tokenize),
         ("idf_scorer", _select_idf_scorer),
@@ -220,162 +141,17 @@ def _implementation_signature() -> str:
         records.append(
             {
                 "label": label,
-                "sha256": _sha256_file(source_path),
+                "sha256": sha256_file(source_path),
             }
         )
-    return _sha256_bytes(
-        _canonical_json(
+    return sha256_bytes(
+        canonical_json(
             {
                 "numpy_version": np.__version__,
                 "sources": records,
             }
         )
     )
-
-
-def _atomic_write(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as file:
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _atomic_json(path: Path, value: Any) -> None:
-    _atomic_write(path, _canonical_json(value) + b"\n")
-
-
-def _atomic_vocab(path: Path, vocab: dict[str, int]) -> None:
-    """Write a large vocabulary without copying it into another dict or bytes."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            output.write("{")
-            first = True
-            for token, token_id in vocab.items():
-                if not first:
-                    output.write(",")
-                json.dump(token, output, ensure_ascii=False, allow_nan=False)
-                output.write(":")
-                output.write(str(token_id))
-                first = False
-            if "" not in vocab:
-                if not first:
-                    output.write(",")
-                output.write('"":')
-                output.write(str(len(vocab)))
-            output.write("}\n")
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _read_bounded(path: Path, expected_size: int, maximum_size: int) -> bytes:
-    if (
-        isinstance(expected_size, bool)
-        or not isinstance(expected_size, int)
-        or expected_size <= 0
-        or expected_size > maximum_size
-    ):
-        raise CorruptCheckpointError(f"invalid stored size for {path}")
-    try:
-        if path.is_symlink():
-            raise CorruptCheckpointError(
-                f"checkpoint must not be a symbolic link: {path}"
-            )
-        actual_size = path.stat().st_size
-    except OSError as exc:
-        raise CorruptCheckpointError(f"checkpoint is unreadable: {path}") from exc
-    if actual_size != expected_size or actual_size > maximum_size:
-        raise CorruptCheckpointError(f"checkpoint size mismatch: {path}")
-    try:
-        with path.open("rb") as file:
-            content = file.read(expected_size + 1)
-    except OSError as exc:
-        raise CorruptCheckpointError(f"checkpoint is unreadable: {path}") from exc
-    if len(content) != expected_size:
-        raise CorruptCheckpointError(f"checkpoint changed while reading: {path}")
-    return content
-
-
-def _read_small_json(path: Path) -> Any:
-    try:
-        size = path.stat().st_size
-        content = _read_bounded(path, size, _METADATA_MAX_BYTES)
-        return json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise CorruptCheckpointError(f"checkpoint is not valid JSON: {path}") from exc
-    except OSError as exc:
-        raise CorruptCheckpointError(f"checkpoint is unreadable: {path}") from exc
-
-
-def _positive_integer(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} must be an integer")
-    if value <= 0:
-        raise ValueError(f"{name} must be positive")
-    return value
-
-
-def _finite_number(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{name} must be a number")
-    converted = float(value)
-    if not math.isfinite(converted):
-        raise ValueError(f"{name} must be finite")
-    return converted
-
-
-def _batched(
-    chunks: Iterable[Chunk],
-    batch_size: int,
-    max_batch_characters: int,
-) -> Iterator[list[Chunk]]:
-    batch: list[Chunk] = []
-    characters = 0
-    for chunk in chunks:
-        if not isinstance(chunk, Chunk):
-            raise TypeError("chunks must contain Chunk instances")
-        chunk_characters = len(chunk.text)
-        if chunk_characters > max_batch_characters:
-            raise ValueError(
-                "one chunk exceeds max_batch_characters: "
-                f"{chunk.chunk_id} has {chunk_characters} characters"
-            )
-        if batch and (
-            len(batch) >= batch_size
-            or characters + chunk_characters > max_batch_characters
-        ):
-            yield batch
-            batch = []
-            characters = 0
-        batch.append(chunk)
-        characters += chunk_characters
-        if len(batch) >= batch_size:
-            yield batch
-            batch = []
-            characters = 0
-    if batch:
-        yield batch
 
 
 class ResumableBM25Builder:
@@ -399,26 +175,26 @@ class ResumableBM25Builder:
         lower: bool = True,
         token_pattern: str = r"(?u)\b\w\w+\b",
     ) -> None:
-        self.batch_size = _positive_integer(batch_size, "batch_size")
-        self.max_batch_characters = _positive_integer(
+        self.batch_size = positive_integer(batch_size, "batch_size")
+        self.max_batch_characters = positive_integer(
             max_batch_characters, "max_batch_characters"
         )
-        self.max_part_bytes = _positive_integer(
+        self.max_part_bytes = positive_integer(
             max_part_bytes, "max_part_bytes"
         )
-        if bm25s.__version__ != _EXPECTED_BM25S_VERSION:
+        if bm25s.__version__ != EXPECTED_BM25S_VERSION:
             raise RuntimeError(
                 "resumable construction requires bm25s "
-                f"{_EXPECTED_BM25S_VERSION}, found {bm25s.__version__}"
+                f"{EXPECTED_BM25S_VERSION}, found {bm25s.__version__}"
             )
-        if not isinstance(method, str) or method not in _METHODS:
-            raise ValueError(f"method must be one of {sorted(_METHODS)}")
+        if not isinstance(method, str) or method not in METHODS:
+            raise ValueError(f"method must be one of {sorted(METHODS)}")
         resolved_idf = method if idf_method is None else idf_method
-        if not isinstance(resolved_idf, str) or resolved_idf not in _METHODS:
-            raise ValueError(f"idf_method must be one of {sorted(_METHODS)}")
-        k1_value = _finite_number(k1, "k1")
-        b_value = _finite_number(b, "b")
-        delta_value = _finite_number(delta, "delta")
+        if not isinstance(resolved_idf, str) or resolved_idf not in METHODS:
+            raise ValueError(f"idf_method must be one of {sorted(METHODS)}")
+        k1_value = finite_number(k1, "k1")
+        b_value = finite_number(b, "b")
+        delta_value = finite_number(delta, "delta")
         if k1_value < 0:
             raise ValueError("k1 must be non-negative")
         if not 0 <= b_value <= 1:
@@ -467,6 +243,7 @@ class ResumableBM25Builder:
             auto_compile=False,
         )
         self.generation_dir = Path(generation_dir)
+        self._layout = CheckpointLayout(self.generation_dir)
         self.method = reference.method
         self.k1 = reference.k1
         self.b = reference.b
@@ -478,34 +255,21 @@ class ResumableBM25Builder:
         self.lower = lower
         self.token_pattern = token_pattern
         self.implementation_signature = _implementation_signature()
-
-    @property
-    def _manifest_path(self) -> Path:
-        return self.generation_dir / _MANIFEST_NAME
-
-    @property
-    def _parts_dir(self) -> Path:
-        return self.generation_dir / _PARTS_DIR_NAME
-
-    @property
-    def _scores_dir(self) -> Path:
-        return self.generation_dir / _SCORES_DIR_NAME
-
-    def _part_path(self, index: int) -> Path:
-        return self._parts_dir / f"{index:08d}.json"
-
-    def _part_meta_path(self, index: int) -> Path:
-        return self._parts_dir / f"{index:08d}.meta.json"
-
-    def _score_path(self, index: int) -> Path:
-        return self._scores_dir / f"{index:08d}.npz"
-
-    def _score_meta_path(self, index: int) -> Path:
-        return self._scores_dir / f"{index:08d}.meta.json"
+        # Built last: bm25s normalises the scalars above, so the grouped
+        # parameters must be taken from the normalised values.
+        self._parameters = BM25Parameters(
+            method=self.method,
+            idf_method=self.idf_method,
+            k1=self.k1,
+            b=self.b,
+            delta=self.delta,
+            dtype=self.dtype,
+            int_dtype=self.int_dtype,
+        )
 
     def _configuration(self) -> dict[str, Any]:
         return {
-            "bm25s_version": _EXPECTED_BM25S_VERSION,
+            "bm25s_version": EXPECTED_BM25S_VERSION,
             "implementation_signature": self.implementation_signature,
             "batch_size": self.batch_size,
             "max_batch_characters": self.max_batch_characters,
@@ -524,7 +288,7 @@ class ResumableBM25Builder:
 
     def _new_manifest(self) -> dict[str, Any]:
         return {
-            "schema_version": _SCHEMA_VERSION,
+            "schema_version": SCHEMA_VERSION,
             "configuration": self._configuration(),
             "phase": "tokenizing",
             "batch_count": None,
@@ -534,19 +298,19 @@ class ResumableBM25Builder:
         }
 
     def _load_or_create_manifest(self) -> dict[str, Any]:
-        if not self._manifest_path.exists():
+        if not self._layout.manifest_path.exists():
             if self.generation_dir.exists() and any(self.generation_dir.iterdir()):
                 raise CorruptCheckpointError(
                     "generation directory is non-empty but has no build manifest"
                 )
             self.generation_dir.mkdir(parents=True, exist_ok=True)
             manifest = self._new_manifest()
-            _atomic_json(self._manifest_path, manifest)
+            atomic_json(self._layout.manifest_path, manifest)
             return manifest
-        manifest = _read_small_json(self._manifest_path)
-        if not isinstance(manifest, dict) or set(manifest) != _ROOT_KEYS:
+        manifest = read_small_json(self._layout.manifest_path)
+        if not isinstance(manifest, dict) or set(manifest) != ROOT_KEYS:
             raise CorruptCheckpointError("build manifest has an invalid schema")
-        if manifest["schema_version"] != _SCHEMA_VERSION:
+        if manifest["schema_version"] != SCHEMA_VERSION:
             raise CorruptCheckpointError("unsupported build manifest schema")
         if manifest["configuration"] != self._configuration():
             raise ConfigurationChangedError(
@@ -572,7 +336,7 @@ class ResumableBM25Builder:
                 isinstance(batch_count, bool)
                 or not isinstance(batch_count, int)
                 or batch_count <= 0
-                or not _is_sha256(input_sha256)
+                or not is_sha256(input_sha256)
             ):
                 raise CorruptCheckpointError(
                     "build manifest has invalid input metadata"
@@ -598,7 +362,7 @@ class ResumableBM25Builder:
 
     @staticmethod
     def _valid_statistics_record(value: object) -> bool:
-        if not isinstance(value, dict) or set(value) != _STATISTICS_KEYS:
+        if not isinstance(value, dict) or set(value) != STATISTICS_KEYS:
             return False
         integer_fields = (
             "num_documents",
@@ -616,9 +380,9 @@ class ResumableBM25Builder:
         return (
             value["num_documents"] > 0
             and value["vocabulary_size"] > 0
-            and _is_sha256(value["signature"])
-            and _is_sha256(value["vocabulary_sha256"])
-            and _is_sha256(value["document_frequencies_sha256"])
+            and is_sha256(value["signature"])
+            and is_sha256(value["vocabulary_sha256"])
+            and is_sha256(value["document_frequencies_sha256"])
             and not isinstance(value["average_document_length"], bool)
             and isinstance(value["average_document_length"], (int, float))
             and math.isfinite(float(value["average_document_length"]))
@@ -649,7 +413,7 @@ class ResumableBM25Builder:
     @staticmethod
     def _batch_content(chunks: list[Chunk] | list[dict[str, Any]]) -> bytes:
         serialized = [
-            _canonical_json(
+            canonical_json(
                 chunk.to_dict() if isinstance(chunk, Chunk) else chunk
             )
             for chunk in chunks
@@ -665,9 +429,9 @@ class ResumableBM25Builder:
         tokens: list[list[str]],
     ) -> bytes:
         return (
-            _canonical_json(
+            canonical_json(
                 {
-                    "schema_version": _SCHEMA_VERSION,
+                    "schema_version": SCHEMA_VERSION,
                     "index": index,
                     "chunks": [chunk.to_dict() for chunk in chunks],
                     "tokens": tokens,
@@ -678,7 +442,7 @@ class ResumableBM25Builder:
 
     @staticmethod
     def _validate_chunk_record(chunk: object, path: Path) -> None:
-        if not isinstance(chunk, dict) or set(chunk) != _CHUNK_KEYS:
+        if not isinstance(chunk, dict) or set(chunk) != CHUNK_KEYS:
             raise CorruptCheckpointError(f"token part has invalid chunk: {path}")
         if any(
             not isinstance(chunk[field], str)
@@ -687,18 +451,18 @@ class ResumableBM25Builder:
             raise CorruptCheckpointError(f"token part has invalid chunk: {path}")
 
     def _read_part_meta(self, index: int) -> dict[str, Any]:
-        path = self._part_meta_path(index)
-        meta = _read_small_json(path)
-        if not isinstance(meta, dict) or set(meta) != _PART_META_KEYS:
+        path = self._layout.part_meta_path(index)
+        meta = read_small_json(path)
+        if not isinstance(meta, dict) or set(meta) != PART_META_KEYS:
             raise CorruptCheckpointError(f"token metadata is malformed: {path}")
         if (
-            meta["schema_version"] != _SCHEMA_VERSION
+            meta["schema_version"] != SCHEMA_VERSION
             or meta["index"] != index
             or isinstance(meta["documents"], bool)
             or not isinstance(meta["documents"], int)
             or meta["documents"] <= 0
-            or not _is_sha256(meta["input_sha256"])
-            or not _is_sha256(meta["part_sha256"])
+            or not is_sha256(meta["input_sha256"])
+            or not is_sha256(meta["part_sha256"])
             or isinstance(meta["part_size"], bool)
             or not isinstance(meta["part_size"], int)
             or not 0 < meta["part_size"] <= self.max_part_bytes
@@ -711,11 +475,11 @@ class ResumableBM25Builder:
         index: int,
         meta: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], list[list[str]]]:
-        path = self._part_path(index)
-        content = _read_bounded(
+        path = self._layout.part_path(index)
+        content = read_bounded(
             path, meta["part_size"], self.max_part_bytes
         )
-        if _sha256_bytes(content) != meta["part_sha256"]:
+        if sha256_bytes(content) != meta["part_sha256"]:
             raise CorruptCheckpointError(f"token part checksum mismatch: {path}")
         try:
             payload = json.loads(content)
@@ -723,8 +487,8 @@ class ResumableBM25Builder:
             raise CorruptCheckpointError(f"token part is malformed: {path}") from exc
         if (
             not isinstance(payload, dict)
-            or set(payload) != _PART_PAYLOAD_KEYS
-            or payload["schema_version"] != _SCHEMA_VERSION
+            or set(payload) != PART_PAYLOAD_KEYS
+            or payload["schema_version"] != SCHEMA_VERSION
             or payload["index"] != index
         ):
             raise CorruptCheckpointError(f"token part is malformed: {path}")
@@ -745,7 +509,7 @@ class ResumableBM25Builder:
             for document in tokens
         ):
             raise CorruptCheckpointError(f"token part has invalid tokens: {path}")
-        if _sha256_bytes(self._batch_content(chunks)) != meta["input_sha256"]:
+        if sha256_bytes(self._batch_content(chunks)) != meta["input_sha256"]:
             raise CorruptCheckpointError(
                 f"token part input checksum mismatch: {path}"
             )
@@ -764,15 +528,15 @@ class ResumableBM25Builder:
                 f"token checkpoint batch {index} exceeds max_part_bytes"
             )
         meta = {
-            "schema_version": _SCHEMA_VERSION,
+            "schema_version": SCHEMA_VERSION,
             "index": index,
             "documents": len(chunks),
             "input_sha256": input_sha256,
-            "part_sha256": _sha256_bytes(content),
+            "part_sha256": sha256_bytes(content),
             "part_size": len(content),
         }
-        _atomic_write(self._part_path(index), content)
-        _atomic_json(self._part_meta_path(index), meta)
+        atomic_write(self._layout.part_path(index), content)
+        atomic_json(self._layout.part_meta_path(index), meta)
         return meta
 
     @staticmethod
@@ -807,7 +571,7 @@ class ResumableBM25Builder:
         rebuilt = 0
         seen_batches = 0
         existing_count = self._indexed_metadata_count(
-            self._parts_dir, ".meta.json"
+            self._layout.parts_dir, ".meta.json"
         )
         expected_count = manifest["batch_count"]
         if expected_count is not None and existing_count != expected_count:
@@ -816,11 +580,11 @@ class ResumableBM25Builder:
             )
 
         for index, batch in enumerate(
-            _batched(chunks, self.batch_size, self.max_batch_characters)
+            batched(chunks, self.batch_size, self.max_batch_characters)
         ):
             seen_batches += 1
             batch_content = self._batch_content(batch)
-            batch_sha256 = _sha256_bytes(batch_content)
+            batch_sha256 = sha256_bytes(batch_content)
             corpus_digest.update(len(batch_content).to_bytes(8, "big"))
             corpus_digest.update(batch_content)
             if index < existing_count:
@@ -868,7 +632,7 @@ class ResumableBM25Builder:
                     "input_sha256": input_sha256,
                 }
             )
-            _atomic_json(self._manifest_path, manifest)
+            atomic_json(self._layout.manifest_path, manifest)
         return input_sha256, seen_batches, reused, rebuilt
 
     def _iter_parts(
@@ -883,7 +647,7 @@ class ResumableBM25Builder:
 
     def _global_statistics(
         self, manifest: dict[str, Any]
-    ) -> _GlobalStatistics:
+    ) -> GlobalStatistics:
         vocab: dict[str, int] = {}
         document_frequencies: list[int] = []
         num_documents = 0
@@ -914,8 +678,8 @@ class ResumableBM25Builder:
         frequencies = np.asarray(document_frequencies, dtype=np.int64)
         average = np.float64(total_document_length) / np.float64(num_documents)
         nonzero_scores = int(frequencies.sum(dtype=np.int64))
-        vocabulary_sha256 = _sha256_ordered_strings(vocab)
-        frequency_sha256 = _sha256_int64_array(frequencies)
+        vocabulary_sha256 = sha256_ordered_strings(vocab)
+        frequency_sha256 = sha256_int64_array(frequencies)
         signature_payload = {
             "input_sha256": manifest["input_sha256"],
             "implementation_signature": self.implementation_signature,
@@ -931,7 +695,7 @@ class ResumableBM25Builder:
             "vocabulary_sha256": vocabulary_sha256,
             "document_frequencies_sha256": frequency_sha256,
         }
-        signature = _sha256_bytes(_canonical_json(signature_payload))
+        signature = sha256_bytes(canonical_json(signature_payload))
         record = {
             "signature": signature,
             "num_documents": num_documents,
@@ -942,7 +706,7 @@ class ResumableBM25Builder:
             "vocabulary_sha256": vocabulary_sha256,
             "document_frequencies_sha256": frequency_sha256,
         }
-        return _GlobalStatistics(
+        return GlobalStatistics(
             vocab=vocab,
             document_frequencies=frequencies,
             num_documents=num_documents,
@@ -954,7 +718,7 @@ class ResumableBM25Builder:
         )
 
     def _prepare_statistics(
-        self, manifest: dict[str, Any], statistics: _GlobalStatistics
+        self, manifest: dict[str, Any], statistics: GlobalStatistics
     ) -> None:
         if manifest["global_statistics"] is None:
             if manifest["phase"] != "tokenized":
@@ -968,7 +732,7 @@ class ResumableBM25Builder:
                     "files": None,
                 }
             )
-            _atomic_json(self._manifest_path, manifest)
+            atomic_json(self._layout.manifest_path, manifest)
         elif manifest["global_statistics"] != statistics.record:
             raise CorruptCheckpointError(
                 "global statistics do not match token checkpoints"
@@ -977,7 +741,7 @@ class ResumableBM25Builder:
     def _validate_disk_capacity(
         self,
         manifest: dict[str, Any],
-        statistics: _GlobalStatistics,
+        statistics: GlobalStatistics,
     ) -> None:
         """Refuse a build that cannot retain checkpoints and final arrays."""
 
@@ -986,11 +750,11 @@ class ResumableBM25Builder:
         )
         estimated_score_bytes = (
             statistics.nonzero_scores * score_entry_bytes
-            + manifest["batch_count"] * _SCORE_CONTAINER_OVERHEAD
+            + manifest["batch_count"] * SCORE_CONTAINER_OVERHEAD
         )
         existing_score_bytes = 0
-        if self._scores_dir.is_dir() and not self._scores_dir.is_symlink():
-            for path in self._scores_dir.glob("*.npz"):
+        if self._layout.scores_dir.is_dir() and not self._layout.scores_dir.is_symlink():
+            for path in self._layout.scores_dir.glob("*.npz"):
                 try:
                     if path.is_file() and not path.is_symlink():
                         existing_score_bytes += path.stat().st_size
@@ -1016,7 +780,7 @@ class ResumableBM25Builder:
             remaining_score_bytes
             + final_array_bytes
             + chunks_upper_bound
-            + _MIN_FREE_SPACE_BYTES
+            + MIN_FREE_SPACE_BYTES
         )
         free = shutil.disk_usage(self.generation_dir).free
         if free < required:
@@ -1027,7 +791,7 @@ class ResumableBM25Builder:
             )
 
     def _scoring_context(
-        self, statistics: _GlobalStatistics
+        self, statistics: GlobalStatistics
     ) -> tuple[np.ndarray, np.ndarray | None]:
         frequency_map = {
             token_id: int(frequency)
@@ -1063,7 +827,7 @@ class ResumableBM25Builder:
         documents: list[list[str]],
         *,
         document_start: int,
-        statistics: _GlobalStatistics,
+        statistics: GlobalStatistics,
         idf: np.ndarray,
         nonoccurrence: np.ndarray | None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1140,9 +904,9 @@ class ResumableBM25Builder:
         part_sha256: str,
         statistics_signature: str,
     ) -> dict[str, Any]:
-        self._scores_dir.mkdir(parents=True, exist_ok=True)
+        self._layout.scores_dir.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
-            dir=self._scores_dir,
+            dir=self._layout.scores_dir,
             prefix=f".{index:08d}.",
             suffix=".npz.tmp",
         )
@@ -1158,12 +922,12 @@ class ResumableBM25Builder:
                 output.flush()
                 os.fsync(output.fileno())
             content_size = temporary.stat().st_size
-            score_sha256 = _sha256_file(temporary)
-            os.replace(temporary, self._score_path(index))
+            score_sha256 = sha256_file(temporary)
+            os.replace(temporary, self._layout.score_path(index))
         finally:
             temporary.unlink(missing_ok=True)
         meta = {
-            "schema_version": _SCHEMA_VERSION,
+            "schema_version": SCHEMA_VERSION,
             "index": index,
             "documents": documents,
             "document_start": document_start,
@@ -1173,13 +937,13 @@ class ResumableBM25Builder:
             "score_sha256": score_sha256,
             "score_size": content_size,
         }
-        _atomic_json(self._score_meta_path(index), meta)
+        atomic_json(self._layout.score_meta_path(index), meta)
         return meta
 
     def _read_score_meta(self, index: int) -> dict[str, Any]:
-        path = self._score_meta_path(index)
-        meta = _read_small_json(path)
-        if not isinstance(meta, dict) or set(meta) != _SCORE_META_KEYS:
+        path = self._layout.score_meta_path(index)
+        meta = read_small_json(path)
+        if not isinstance(meta, dict) or set(meta) != SCORE_META_KEYS:
             raise CorruptCheckpointError(f"score metadata is malformed: {path}")
         integer_fields = (
             "index",
@@ -1189,7 +953,7 @@ class ResumableBM25Builder:
             "score_size",
         )
         if (
-            meta["schema_version"] != _SCHEMA_VERSION
+            meta["schema_version"] != SCHEMA_VERSION
             or any(
                 isinstance(meta[field], bool)
                 or not isinstance(meta[field], int)
@@ -1199,9 +963,9 @@ class ResumableBM25Builder:
             or meta["index"] != index
             or meta["documents"] <= 0
             or meta["score_size"] <= 0
-            or not _is_sha256(meta["part_sha256"])
-            or not _is_sha256(meta["statistics_signature"])
-            or not _is_sha256(meta["score_sha256"])
+            or not is_sha256(meta["part_sha256"])
+            or not is_sha256(meta["statistics_signature"])
+            or not is_sha256(meta["score_sha256"])
         ):
             raise CorruptCheckpointError(f"score metadata is malformed: {path}")
         return meta
@@ -1213,7 +977,7 @@ class ResumableBM25Builder:
         part_meta: dict[str, Any],
         documents: list[list[str]],
         document_start: int,
-        statistics: _GlobalStatistics,
+        statistics: GlobalStatistics,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         meta = self._read_score_meta(index)
         expected_rows, expected_columns = self._expected_rows_columns(
@@ -1223,11 +987,11 @@ class ResumableBM25Builder:
         )
         expected_entries = int(expected_rows.size)
         maximum_size = max(
-            _SCORE_CONTAINER_OVERHEAD,
+            SCORE_CONTAINER_OVERHEAD,
             expected_entries
             * (self.dtype.itemsize + 2 * self.int_dtype.itemsize)
             * 2
-            + _SCORE_CONTAINER_OVERHEAD,
+            + SCORE_CONTAINER_OVERHEAD,
         )
         if (
             meta["documents"] != len(documents)
@@ -1239,9 +1003,9 @@ class ResumableBM25Builder:
             raise CorruptCheckpointError(
                 f"score metadata does not match batch {index}"
             )
-        path = self._score_path(index)
-        content = _read_bounded(path, meta["score_size"], maximum_size)
-        if _sha256_bytes(content) != meta["score_sha256"]:
+        path = self._layout.score_path(index)
+        content = read_bounded(path, meta["score_size"], maximum_size)
+        if sha256_bytes(content) != meta["score_sha256"]:
             raise CorruptCheckpointError(f"score checksum mismatch: {path}")
         try:
             with np.load(io.BytesIO(content), allow_pickle=False) as archive:
@@ -1281,7 +1045,7 @@ class ResumableBM25Builder:
     def _checkpoint_scores(
         self,
         manifest: dict[str, Any],
-        statistics: _GlobalStatistics,
+        statistics: GlobalStatistics,
     ) -> tuple[int, int]:
         idf, nonoccurrence = self._scoring_context(statistics)
         reused = 0
@@ -1324,7 +1088,7 @@ class ResumableBM25Builder:
                 "score checkpoints do not cover the complete corpus"
             )
         score_meta_count = self._indexed_metadata_count(
-            self._scores_dir, ".meta.json"
+            self._layout.scores_dir, ".meta.json"
         )
         if score_meta_count != manifest["batch_count"]:
             raise CorruptCheckpointError(
@@ -1346,16 +1110,16 @@ class ResumableBM25Builder:
     def _merge_scores(
         self,
         manifest: dict[str, Any],
-        statistics: _GlobalStatistics,
+        statistics: GlobalStatistics,
     ) -> np.ndarray | None:
         data = self._prepare_memmap(
-            _DATA_NAME, self.dtype, (statistics.nonzero_scores,)
+            DATA_NAME, self.dtype, (statistics.nonzero_scores,)
         )
         indices = self._prepare_memmap(
-            _INDICES_NAME, self.int_dtype, (statistics.nonzero_scores,)
+            INDICES_NAME, self.int_dtype, (statistics.nonzero_scores,)
         )
         indptr = self._prepare_memmap(
-            _INDPTR_NAME, np.dtype("int64"), (len(statistics.vocab) + 1,)
+            INDPTR_NAME, np.dtype("int64"), (len(statistics.vocab) + 1,)
         )
         indptr[0] = 0
         np.cumsum(statistics.document_frequencies, out=indptr[1:])
@@ -1394,7 +1158,7 @@ class ResumableBM25Builder:
         for array in (data, indices, indptr):
             array.flush()
         del data, indices, indptr
-        for filename in (_DATA_NAME, _INDICES_NAME, _INDPTR_NAME):
+        for filename in (DATA_NAME, INDICES_NAME, INDPTR_NAME):
             os.replace(
                 self.generation_dir / f".{filename}.building",
                 self.generation_dir / filename,
@@ -1405,12 +1169,12 @@ class ResumableBM25Builder:
     def _save_metadata(
         self,
         manifest: dict[str, Any],
-        statistics: _GlobalStatistics,
+        statistics: GlobalStatistics,
         nonoccurrence: np.ndarray | None,
     ) -> None:
-        _atomic_vocab(self.generation_dir / _VOCAB_NAME, statistics.vocab)
-        _atomic_json(
-            self.generation_dir / _PARAMS_NAME,
+        atomic_vocab(self.generation_dir / VOCAB_NAME, statistics.vocab)
+        atomic_json(
+            self.generation_dir / PARAMS_NAME,
             {
                 "k1": self.k1,
                 "b": self.b,
@@ -1420,20 +1184,20 @@ class ResumableBM25Builder:
                 "dtype": self.dtype.name,
                 "int_dtype": self.int_dtype.name,
                 "num_docs": statistics.num_documents,
-                "version": _EXPECTED_BM25S_VERSION,
+                "version": EXPECTED_BM25S_VERSION,
                 "backend": "numpy",
             },
         )
-        chunks_path = self.generation_dir / _CHUNKS_NAME
-        offsets_path = self.generation_dir / _CHUNK_OFFSETS_NAME
+        chunks_path = self.generation_dir / CHUNKS_NAME
+        offsets_path = self.generation_dir / CHUNK_OFFSETS_NAME
         descriptor, temporary_name = tempfile.mkstemp(
             dir=self.generation_dir,
-            prefix=f".{_CHUNKS_NAME}.",
+            prefix=f".{CHUNKS_NAME}.",
             suffix=".tmp",
         )
         temporary = Path(temporary_name)
         temporary_offsets = (
-            self.generation_dir / f".{_CHUNK_OFFSETS_NAME}.building"
+            self.generation_dir / f".{CHUNK_OFFSETS_NAME}.building"
         )
         offsets: np.memmap | None = None
         try:
@@ -1448,7 +1212,7 @@ class ResumableBM25Builder:
                 document_count = 0
                 for _, _, chunks, _ in self._iter_parts(manifest):
                     for chunk in chunks:
-                        line = _canonical_json(chunk) + b"\n"
+                        line = canonical_json(chunk) + b"\n"
                         output.write(line)
                         document_count += 1
                         offsets[document_count] = output.tell()
@@ -1483,10 +1247,10 @@ class ResumableBM25Builder:
             temporary.unlink(missing_ok=True)
             temporary_offsets.unlink(missing_ok=True)
         if nonoccurrence is None:
-            (self.generation_dir / _NONOCCURRENCE_NAME).unlink(missing_ok=True)
+            (self.generation_dir / NONOCCURRENCE_NAME).unlink(missing_ok=True)
         else:
             temporary_array = (
-                self.generation_dir / f".{_NONOCCURRENCE_NAME}.building"
+                self.generation_dir / f".{NONOCCURRENCE_NAME}.building"
             )
             output = np.lib.format.open_memmap(
                 temporary_array,
@@ -1499,209 +1263,19 @@ class ResumableBM25Builder:
             del output
             os.replace(
                 temporary_array,
-                self.generation_dir / _NONOCCURRENCE_NAME,
+                self.generation_dir / NONOCCURRENCE_NAME,
             )
 
-    def _output_names(self) -> list[str]:
-        names = [
-            _DATA_NAME,
-            _INDICES_NAME,
-            _INDPTR_NAME,
-            _VOCAB_NAME,
-            _PARAMS_NAME,
-            _CHUNKS_NAME,
-            _CHUNK_OFFSETS_NAME,
-        ]
-        if self.method in ("bm25l", "bm25+"):
-            names.append(_NONOCCURRENCE_NAME)
-        return names
 
     def _file_records(self) -> dict[str, dict[str, Any]]:
         return {
             name: {
-                "sha256": _sha256_file(self.generation_dir / name),
+                "sha256": sha256_file(self.generation_dir / name),
                 "size": (self.generation_dir / name).stat().st_size,
             }
-            for name in self._output_names()
+            for name in output_names(self._parameters)
         }
 
-    def _validate_completed(
-        self,
-        manifest: dict[str, Any],
-        statistics: _GlobalStatistics,
-        *,
-        verify_checksums: bool = True,
-    ) -> None:
-        files = manifest["files"]
-        expected_names = set(self._output_names())
-        if not isinstance(files, dict) or set(files) != expected_names:
-            raise CorruptCheckpointError(
-                "completed manifest has an invalid final file set"
-            )
-        for filename, record in files.items():
-            path = self.generation_dir / filename
-            if (
-                not isinstance(record, dict)
-                or set(record) != _FILE_RECORD_KEYS
-                or not _is_sha256(record["sha256"])
-                or isinstance(record["size"], bool)
-                or not isinstance(record["size"], int)
-                or record["size"] <= 0
-            ):
-                raise CorruptCheckpointError(
-                    f"completed file metadata is invalid: {path}"
-                )
-            try:
-                if (
-                    path.is_symlink()
-                    or not path.is_file()
-                    or path.stat().st_size != record["size"]
-                    or (
-                        verify_checksums
-                        and _sha256_file(path) != record["sha256"]
-                    )
-                ):
-                    raise CorruptCheckpointError(
-                        f"completed generation file is corrupt: {path}"
-                    )
-            except OSError as exc:
-                raise CorruptCheckpointError(
-                    f"completed generation file is unreadable: {path}"
-                ) from exc
-        try:
-            data = np.load(
-                self.generation_dir / _DATA_NAME,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
-            indices = np.load(
-                self.generation_dir / _INDICES_NAME,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
-            indptr = np.load(
-                self.generation_dir / _INDPTR_NAME,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
-            chunk_offsets = np.load(
-                self.generation_dir / _CHUNK_OFFSETS_NAME,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
-        except (OSError, ValueError) as exc:
-            raise CorruptCheckpointError(
-                "completed index arrays are unreadable"
-            ) from exc
-        if (
-            data.dtype != self.dtype
-            or indices.dtype != self.int_dtype
-            or indptr.dtype != np.dtype("int64")
-            or data.shape != (statistics.nonzero_scores,)
-            or indices.shape != (statistics.nonzero_scores,)
-            or indptr.shape != (len(statistics.vocab) + 1,)
-            or int(indptr[0]) != 0
-            or int(indptr[-1]) != statistics.nonzero_scores
-        ):
-            raise CorruptCheckpointError("completed CSC arrays are invalid")
-        for start in range(0, data.size, _VALIDATION_BLOCK_ITEMS):
-            end = min(start + _VALIDATION_BLOCK_ITEMS, data.size)
-            if (
-                not np.all(np.isfinite(data[start:end]))
-                or np.any(indices[start:end] < 0)
-                or np.any(indices[start:end] >= statistics.num_documents)
-            ):
-                raise CorruptCheckpointError(
-                    "completed CSC arrays are invalid"
-                )
-        previous = int(indptr[0])
-        for start in range(1, indptr.size, _VALIDATION_BLOCK_ITEMS):
-            end = min(start + _VALIDATION_BLOCK_ITEMS, indptr.size)
-            block = indptr[start:end]
-            if (
-                block.size
-                and (
-                    int(block[0]) < previous
-                    or np.any(block[1:] < block[:-1])
-                )
-            ):
-                raise CorruptCheckpointError(
-                    "completed CSC arrays are invalid"
-                )
-            if block.size:
-                previous = int(block[-1])
-        chunks_path = self.generation_dir / _CHUNKS_NAME
-        chunks_size = chunks_path.stat().st_size
-        if (
-            chunk_offsets.dtype != np.dtype("uint64")
-            or chunk_offsets.ndim != 1
-            or chunk_offsets.shape != (statistics.num_documents + 1,)
-            or int(chunk_offsets[0]) != 0
-            or int(chunk_offsets[-1]) != chunks_size
-        ):
-            raise CorruptCheckpointError(
-                "completed chunk metadata offsets are invalid"
-            )
-        previous = int(chunk_offsets[0])
-        for start in range(1, chunk_offsets.size, _VALIDATION_BLOCK_ITEMS):
-            end = min(
-                start + _VALIDATION_BLOCK_ITEMS, chunk_offsets.size
-            )
-            block = chunk_offsets[start:end]
-            if (
-                block.size
-                and (
-                    int(block[0]) <= previous
-                    or np.any(block[1:] <= block[:-1])
-                )
-            ):
-                raise CorruptCheckpointError(
-                    "completed chunk metadata offsets are invalid"
-                )
-            if block.size:
-                previous = int(block[-1])
-        boundary_index = 1
-        absolute_position = 0
-        try:
-            with chunks_path.open("rb") as chunks_file:
-                while content := chunks_file.read(1024 * 1024):
-                    search_start = 0
-                    while True:
-                        newline_index = content.find(b"\n", search_start)
-                        if newline_index < 0:
-                            break
-                        boundary = absolute_position + newline_index + 1
-                        if (
-                            boundary_index >= chunk_offsets.size
-                            or int(chunk_offsets[boundary_index]) != boundary
-                        ):
-                            raise CorruptCheckpointError(
-                                "completed chunk metadata offsets are invalid"
-                            )
-                        boundary_index += 1
-                        search_start = newline_index + 1
-                    absolute_position += len(content)
-        except OSError as exc:
-            raise CorruptCheckpointError(
-                "completed chunk metadata is unreadable"
-            ) from exc
-        if (
-            boundary_index != statistics.num_documents + 1
-            or absolute_position != chunks_size
-        ):
-            raise CorruptCheckpointError(
-                "completed chunk metadata count is invalid"
-            )
-        try:
-            bm25s.BM25.load(
-                str(self.generation_dir),
-                load_corpus=False,
-                mmap=True,
-            )
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise CorruptCheckpointError(
-                "completed generation cannot be loaded by bm25s"
-            ) from exc
 
     def _result(
         self,
@@ -1712,7 +1286,7 @@ class ResumableBM25Builder:
         rebuilt: int,
         reused_scores: int,
         rebuilt_scores: int,
-        statistics: _GlobalStatistics,
+        statistics: GlobalStatistics,
     ) -> BuildResult:
         return BuildResult(
             generation_dir=self.generation_dir,
@@ -1746,10 +1320,10 @@ class ResumableBM25Builder:
         )
         if manifest["phase"] == "complete":
             try:
-                self._validate_completed(manifest, statistics)
+                validate_completed(self._layout, self._parameters, manifest, statistics)
             except CorruptCheckpointError:
                 manifest.update({"phase": "scoring", "files": None})
-                _atomic_json(self._manifest_path, manifest)
+                atomic_json(self._layout.manifest_path, manifest)
                 self._validate_disk_capacity(manifest, statistics)
             else:
                 return self._result(
@@ -1770,8 +1344,10 @@ class ResumableBM25Builder:
                 "files": self._file_records(),
             }
         )
-        _atomic_json(self._manifest_path, manifest)
-        self._validate_completed(
+        atomic_json(self._layout.manifest_path, manifest)
+        validate_completed(
+            self._layout,
+            self._parameters,
             manifest,
             statistics,
             verify_checksums=False,
