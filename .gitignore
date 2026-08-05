@@ -34,3 +34,6 @@ results/
 archives/
 artifacts/
 runs/
+
+# ChunkStore のローカルbyte-offset索引（コーパスから再生成可能）
+*.offsets.json

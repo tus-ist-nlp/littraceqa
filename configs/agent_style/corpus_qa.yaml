@@ -1,0 +1,19 @@
+# PR #7 の paper 候補を MinerU 全文チャンクへ展開して回答する本番用 reader。
+# src/littraceqa/azure の RAG 実装には依存しない。LLM は OpenAI 互換 API なので、
+# OpenAI のほか vLLM / ローカル Qwen-VL も OPENAI_BASE_URL で差し替えられる。
+name: corpus_qa
+llm:
+  name: openai_compatible
+  params:
+    json_mode: true
+params:
+  max_candidate_papers: 50
+  detailed_candidate_papers: 20
+  brief_chunks_per_paper: 3
+  answer_chunks_per_paper: 8
+  max_selected_papers: 10
+  snippet_chars: 1600
+  tail_snippet_chars: 600
+  max_context_chars: 120000
+  max_evidence: 24
+  max_images: 6

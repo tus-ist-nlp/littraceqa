@@ -73,10 +73,15 @@ configs/
 │   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) +
 │         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う（デフォルト、構築済み）
 └── agent_style/
-    └── reading.yaml          : 分解→読解→不足分の再検索を繰り返す唯一の本命（デフォルト）
+    ├── reading.yaml          : 検索器と一体の旧reader
+    ├── corpus_qa.yaml        : 候補一括選定型の旧prototype
+    └── aoai_pairwise_reader.yaml : PR候補を1本ずつAOAI判定→根拠回答（読解本命）
 ```
 
-推奨デフォルトの組み合わせ: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml` + `agent_style/reading.yaml`
+読解本命は `scripts/run_aoai_pairwise_reader.py` と
+`agent_style/aoai_pairwise_reader.yaml` を使う。PR #7の固定候補を読むだけで、
+この経路はDI・検索・rerank・再検索を行わない。
+検索比較だけを行う場合は従来どおり `scripts/run_search.py` を使う。
 
 ## 新しい手法を追加するとき
 

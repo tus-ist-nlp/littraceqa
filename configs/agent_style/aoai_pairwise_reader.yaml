@@ -1,0 +1,21 @@
+# PR #7 の固定候補を1論文ずつAOAIで読解判定し、採択根拠だけで回答する。
+# 検索、rerank、DI、再検索は行わない。認証値はリポジトリ直下の .env から読む。
+name: aoai_pairwise_reader
+llm:
+  name: azure_openai
+  params:
+    json_mode: true
+    max_completion_tokens: 12000
+    timeout: 180.0
+    max_retries: 3
+params:
+  # 通常の論文（中央値約114KB）は1回で判定し、長い論文だけ分割する。
+  max_batch_chars: 160000
+  batch_overlap_chars: 1000
+  max_images_per_batch: 6
+  answer_context_chars: 220000
+  # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
+  answer_neighbor_chunks: 0
+  max_answer_images: 12
+  # 最大候補50本すべてが採択されても、各論文の根拠を最低1件は残せる値。
+  max_evidence: 64

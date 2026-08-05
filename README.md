@@ -16,8 +16,8 @@ uv sync
 The base install covers the dataset scripts (`scripts/`) and the
 provider-agnostic tools (`littraceqa.extract_pdf_archives`,
 `littraceqa.fix_chunk_locators`, `littraceqa.validate_submission`,
-`littraceqa.compare_runs`). The two RAG pipelines each need their own
-optional extra, and **the two are mutually exclusive in one environment**
+`littraceqa.compare_runs`). The heavier legacy pipelines have their own
+optional extras, and **`di_pipeline` and `azure` are mutually exclusive**
 (`di_pipeline` pins `pypdfium2==4.30.0` transitively via `marker-pdf`, which
 conflicts with `azure`'s `pypdfium2>=5.11.0`; `uv` will refuse to resolve
 both extras together):
@@ -25,6 +25,7 @@ both extras together):
 ```bash
 uv sync --extra azure         # Azure RAG pipeline (baseline)
 uv sync --extra di_pipeline   # DI-based hybrid retrieval pipeline
+uv sync --extra corpus_qa     # MinerU + pairwise AOAI reader (current work)
 ```
 
 ## DI-based hybrid retrieval pipeline
@@ -44,12 +45,162 @@ uv run python scripts/run_search.py \
   --output predictions.jsonl
 ```
 
-## Azure RAG pipeline (baseline)
+## Pairwise AOAI reader (primary reading path)
+
+PR #7 contains a query-specific ranked list of papers, not chunk text. Each
+candidate has only `rank`, `paper_id`, `title`, `venue`, and `year`. Retrieval
+and reranking are therefore already finished. The primary reader does not run
+DI, search, reranking, or re-search:
+
+The sanitized validation sidecar contains every candidate supplied by PR #7:
+3--50 papers per query (2,227 total; 30 of 55 queries have all 50). The reader
+judges every supplied candidate rather than assuming that every query has 50.
+
+1. hydrate one candidate paper from the student-built MinerU corpus;
+2. send one `query x candidate paper` pair to Azure OpenAI and require exact
+   evidence chunk IDs;
+3. repeat for every ranked candidate (up to all 50);
+4. send only the accepted original evidence chunks to Azure OpenAI again to
+   construct the answer.
+
+Long papers are deterministically split inside step 2. API errors, invalid JSON,
+and invented IDs stop the run and are never silently treated as irrelevant.
+Every paper judgment is checkpointed separately.
+
+Use the small reading-only environment for this path (the generic `openai`
+client supplies Azure OpenAI support; Azure Search/DI SDKs are not installed):
+
+```bash
+uv sync --extra corpus_qa --group dev
+```
+
+PR #7 originally colocates `_gold` with the candidate ranking. Never pass that
+file directly to an agent. Create a physical gold-free sidecar first (the
+checked-in `data/validation_candidates.jsonl` was generated this way):
+
+```bash
+git show a020604:data/validation_with_candidates.jsonl \
+  | uv run python scripts/export_candidate_handoff.py \
+      --input - \
+      --output data/validation_candidates.jsonl
+```
+
+Configure Azure OpenAI in the repository-root `.env` (never commit real values):
+
+```bash
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+AZURE_OPENAI_API_KEY=<key>
+AZURE_OPENAI_API_VERSION=2025-04-01-preview
+AZURE_OPENAI_CHAT_DEPLOYMENT=<chat-deployment-name>
+```
+
+The candidate sidecar contains no question, gold, answer, evidence, task family,
+or primary evidence type. The reader projects the query onto exactly the four
+organizer-confirmed fields: `query_id`, `question`, `answer_types`, and
+`table_schema`. Never use PR #7's combined file directly as inference input.
+
+First run the gold-free corpus check. `--image-root` rebases the absolute image
+paths embedded by MinerU after copying the corpus to another machine:
+
+```bash
+uv run python scripts/preflight_corpus_qa.py \
+  --queries data/validation_inputs.jsonl \
+  --candidates data/validation_candidates.jsonl \
+  --paper-metadata data/paper_metadata.jsonl \
+  --chunks /path/to/mineru_chunks.jsonl \
+  --chunk-index runs/mineru_chunks.offsets.json \
+  --image-root /path/to/mineru/output
+```
+
+Run one complete validation question first. Do not reduce `--max-candidates`
+for a scored run: q_022 needs rank 44 and q_045 needs rank 37.
+
+```bash
+uv run python scripts/run_aoai_pairwise_reader.py \
+  --queries data/validation_inputs.jsonl \
+  --candidates data/validation_candidates.jsonl \
+  --paper-metadata data/paper_metadata.jsonl \
+  --chunks /path/to/mineru_chunks.jsonl \
+  --chunk-index runs/mineru_chunks.offsets.json \
+  --image-root /path/to/mineru/output \
+  --reader configs/agent_style/aoai_pairwise_reader.yaml \
+  --run-dir runs/aoai_validation \
+  --query-id q_001
+```
+
+Resume the same question after interruption by adding `--resume`. To inspect or
+re-run one pair without touching other checkpoints:
+
+```bash
+uv run python scripts/run_aoai_pairwise_reader.py <same arguments> \
+  --query-id q_001 --paper-id acl2025_00005 --stage judge --resume --force
+```
+
+After q_001 is satisfactory, omit `--query-id`, keep the same run directory,
+and add `--resume` to reuse its 50 pair judgments while completing all 55
+questions. The run directory contains:
+
+```text
+manifest.json
+preflight.json
+q_001/candidate_judgments.jsonl
+q_001/answer.json
+q_001/submission.json
+reading_traces.jsonl
+submission.jsonl
+```
+
+Run the gold-free submission gate before upload:
+
+```bash
+uv run python -m littraceqa.validate_submission \
+  --inputs data/validation_inputs.jsonl \
+  --predictions runs/aoai_validation/submission.jsonl \
+  --paper-metadata data/paper_metadata.jsonl \
+  --strict-official-shape
+```
+
+Only after inference is finished, load validation gold and generate one error
+report per question:
+
+```bash
+uv run python scripts/analyze_aoai_reading.py \
+  --gold data/validation.jsonl \
+  --candidates data/validation_candidates.jsonl \
+  --traces runs/aoai_validation/reading_traces.jsonl \
+  --output-dir runs/aoai_validation/error_analysis
+```
+
+This separates candidate misses, relevance false negatives/positives, evidence
+localization, table/figure/citation/equation reading, multi-paper integration,
+answer reasoning, serialization, and dataset inconsistencies. It also evaluates
+papers that own gold evidence separately from official `gold_papers`, which may
+contain multiple-choice distractor papers.
+
+The four-field contract omits multiple-choice option text. The reader extracts
+a meaning-level answer into the trace, but no system can derive an A-D mapping
+that was never supplied. The submission letter is therefore only a deterministic
+structural placeholder; the post-hoc validation report marks this separately as
+`multiple_choice_protocol_blocker`.
+
+The current
+[public Hugging Face format page](https://huggingface.co/datasets/LitTraceQA/LitTraceQA/blob/main/docs/format.md)
+still describes `benchmark` and `multiple_choice_options`. That page conflicts
+with the organizer's later direct clarification that held-out input contains
+only `query_id`, `question`, `answer_types`, and `table_schema`. This production
+path deliberately follows the direct clarification and physically discards
+every other input field.
+
+## Azure RAG pipeline (legacy baseline)
 
 The Azure-based baseline lives under `src/littraceqa/azure/` and is invoked
 with `uv run --extra azure python -m littraceqa.azure.<module>`. (It is a
 subpackage rather than a top-level `src/azure/` because a local package named
 `azure` would shadow the Azure SDK's `azure.*` namespace packages.)
+
+This baseline is retained only for historical reproducibility. It is not the
+submission path: parts of it depend on validation-only metadata that the
+organizer has confirmed will not be present in held-out test inputs.
 
 The pipeline is resumable and covers:
 

@@ -66,6 +66,9 @@ from littraceqa.di_pipeline.index.faiss_specter2 import Specter2FAISSIndex  # no
 from littraceqa.di_pipeline.index.siglip_image import SiglipImageIndex  # noqa: F401
 from littraceqa.di_pipeline.llm.azure_openai import AzureOpenAILLM  # noqa: F401
 from littraceqa.di_pipeline.llm.fake import FakeLLM  # noqa: F401
+from littraceqa.di_pipeline.llm.openai_compatible import (  # noqa: F401
+    OpenAICompatibleLLM,
+)
 from littraceqa.di_pipeline.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
 from littraceqa.di_pipeline.preprocess.marker_chunker import MarkerChunker  # noqa: F401
 from littraceqa.di_pipeline.preprocess.mineru_chunker import MinerUChunker  # noqa: F401

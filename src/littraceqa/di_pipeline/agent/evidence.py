@@ -21,9 +21,17 @@ def evidence_from_result(result: RetrievalResult) -> Evidence:
     locator = EvidenceLocator(
         page=metadata.get("page"),
         table_id=metadata.get("table_id"),
+        row=metadata.get("row"),
+        column=metadata.get("column"),
         figure_id=metadata.get("figure_id"),
+        region=metadata.get("region"),
         section=metadata.get("section"),
+        paragraph_id=metadata.get("paragraph_id"),
+        sentence_start=metadata.get("sentence_start"),
+        sentence_end=metadata.get("sentence_end"),
         equation_id=metadata.get("equation_id"),
+        citation_id=metadata.get("citation_id"),
+        cited_paper=metadata.get("cited_paper"),
     )
     return Evidence(
         paper_id=result.paper_id,
