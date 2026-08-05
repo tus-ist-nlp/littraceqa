@@ -5,20 +5,15 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from littraceqa.candidate_handoff import CandidateHandoff
 from littraceqa.chunk_store import ChunkStore
+from littraceqa.mineru_record import record_source_type, submission_evidence_eligible
+from littraceqa.submission import OFFICIAL_SOURCE_TYPES
 
-
-OFFICIAL_SOURCE_TYPES = {
-    "text_span",
-    "table",
-    "figure",
-    "citation_context",
-    "equation_algorithm",
-}
 _TABLE_RE = re.compile(r"\b(table|row|column)\b", re.IGNORECASE)
 _FIGURE_RE = re.compile(r"\b(figure|fig\.?|plot|chart|diagram)\b", re.IGNORECASE)
 _EQUATION_RE = re.compile(
@@ -72,7 +67,7 @@ def inspect_corpus(
         valid_types: set[str] = set()
         image_types: set[str] = set()
         for chunk in chunks:
-            source_type = _source_type(chunk)
+            source_type = record_source_type(chunk)
             chunk_types[source_type] += 1
             metadata = chunk.get("metadata") or {}
             page = metadata.get("page")
@@ -81,18 +76,15 @@ def inspect_corpus(
             )
             if source_type in OFFICIAL_SOURCE_TYPES and not page_valid:
                 invalid_pages[source_type] += 1
-            object_valid = True
             if source_type == "table" and not _nonempty_string(
                 metadata.get("table_id")
             ):
                 invalid_object_ids[source_type] += 1
-                object_valid = False
             if source_type == "figure" and not _nonempty_string(
                 metadata.get("figure_id")
             ):
                 invalid_object_ids[source_type] += 1
-                object_valid = False
-            if source_type in OFFICIAL_SOURCE_TYPES and page_valid and object_valid:
+            if submission_evidence_eligible(chunk):
                 valid_types.add(source_type)
 
             if source_type in {"table", "figure"}:
@@ -248,21 +240,6 @@ def inspect_corpus(
     return report, errors
 
 
-def _source_type(chunk: dict[str, Any]) -> str:
-    chunk_type = str(chunk.get("chunk_type") or "")
-    if chunk_type == "title_abstract":
-        chunk_type = "text_span"
-    metadata = chunk.get("metadata") or {}
-    section = str(metadata.get("section") or "").strip().lower()
-    if chunk_type == "text_span" and (
-        metadata.get("citation_id")
-        or section in {"references", "bibliography"}
-        or section.startswith("references ")
-    ):
-        return "citation_context"
-    return chunk_type
-
-
 def _required_modalities(handoff: CandidateHandoff) -> set[str]:
     query = handoff.query
     text = query.question
@@ -296,8 +273,16 @@ def _sha256_image(path: Path) -> str:
 
 def _supported_image_header(header: bytes) -> bool:
     return bool(
-        header.startswith(b"\xff\xd8\xff")
-        or header.startswith(b"\x89PNG\r\n\x1a\n")
-        or header.startswith((b"GIF87a", b"GIF89a", b"BM", b"II*\x00", b"MM\x00*"))
+        header.startswith(
+            (
+                b"\xff\xd8\xff",
+                b"\x89PNG\r\n\x1a\n",
+                b"GIF87a",
+                b"GIF89a",
+                b"BM",
+                b"II*\x00",
+                b"MM\x00*",
+            )
+        )
         or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
     )

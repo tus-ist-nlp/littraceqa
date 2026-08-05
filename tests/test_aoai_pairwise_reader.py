@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 import pytest
 
 from littraceqa.aoai_pairwise_reader import (
     PairwiseAOAIReader,
     ReadingResponseError,
+    merge_batch_judgments,
 )
 from littraceqa.candidate_handoff import CandidatePaper
 from littraceqa.chunk_store import ChunkStore
@@ -246,12 +248,8 @@ def test_development_metadata_is_rejected_before_any_llm_call(tmp_path):
     assert llm.calls == []
 
 
-def test_irrelevant_batch_evidence_is_not_merged_into_relevant_paper(tmp_path):
-    corpus = tmp_path / "chunks.jsonl"
-    _write_corpus(corpus)
-    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
-
-    merged = reader._merge_batch_judgments(
+def test_irrelevant_batch_evidence_is_not_merged_into_relevant_paper():
+    merged = merge_batch_judgments(
         [
             {
                 "label": "partial_answer",
@@ -1005,7 +1003,7 @@ def test_candidate_cache_key_changes_when_image_bytes_change(tmp_path):
 def test_image_policy_rejection_falls_back_to_text_and_is_recorded(tmp_path):
     class ImagePolicyError(Exception):
         status_code = 400
-        body = {"code": "content_policy_violation"}
+        body: ClassVar[dict[str, str]] = {"code": "content_policy_violation"}
 
     class PolicyRejectingLLM:
         def __init__(self):

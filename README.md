@@ -25,7 +25,7 @@ both extras together):
 ```bash
 uv sync --extra azure         # Azure RAG pipeline (baseline)
 uv sync --extra di_pipeline   # DI-based hybrid retrieval pipeline
-uv sync --extra corpus_qa     # MinerU + pairwise AOAI reader (current work)
+uv sync --extra pairwise_reader # MinerU + pairwise AOAI reader (current work)
 ```
 
 ## DI-based hybrid retrieval pipeline
@@ -71,7 +71,7 @@ Use the small reading-only environment for this path (the generic `openai`
 client supplies Azure OpenAI support; Azure Search/DI SDKs are not installed):
 
 ```bash
-uv sync --extra corpus_qa --group dev
+uv sync --extra pairwise_reader --group dev
 ```
 
 PR #7 originally colocates `_gold` with the candidate ranking. Never pass that
@@ -103,7 +103,7 @@ First run the gold-free corpus check. `--image-root` rebases the absolute image
 paths embedded by MinerU after copying the corpus to another machine:
 
 ```bash
-uv run python scripts/preflight_corpus_qa.py \
+uv run python scripts/preflight_candidate_corpus.py \
   --queries data/validation_inputs.jsonl \
   --candidates data/validation_candidates.jsonl \
   --paper-metadata data/paper_metadata.jsonl \
@@ -127,6 +127,10 @@ uv run python scripts/run_aoai_pairwise_reader.py \
   --run-dir runs/aoai_validation \
   --query-id q_001
 ```
+
+To screen all papers from text first and attach images only when a paper is
+accepted, replace the reader config with
+`configs/agent_style/aoai_pairwise_reader_hybrid.yaml`.
 
 Resume the same question after interruption by adding `--resume`. To inspect or
 re-run one pair without touching other checkpoints:

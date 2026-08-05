@@ -22,9 +22,14 @@ import json
 import math
 import re
 from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
+from littraceqa.reading_error_annotations import (
+    ANSWER_REQUIRED_PAPER_IDS,
+    KNOWN_DATASET_ISSUES,
+)
 
 ERROR_CATEGORIES = (
     "candidate_missing",
@@ -38,49 +43,6 @@ ERROR_CATEGORIES = (
     "multiple_choice_protocol_blocker",
     "dataset_inconsistency",
 )
-
-KNOWN_DATASET_ISSUES: dict[str, tuple[str, ...]] = {
-    "q_001": (
-        "The registered gold evidence contains only 15.66, while deriving the "
-        "gold answer 14.70 also requires the ICAE value.",
-    ),
-    "q_054": (
-        "The question asks for AP^kit_3D, while the gold table schema and "
-        "evidence target AP^nus_3D.",
-    ),
-    "q_056": (
-        "The question says AP-BPTT, while the gold answer row says AT-BPTT.",
-    ),
-}
-
-# q_031--q_051 are multiple-choice comparison questions. Their annotations can
-# include evidence for distractor options, even though those papers are not
-# needed to derive the correct meaning-level answer. These validation-only
-# overrides were established by manually reading each question/answer pair.
-# They are used only after inference and can never enter an AOAI prompt.
-CURATED_ANSWER_REQUIRED_PAPER_IDS: dict[str, tuple[str, ...]] = {
-    "q_031": ("iclr2025_03463",),
-    "q_032": ("iclr2025_03463",),
-    "q_033": ("iclr2025_00615",),
-    "q_034": ("icml2025_01371",),
-    "q_035": ("iclr2025_03031",),
-    "q_036": ("iclr2025_03463",),
-    "q_037": ("iclr2025_00706",),
-    "q_038": ("iclr2025_00911",),
-    "q_039": ("icml2025_01371",),
-    "q_040": ("icml2025_01371",),
-    "q_041": ("iclr2025_03031",),
-    "q_042": ("iclr2025_03031", "icml2025_01371"),
-    "q_043": ("cvpr2025_00533", "cvpr2025_01683"),
-    "q_044": ("iclr2025_00978", "icml2025_00188"),
-    "q_045": ("iclr2025_02715", "acl2025_01863"),
-    "q_046": ("cvpr2025_00533",),
-    "q_047": ("iclr2025_00978",),
-    "q_048": ("acl2025_01863",),
-    "q_049": ("neurips2025_05262",),
-    "q_050": ("icml2025_00188",),
-    "q_051": ("neurips2025_03461",),
-}
 
 _NON_TEXT_MODALITIES = frozenset(
     {"table", "figure", "citation_context", "equation_algorithm"}
@@ -103,7 +65,7 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
             if not isinstance(record, dict):
-                raise ValueError(f"{path}:{line_number} must be a JSON object")
+                raise TypeError(f"{path}:{line_number} must be a JSON object")
             records.append(record)
     return records
 
@@ -114,6 +76,7 @@ def analyze_reading_run(
     trace_records: Sequence[dict[str, Any]],
     *,
     known_issues: Mapping[str, Sequence[str]] | None = None,
+    required_paper_overrides: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Analyze a completed reader run and return deterministic JSON data.
 
@@ -129,6 +92,14 @@ def analyze_reading_run(
     if known_issues:
         for query_id, issues in known_issues.items():
             merged_issues[str(query_id)] = tuple(str(issue) for issue in issues)
+    merged_required_papers: dict[str, tuple[str, ...]] = dict(
+        ANSWER_REQUIRED_PAPER_IDS
+    )
+    if required_paper_overrides:
+        for query_id, paper_ids in required_paper_overrides.items():
+            merged_required_papers[str(query_id)] = tuple(
+                str(paper_id) for paper_id in paper_ids
+            )
 
     query_details: list[dict[str, Any]] = []
     for query_id in sorted(gold_by_id):
@@ -138,6 +109,7 @@ def analyze_reading_run(
                 candidates_by_id.get(query_id),
                 traces_by_id.get(query_id),
                 known_issues=merged_issues,
+                required_paper_overrides=merged_required_papers,
             )
         )
 
@@ -224,6 +196,7 @@ def analyze_query(
     trace: dict[str, Any] | None,
     *,
     known_issues: Mapping[str, Sequence[str]] | None = None,
+    required_paper_overrides: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Diagnose one query, retaining enough evidence for manual review."""
 
@@ -239,9 +212,12 @@ def analyze_query(
     official_gold_ids = _paper_ids(gold.get("gold_papers"))
     gold_evidence = _evidence_items(gold)
     evidence_gold_ids = _paper_ids(gold_evidence)
-    curated_required_ids = set(
-        CURATED_ANSWER_REQUIRED_PAPER_IDS.get(query_id, ())
+    overrides = (
+        ANSWER_REQUIRED_PAPER_IDS
+        if required_paper_overrides is None
+        else required_paper_overrides
     )
+    curated_required_ids = set(overrides.get(query_id, ()))
     required_gold_ids = curated_required_ids or evidence_gold_ids or official_gold_ids
 
     judgments = trace.get("relevance_judgments")
@@ -804,12 +780,18 @@ def _answer_format_issues(
     for answer_type in extra:
         issues.append(f"unexpected answer type: {answer_type}")
 
-    if "freeform" in requested and "freeform" in predicted:
-        if not _nested_text(predicted.get("freeform")):
-            issues.append("freeform.text is empty or missing")
-    if "multiple_choice" in requested and "multiple_choice" in predicted:
-        if not _mc_letter(predicted.get("multiple_choice")):
-            issues.append("multiple_choice answer is not a letter A-D")
+    if (
+        "freeform" in requested
+        and "freeform" in predicted
+        and not _nested_text(predicted.get("freeform"))
+    ):
+        issues.append("freeform.text is empty or missing")
+    if (
+        "multiple_choice" in requested
+        and "multiple_choice" in predicted
+        and not _mc_letter(predicted.get("multiple_choice"))
+    ):
+        issues.append("multiple_choice answer is not a letter A-D")
     if "table" in requested and "table" in predicted:
         table = predicted.get("table")
         rows = table.get("rows") if isinstance(table, dict) else None
@@ -926,6 +908,15 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _ap_target_tokens(text: str) -> set[str]:
+    return {
+        token.lower()
+        for match in re.findall(r"AP\s*\^\s*(?:\{([^}]+)\}|([A-Za-z]+))", text)
+        for token in match
+        if token
+    }
+
+
 def _generic_dataset_issues(gold: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     primary = _normalize_id(gold.get("primary_evidence_type"))
@@ -940,12 +931,7 @@ def _generic_dataset_issues(gold: dict[str, Any]) -> list[str]:
             f"source types {sorted(evidence_modalities)}."
         )
     question = str(gold.get("question") or "")
-    target_tokens = set(
-        token.lower()
-        for token in re.findall(r"AP\s*\^\s*(?:\{([^}]+)\}|([A-Za-z]+))", question)
-        for token in token
-        if token
-    )
+    target_tokens = _ap_target_tokens(question)
     if not target_tokens:
         return issues
     answer = gold.get("answer") if isinstance(gold.get("answer"), dict) else {}
@@ -957,12 +943,7 @@ def _generic_dataset_issues(gold: dict[str, Any]) -> list[str]:
         },
         ensure_ascii=False,
     )
-    answer_tokens = set(
-        token.lower()
-        for token in re.findall(r"AP\s*\^\s*(?:\{([^}]+)\}|([A-Za-z]+))", schema_text)
-        for token in token
-        if token
-    )
+    answer_tokens = _ap_target_tokens(schema_text)
     if answer_tokens and target_tokens.isdisjoint(answer_tokens):
         issues.append(
             "Question AP target token(s) "

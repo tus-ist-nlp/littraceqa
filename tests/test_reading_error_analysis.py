@@ -152,6 +152,24 @@ def test_semantic_mc_answer_exposes_protocol_blocker_without_oracle_inference():
     assert "answer_extraction_or_reasoning_error" not in detail["error_categories"]
 
 
+def test_validation_paper_overrides_are_injectable():
+    gold = [_freeform_gold("q_custom", "gold_annotation_paper")]
+    candidates = [_candidate("q_custom", "answer_required_paper")]
+    traces = [{"query_id": "q_custom", "relevance_judgments": []}]
+
+    detail = analyze_reading_run(
+        gold,
+        candidates,
+        traces,
+        required_paper_overrides={"q_custom": ["answer_required_paper"]},
+    )["queries"][0]
+
+    assert detail["candidate_analysis"]["required_gold_paper_ids"] == [
+        "answer_required_paper"
+    ]
+    assert detail["candidate_analysis"]["missing_required_gold_paper_ids"] == []
+
+
 def test_multi_paper_answer_failure_is_classified_after_correct_evidence():
     evidence = [
         {

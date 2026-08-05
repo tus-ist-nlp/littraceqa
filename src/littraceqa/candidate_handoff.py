@@ -10,19 +10,13 @@ small typed objects before any prompt is built.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from littraceqa.di_pipeline.contracts import Query
 
-
-PRODUCTION_INPUT_FIELDS = (
-    "query_id",
-    "question",
-    "answer_types",
-    "table_schema",
-)
 OFFICIAL_ANSWER_TYPES = frozenset({"freeform", "multiple_choice", "table"})
 
 FORBIDDEN_CANDIDATE_FIELDS = frozenset(
@@ -98,7 +92,7 @@ def require_production_query(query: Query) -> None:
     present = sorted(name for name, value in forbidden.items() if value is not None)
     if present:
         raise ValueError(
-            "corpus QA accepts only the four official input fields; "
+            "pairwise reader accepts only the four official input fields; "
             f"forbidden values are present: {', '.join(present)}"
         )
 
@@ -121,7 +115,7 @@ def candidate_papers_from_record(record: dict[str, Any]) -> tuple[CandidatePaper
 
     raw_papers = record.get("candidate_papers")
     if not isinstance(raw_papers, list):
-        raise ValueError(
+        raise TypeError(
             f"query {record.get('query_id')!r} has no candidate_papers list"
         )
 
@@ -147,7 +141,7 @@ def candidate_papers_from_record(record: dict[str, Any]) -> tuple[CandidatePaper
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid candidate year for {paper_id!r}") from exc
         else:
-            raise ValueError(
+            raise TypeError(
                 f"candidate item at position {position} must be a paper_id or object"
             )
         if not paper_id:
@@ -187,7 +181,7 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"invalid JSON at {path}:{line_number}") from exc
             if not isinstance(record, dict):
-                raise ValueError(f"record at {path}:{line_number} is not an object")
+                raise TypeError(f"record at {path}:{line_number} is not an object")
             records.append(record)
     return records
 
@@ -200,8 +194,9 @@ def load_candidate_handoffs(
     """Join official inputs with retrieval output by ``query_id``.
 
     ``queries_path`` remains authoritative for the four official fields.
-    ``candidates_path`` contributes only ``query_id`` and ``candidate_papers``;
-    its question, ``_gold`` and metadata are deliberately ignored.
+    ``candidates_path`` must be a separate sidecar containing only ``query_id``,
+    ``candidate_papers`` and optional ``_meta``. Oracle, development and copied
+    query fields are rejected rather than silently ignored.
     """
 
     query_records = read_jsonl(queries_path)

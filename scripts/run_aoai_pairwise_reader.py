@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run the reading-only, pairwise Azure OpenAI workflow.
 
 Each candidate paper receives its own durable judgment before the answer stage
@@ -12,9 +11,8 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import yaml
 from dotenv import load_dotenv
@@ -22,40 +20,48 @@ from dotenv import load_dotenv
 from littraceqa.aoai_pairwise_reader import PairwiseAOAIReader
 from littraceqa.candidate_handoff import (
     CandidateHandoff,
-    CandidatePaper,
     load_candidate_handoffs,
     read_jsonl,
 )
 from littraceqa.chunk_store import ChunkStore
 from littraceqa.corpus_preflight import inspect_corpus
-from littraceqa.di_pipeline.contracts import (
-    Answer,
-    Evidence,
-    EvidenceLocator,
-    Prediction,
-    Query,
-)
 from littraceqa.di_pipeline.llm.azure_openai import AzureOpenAILLM
 from littraceqa.di_pipeline.llm.fake import FakeLLM
-from littraceqa.submission import TOP_LEVEL_KEYS, prediction_to_submission
-
+from littraceqa.pairwise_run_store import (
+    QueryRunPaths,
+    atomic_write_json,
+    ensure_manifest,
+    invalidate_aggregate_query,
+    load_judgments,
+    materialize_run_outputs,
+    record_error,
+    validate_judgment_checkpoint,
+    write_judgments,
+)
+from littraceqa.submission import prediction_to_submission
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
 _RUNTIME_FILES = (
     Path(__file__),
+    ROOT / "src/littraceqa/__init__.py",
     ROOT / "src/littraceqa/aoai_pairwise_reader.py",
     ROOT / "src/littraceqa/candidate_handoff.py",
     ROOT / "src/littraceqa/chunk_store.py",
     ROOT / "src/littraceqa/corpus_preflight.py",
+    ROOT / "src/littraceqa/mineru_record.py",
+    ROOT / "src/littraceqa/pairwise_run_store.py",
     ROOT / "src/littraceqa/submission.py",
+    ROOT / "src/littraceqa/di_pipeline/__init__.py",
+    ROOT / "src/littraceqa/di_pipeline/agent/__init__.py",
     ROOT / "src/littraceqa/di_pipeline/agent/evidence.py",
     ROOT / "src/littraceqa/di_pipeline/agent/json_utils.py",
     ROOT / "src/littraceqa/di_pipeline/contracts.py",
     ROOT / "src/littraceqa/di_pipeline/llm/azure_openai.py",
     ROOT / "src/littraceqa/di_pipeline/llm/base.py",
     ROOT / "src/littraceqa/di_pipeline/llm/fake.py",
+    ROOT / "src/littraceqa/di_pipeline/llm/__init__.py",
     ROOT / "src/littraceqa/di_pipeline/registry.py",
     ROOT / "pyproject.toml",
     ROOT / "uv.lock",
@@ -75,7 +81,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     if not isinstance(config, dict):
-        raise ValueError(f"reader config is not an object: {path}")
+        raise TypeError(f"reader config is not an object: {path}")
     if config.get("name") != "aoai_pairwise_reader":
         raise ValueError("reader config name must be aoai_pairwise_reader")
     return config
@@ -84,7 +90,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
 def build_llm(config: dict[str, Any]):
     llm_config = config.get("llm")
     if not isinstance(llm_config, dict):
-        raise ValueError("reader config must contain llm")
+        raise TypeError("reader config must contain an llm object")
     name = str(llm_config.get("name") or "")
     params = llm_config.get("params") or {}
     if not isinstance(params, dict):
@@ -175,321 +181,6 @@ def build_manifest(
         },
         "corpus_paper_count": len(store),
     }
-
-
-def ensure_manifest(path: Path, manifest: dict[str, Any], resume: bool) -> None:
-    if path.exists():
-        if not resume:
-            raise ValueError(
-                f"run already exists: {path.parent}; pass --resume or choose a new --run-dir"
-            )
-        previous = json.loads(path.read_text(encoding="utf-8"))
-        if previous != manifest:
-            raise ValueError(
-                "resume manifest differs from current data/code/config/model; "
-                "use a new --run-dir"
-            )
-        return
-    _atomic_write_json(path, manifest)
-
-
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        with tmp.open("x", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def _atomic_write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        with tmp.open("x", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def invalidate_aggregate_query(run_dir: Path, query_id: str) -> None:
-    """Remove a mutated query from aggregate artifacts immediately.
-
-    Per-query checkpoints remain durable.  This prevents an interrupted force
-    rejudgment from leaving an old answer paired with new judgments in the
-    root trace/submission files.
-    """
-
-    for filename in ("reading_traces.jsonl", "submission.jsonl"):
-        path = run_dir / filename
-        if not path.exists():
-            continue
-        records = [
-            record
-            for record in read_jsonl(path)
-            if str(record.get("query_id") or "") != query_id
-        ]
-        _atomic_write_jsonl(path, records)
-
-
-def load_judgments(path: Path, query_id: str) -> dict[str, dict[str, Any]]:
-    if not path.exists():
-        return {}
-    output: dict[str, dict[str, Any]] = {}
-    for line_number, record in enumerate(read_jsonl(path), start=1):
-        paper_id = str(record.get("paper_id") or "")
-        if (
-            record.get("query_id") != query_id
-            or not paper_id
-            or paper_id in output
-            or record.get("status") != "complete"
-        ):
-            raise ValueError(f"invalid judgment checkpoint at {path}:{line_number}")
-        output[paper_id] = record
-    return output
-
-
-def write_judgments(
-    path: Path,
-    judgments: dict[str, dict[str, Any]],
-    candidates: tuple[CandidatePaper, ...],
-) -> None:
-    candidate_order = {paper.paper_id: index for index, paper in enumerate(candidates)}
-    extra = sorted(set(judgments) - set(candidate_order))
-    if extra:
-        raise ValueError(f"judgment checkpoint contains non-candidates: {extra}")
-    ordered = sorted(
-        judgments.values(), key=lambda item: candidate_order[str(item["paper_id"])]
-    )
-    _atomic_write_jsonl(path, ordered)
-
-
-def record_error(
-    path: Path,
-    *,
-    stage: str,
-    query_id: str,
-    error: Exception,
-    paper_id: str | None = None,
-) -> None:
-    records = read_jsonl(path) if path.exists() else []
-    records.append(
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "stage": stage,
-            "query_id": query_id,
-            "paper_id": paper_id,
-            "error_type": type(error).__name__,
-            "message": str(error),
-        }
-    )
-    _atomic_write_jsonl(path, records)
-
-
-def _candidate_trace_payload(candidate: CandidatePaper) -> dict[str, Any]:
-    return {
-        "rank": candidate.rank,
-        "paper_id": candidate.paper_id,
-        "title": candidate.title,
-        "venue": candidate.venue,
-        "year": candidate.year,
-    }
-
-
-def _prediction_from_checkpoint(raw: Any, *, query_id: str) -> Prediction:
-    """Rehydrate the analysis prediction saved inside ``answer.json``.
-
-    The per-query submission is a derived artifact.  Reconstructing its source
-    object lets resume/materialization prove that an existing submission still
-    matches the checkpointed answer instead of trusting a merely well-shaped
-    JSON file.
-    """
-
-    if not isinstance(raw, dict):
-        raise ValueError(f"{query_id}: answer checkpoint has no prediction object")
-    if str(raw.get("query_id") or "") != query_id:
-        raise ValueError(f"{query_id}: answer checkpoint prediction query_id mismatch")
-
-    raw_papers = raw.get("gold_papers")
-    raw_evidence = raw.get("evidence")
-    raw_answer = raw.get("answer")
-    if not isinstance(raw_papers, list):
-        raise ValueError(f"{query_id}: checkpoint prediction has invalid gold_papers")
-    if not isinstance(raw_evidence, list):
-        raise ValueError(f"{query_id}: checkpoint prediction has invalid evidence")
-    if not isinstance(raw_answer, dict):
-        raise ValueError(f"{query_id}: checkpoint prediction has invalid answer")
-
-    locator_fields = set(EvidenceLocator.__dataclass_fields__)
-    evidence: list[Evidence] = []
-    for position, item in enumerate(raw_evidence, start=1):
-        if not isinstance(item, dict):
-            raise ValueError(
-                f"{query_id}: checkpoint evidence {position} is not an object"
-            )
-        raw_locator = item.get("locator")
-        if not isinstance(raw_locator, dict) or set(raw_locator) - locator_fields:
-            raise ValueError(
-                f"{query_id}: checkpoint evidence {position} has an invalid locator"
-            )
-        evidence.append(
-            Evidence(
-                paper_id=str(item.get("paper_id") or ""),
-                source_type=str(item.get("source_type") or ""),
-                locator=EvidenceLocator(**raw_locator),
-                evidence_text_or_value=item.get("evidence_text_or_value"),
-            )
-        )
-
-    trace = raw.get("trace") or []
-    candidate_papers = raw.get("candidate_papers") or []
-    if not isinstance(trace, list) or not isinstance(candidate_papers, list):
-        raise ValueError(f"{query_id}: checkpoint prediction analysis fields are invalid")
-    return Prediction(
-        query_id=query_id,
-        gold_papers=raw_papers,
-        evidence=evidence,
-        answer=Answer(
-            freeform=raw_answer.get("freeform"),
-            multiple_choice=raw_answer.get("multiple_choice"),
-            table=raw_answer.get("table"),
-        ),
-        trace=trace,
-        candidate_papers=[str(item) for item in candidate_papers],
-    )
-
-
-def _submission_from_answer_checkpoint(
-    query: Query, answer_record: dict[str, Any]
-) -> dict[str, Any]:
-    prediction = _prediction_from_checkpoint(
-        answer_record.get("prediction"), query_id=query.query_id
-    )
-    return prediction_to_submission(query, prediction)
-
-
-def materialize_run_outputs(
-    run_dir: Path,
-    handoffs: list[CandidateHandoff],
-    reader: PairwiseAOAIReader,
-) -> tuple[int, int]:
-    traces: list[dict[str, Any]] = []
-    submissions: list[dict[str, Any]] = []
-    for handoff in handoffs:
-        query_id = handoff.query.query_id
-        query_dir = run_dir / query_id
-        judgment_path = query_dir / "candidate_judgments.jsonl"
-        answer_path = query_dir / "answer.json"
-        submission_path = query_dir / "submission.json"
-        if not judgment_path.exists():
-            if answer_path.exists() or submission_path.exists():
-                raise ValueError(
-                    f"{query_id}: answer/submission exists without candidate "
-                    "judgment checkpoint"
-                )
-            continue
-        judgments_by_id = load_judgments(judgment_path, query_id)
-        judgments = list(judgments_by_id.values())
-        expected_candidate_ids = {
-            candidate.paper_id for candidate in handoff.candidate_papers
-        }
-        observed_candidate_ids = set(judgments_by_id)
-        unexpected_candidate_ids = sorted(
-            observed_candidate_ids - expected_candidate_ids
-        )
-        if unexpected_candidate_ids:
-            raise ValueError(
-                f"{query_id}: judgment checkpoint contains non-candidates: "
-                f"{unexpected_candidate_ids}"
-            )
-        missing_candidate_ids = sorted(
-            expected_candidate_ids - observed_candidate_ids
-        )
-        judgment_checkpoints_complete = not missing_candidate_ids
-        judgment_checkpoints_current = judgment_checkpoints_complete
-        for candidate in handoff.candidate_papers:
-            judgment = judgments_by_id.get(candidate.paper_id)
-            if judgment is None:
-                continue
-            records = reader.chunk_store.load_paper(candidate.paper_id)
-            if judgment.get("cache_key") != reader.judgment_cache_key(
-                handoff.query, candidate, records
-            ):
-                judgment_checkpoints_current = False
-                break
-        trace: dict[str, Any] = {
-            "query_id": query_id,
-            "candidate_papers": [
-                _candidate_trace_payload(candidate)
-                for candidate in handoff.candidate_papers
-            ],
-            "relevance_judgments": judgments,
-            "judgment_checkpoints_complete": judgment_checkpoints_complete,
-            "missing_judgment_paper_ids": missing_candidate_ids,
-            "judgment_checkpoints_current": judgment_checkpoints_current,
-        }
-        if (answer_path.exists() or submission_path.exists()) and not (
-            judgment_checkpoints_complete
-        ):
-            raise ValueError(
-                f"{query_id}: answer/submission exists with incomplete candidate "
-                f"judgments; missing {len(missing_candidate_ids)}: "
-                f"{missing_candidate_ids[:5]}"
-            )
-        if submission_path.exists() and not answer_path.exists():
-            raise ValueError(
-                f"{query_id}: per-query submission exists without answer checkpoint"
-            )
-        if answer_path.exists():
-            answer_record = json.loads(answer_path.read_text(encoding="utf-8"))
-            if not isinstance(answer_record, dict):
-                raise ValueError(f"invalid answer checkpoint: {answer_path}")
-            expected_answer_key = reader.answer_cache_key(
-                handoff.query, judgments
-            )
-            answer_is_current = bool(
-                judgment_checkpoints_current
-                and answer_record.get("cache_key") == expected_answer_key
-            )
-            trace["answer_checkpoint_current"] = answer_is_current
-            if answer_is_current:
-                trace["semantic_multiple_choice"] = answer_record.get(
-                    "semantic_multiple_choice"
-                )
-                trace["completeness"] = answer_record.get("completeness")
-                trace["prediction"] = answer_record.get("prediction")
-                regenerated_submission = _submission_from_answer_checkpoint(
-                    handoff.query, answer_record
-                )
-        else:
-            answer_is_current = False
-        if submission_path.exists() and answer_is_current:
-            submission = json.loads(submission_path.read_text(encoding="utf-8"))
-            if (
-                not isinstance(submission, dict)
-                or set(submission) != TOP_LEVEL_KEYS
-                or submission.get("query_id") != query_id
-            ):
-                raise ValueError(f"invalid per-query submission: {submission_path}")
-            if submission != regenerated_submission:
-                raise ValueError(
-                    f"stale/invalid per-query submission does not match answer "
-                    f"checkpoint: {submission_path}"
-                )
-            trace["submission"] = submission
-            submissions.append(submission)
-        traces.append(trace)
-    _atomic_write_jsonl(run_dir / "reading_traces.jsonl", traces)
-    _atomic_write_jsonl(run_dir / "submission.jsonl", submissions)
-    return len(traces), len(submissions)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -645,7 +336,7 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = build_manifest(args, config, store)
     ensure_manifest(run_dir / "manifest.json", manifest, args.resume)
-    _atomic_write_json(run_dir / "preflight.json", preflight)
+    atomic_write_json(run_dir / "preflight.json", preflight)
 
     reader = PairwiseAOAIReader(store, llm, **(config.get("params") or {}))
     # Validate every previously materialized query against current chunks and
@@ -654,13 +345,9 @@ def main() -> None:
     materialize_run_outputs(run_dir, all_handoffs, reader)
     for handoff in selected_handoffs:
         query = handoff.query
-        query_dir = run_dir / query.query_id
-        query_dir.mkdir(parents=True, exist_ok=True)
-        judgment_path = query_dir / "candidate_judgments.jsonl"
-        answer_path = query_dir / "answer.json"
-        submission_path = query_dir / "submission.json"
-        error_path = query_dir / "errors.jsonl"
-        judgments = load_judgments(judgment_path, query.query_id)
+        paths = QueryRunPaths.under(run_dir, query.query_id)
+        paths.directory.mkdir(parents=True, exist_ok=True)
+        judgments = load_judgments(paths.judgments, query.query_id)
 
         target_candidates = list(handoff.candidate_papers)
         if args.paper_id:
@@ -698,7 +385,7 @@ def main() -> None:
                     judgment = reader.judge_candidate(query, candidate)
                 except Exception as exc:
                     record_error(
-                        error_path,
+                        paths.errors,
                         stage="judge",
                         query_id=query.query_id,
                         paper_id=candidate.paper_id,
@@ -707,7 +394,7 @@ def main() -> None:
                     raise
                 judgments[candidate.paper_id] = judgment
                 write_judgments(
-                    judgment_path, judgments, handoff.candidate_papers
+                    paths.judgments, judgments, handoff.candidate_papers
                 )
                 invalidate_aggregate_query(run_dir, query.query_id)
                 print(
@@ -716,25 +403,24 @@ def main() -> None:
                 )
 
         if args.stage in {"all", "answer"}:
-            expected_ids = {candidate.paper_id for candidate in handoff.candidate_papers}
-            missing = sorted(expected_ids - set(judgments))
-            if missing:
+            checkpoint = validate_judgment_checkpoint(handoff, judgments, reader)
+            if not checkpoint.complete:
                 raise RuntimeError(
-                    f"{query.query_id}: answer stage requires all {len(expected_ids)} "
-                    f"pair judgments; missing {len(missing)}: {missing[:5]}"
+                    f"{query.query_id}: answer stage requires all "
+                    f"{len(handoff.candidate_papers)} pair judgments; missing "
+                    f"{len(checkpoint.missing_paper_ids)}: "
+                    f"{list(checkpoint.missing_paper_ids[:5])}"
                 )
-            for candidate in handoff.candidate_papers:
-                records = store.load_paper(candidate.paper_id)
-                expected = reader.judgment_cache_key(query, candidate, records)
-                if judgments[candidate.paper_id].get("cache_key") != expected:
-                    raise ValueError(
-                        f"{query.query_id}/{candidate.paper_id}: stale judgment checkpoint"
-                    )
+            if checkpoint.stale_paper_ids:
+                raise ValueError(
+                    f"{query.query_id}/{checkpoint.stale_paper_ids[0]}: "
+                    "stale judgment checkpoint"
+                )
             expected_answer_key = reader.answer_cache_key(
                 query, list(judgments.values())
             )
-            if answer_path.exists() and submission_path.exists() and not args.force:
-                cached_answer = json.loads(answer_path.read_text(encoding="utf-8"))
+            if paths.answer.exists() and paths.submission.exists() and not args.force:
+                cached_answer = json.loads(paths.answer.read_text(encoding="utf-8"))
                 if cached_answer.get("cache_key") != expected_answer_key:
                     raise ValueError(
                         f"{query.query_id}: cached answer is stale; rerun with --force "
@@ -751,14 +437,14 @@ def main() -> None:
                     submission = prediction_to_submission(query, prediction)
                 except Exception as exc:
                     record_error(
-                        error_path,
+                        paths.errors,
                         stage="answer",
                         query_id=query.query_id,
                         error=exc,
                     )
                     raise
-                _atomic_write_json(answer_path, answer_record)
-                _atomic_write_json(submission_path, submission)
+                atomic_write_json(paths.answer, answer_record)
+                atomic_write_json(paths.submission, submission)
                 print(f"[{query.query_id}] answer complete")
     trace_count, submission_count = materialize_run_outputs(
         run_dir, all_handoffs, reader

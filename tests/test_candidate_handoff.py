@@ -12,7 +12,6 @@ from littraceqa.candidate_handoff import (
     read_jsonl,
 )
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

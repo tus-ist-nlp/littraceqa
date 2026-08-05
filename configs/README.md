@@ -74,8 +74,8 @@ configs/
 │         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う（デフォルト、構築済み）
 └── agent_style/
     ├── reading.yaml          : 検索器と一体の旧reader
-    ├── corpus_qa.yaml        : 候補一括選定型の旧prototype
-    └── aoai_pairwise_reader.yaml : PR候補を1本ずつAOAI判定→根拠回答（読解本命）
+    ├── aoai_pairwise_reader.yaml : 各候補を画像込みでAOAI判定→根拠回答（読解本命）
+    └── aoai_pairwise_reader_hybrid.yaml : テキスト一次判定→採択候補だけ画像再判定
 ```
 
 読解本命は `scripts/run_aoai_pairwise_reader.py` と

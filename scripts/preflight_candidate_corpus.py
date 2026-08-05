@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Verify a real MinerU corpus before spending LLM calls on CorpusQAAgent."""
+"""Verify a real MinerU corpus before spending pairwise-reader LLM calls."""
 
 from __future__ import annotations
 

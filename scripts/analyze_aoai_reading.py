@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generate gold-only, per-query error reports for an AOAI reading run."""
 
 from __future__ import annotations

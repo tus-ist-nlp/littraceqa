@@ -1337,11 +1337,6 @@ azure = [
     { name = "pypdfium2", version = "5.12.0", source = { registry = "https://pypi.org/simple" } },
     { name = "python-dotenv" },
 ]
-corpus-qa = [
-    { name = "openai" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-]
 di-pipeline = [
     { name = "adapters" },
     { name = "beautifulsoup4" },
@@ -1360,6 +1355,11 @@ figures = [
     { name = "docling" },
     { name = "qwen-vl-utils" },
     { name = "transformers" },
+]
+pairwise-reader = [
+    { name = "openai" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1380,23 +1380,23 @@ requires-dist = [
     { name = "markdownify", marker = "extra == 'di-pipeline'", specifier = ">=1.2.3" },
     { name = "marker-pdf", marker = "extra == 'di-pipeline'", specifier = ">=1.10.2" },
     { name = "openai", marker = "extra == 'azure'", specifier = ">=1.93.0" },
-    { name = "openai", marker = "extra == 'corpus-qa'", specifier = ">=1.109.1" },
     { name = "openai", marker = "extra == 'di-pipeline'", specifier = ">=1.109.1" },
+    { name = "openai", marker = "extra == 'pairwise-reader'", specifier = ">=1.109.1" },
     { name = "pillow", marker = "extra == 'azure'", specifier = ">=12.3.0" },
     { name = "pylate", marker = "extra == 'di-pipeline'" },
     { name = "pypdf", specifier = ">=4.0" },
     { name = "pypdfium2", marker = "extra == 'azure'", specifier = ">=5.11.0" },
     { name = "python-dotenv", marker = "extra == 'azure'", specifier = ">=1.0.1" },
-    { name = "python-dotenv", marker = "extra == 'corpus-qa'", specifier = ">=1.2.2" },
     { name = "python-dotenv", marker = "extra == 'di-pipeline'", specifier = ">=1.2.2" },
-    { name = "pyyaml", marker = "extra == 'corpus-qa'", specifier = ">=6.0" },
+    { name = "python-dotenv", marker = "extra == 'pairwise-reader'", specifier = ">=1.2.2" },
     { name = "pyyaml", marker = "extra == 'di-pipeline'", specifier = ">=6.0" },
+    { name = "pyyaml", marker = "extra == 'pairwise-reader'", specifier = ">=6.0" },
     { name = "qwen-vl-utils", marker = "extra == 'figures'" },
     { name = "requests", specifier = ">=2.31" },
     { name = "torch", marker = "extra == 'di-pipeline'", specifier = ">=2.11.0,<2.12" },
     { name = "transformers", marker = "extra == 'figures'", specifier = ">=4.45" },
 ]
-provides-extras = ["corpus-qa", "di-pipeline", "figures", "azure"]
+provides-extras = ["pairwise-reader", "di-pipeline", "figures", "azure"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0" }]

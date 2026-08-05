@@ -9,14 +9,17 @@ from typing import Any
 
 from littraceqa.di_pipeline.contracts import Prediction, Query
 
-
 OFFICIAL_SOURCE_TYPES = frozenset(
     {"text_span", "table", "figure", "citation_context", "equation_algorithm"}
 )
 TOP_LEVEL_KEYS = frozenset({"query_id", "gold_papers", "evidence", "answer"})
+MULTIPLE_CHOICE_CHOICES = "ABCD"
+MULTIPLE_CHOICE_KEYS = frozenset(MULTIPLE_CHOICE_CHOICES)
 
 
-def deterministic_mc_letter(query_id: str, choices: str = "ABCD") -> str:
+def deterministic_mc_letter(
+    query_id: str, choices: str = MULTIPLE_CHOICE_CHOICES
+) -> str:
     """Return an unbiased, reproducible fallback when option text is unavailable.
 
     The organizer's four-field test contract omits the mapping from semantic
@@ -119,7 +122,7 @@ def _normalize_answer(query: Query, prediction: Prediction) -> dict[str, Any]:
     if "multiple_choice" in requested:
         raw = prediction.answer.multiple_choice
         letter = str(raw.get("gold") or "").strip().upper() if isinstance(raw, dict) else ""
-        if not re.fullmatch(r"[A-D]", letter):
+        if letter not in MULTIPLE_CHOICE_KEYS:
             letter = deterministic_mc_letter(query.query_id)
         answer["multiple_choice"] = {"gold": letter}
 
@@ -186,7 +189,7 @@ def _normalize_cell(value: Any, declared_type: str) -> Any:
     if declared_type != "number":
         raise ValueError(f"unsupported table column type: {declared_type}")
     if isinstance(value, bool):
-        raise ValueError("boolean is not a numeric table cell")
+        raise TypeError("boolean is not a numeric table cell")
     if isinstance(value, (int, float)):
         number = float(value)
         if not math.isfinite(number):

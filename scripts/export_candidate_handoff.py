@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Remove all gold/development fields from a retrieval handoff JSONL."""
 
 from __future__ import annotations
@@ -6,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import nullcontext
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TextIO
 
@@ -47,7 +46,7 @@ def sanitize_stream(source: TextIO, destination: TextIO) -> int:
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid JSON on line {line_number}") from exc
         if not isinstance(record, dict):
-            raise ValueError(f"line {line_number} is not a JSON object")
+            raise TypeError(f"line {line_number} is not a JSON object")
         sanitized = sanitize_record(record)
         query_id = sanitized["query_id"]
         if not query_id:
@@ -76,13 +75,14 @@ def main() -> None:
         raise SystemExit(f"refusing to overwrite existing file: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    source_context = (
-        nullcontext(sys.stdin)
-        if args.input == "-"
-        else Path(args.input).open(encoding="utf-8")
-    )
     try:
-        with source_context as source, output_path.open("x", encoding="utf-8") as output:
+        with ExitStack() as stack:
+            source = (
+                sys.stdin
+                if args.input == "-"
+                else stack.enter_context(Path(args.input).open(encoding="utf-8"))
+            )
+            output = stack.enter_context(output_path.open("x", encoding="utf-8"))
             count = sanitize_stream(source, output)
     except Exception:
         output_path.unlink(missing_ok=True)

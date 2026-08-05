@@ -8,9 +8,8 @@ from littraceqa.candidate_handoff import CandidateHandoff, CandidatePaper
 from littraceqa.chunk_store import ChunkStore
 from littraceqa.di_pipeline.contracts import Query
 
-
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "preflight_corpus_qa.py"
-SPEC = importlib.util.spec_from_file_location("preflight_corpus_qa", SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "preflight_candidate_corpus.py"
+SPEC = importlib.util.spec_from_file_location("preflight_candidate_corpus", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)

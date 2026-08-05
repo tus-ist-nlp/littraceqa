@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Gold-free lint for LitTraceQA submission files.
 
 scripts/evaluate.py needs gold labels, so it cannot check the hidden-test
@@ -29,20 +28,16 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from .common import ROOT, Record, read_jsonl
+from .submission import (
+    MULTIPLE_CHOICE_KEYS,
+    OFFICIAL_SOURCE_TYPES,
+    TOP_LEVEL_KEYS,
+)
 
-
-OFFICIAL_SOURCE_TYPES = {
-    "text_span",
-    "table",
-    "figure",
-    "citation_context",
-    "equation_algorithm",
-}
 FREEFORM_WARN_CHARS = 200
-TOP_LEVEL_KEYS = {"query_id", "gold_papers", "evidence", "answer"}
 SINGLE_LETTER_RE = re.compile(r"[A-Z]")
 
 
@@ -103,7 +98,7 @@ def read_predictions(path: Path, checks: CheckCounter) -> list[Record]:
     return records
 
 
-def load_option_keys(path: Optional[Path]) -> dict[str, tuple[str, ...]]:
+def load_option_keys(path: Path | None) -> dict[str, tuple[str, ...]]:
     """Map query_id -> valid multiple-choice letter keys.
 
     Accepts either an options sidecar with a top-level ``options`` object or a
@@ -162,7 +157,7 @@ def check_answer(
         letter = predicted_letter(record, strict=strict)
         valid = option_keys.get(query_id)
         if strict:
-            letter_valid = letter in {"A", "B", "C", "D"}
+            letter_valid = letter in MULTIPLE_CHOICE_KEYS
         else:
             letter_valid = bool(SINGLE_LETTER_RE.fullmatch(letter))
         if not letter_valid or (valid is not None and letter not in valid):
@@ -192,9 +187,13 @@ def check_answer(
         table_keys = set(table) if isinstance(table, dict) else set()
         if strict and table_keys not in ({"rows"}, {"rows", "schema"}):
             checks.fail("table object exact", query_id)
-        if strict and isinstance(table, dict) and "schema" in table:
-            if table.get("schema") != table_schema:
-                checks.fail("table schema matches input", query_id)
+        if (
+            strict
+            and isinstance(table, dict)
+            and "schema" in table
+            and table.get("schema") != table_schema
+        ):
+            checks.fail("table schema matches input", query_id)
         rows = table.get("rows") if isinstance(table, dict) else None
         if not isinstance(rows, list) or not rows:
             # Empty rows guarantee zero table metrics, so this is an error.
@@ -357,6 +356,7 @@ def validate(
     canonical_papers = canonical_papers or set()
     base_checks = (
         "query_id sets identical",
+        "query_ids non-empty",
         "query_ids duplicate-free",
         "answer object present",
         "answer keys match declared answer_types",
@@ -375,6 +375,7 @@ def validate(
     )
     strict_checks = (
         "top-level keys exact",
+        "query_ids are canonical strings",
         "multiple_choice object exact",
         "freeform object exact",
         "freeform text is string",
@@ -397,13 +398,36 @@ def validate(
     if strict and not canonical_papers:
         raise ValueError("strict validation requires canonical paper metadata")
 
-    input_by_id = {str(record.get("query_id") or ""): record for record in inputs}
+    input_ids = [str(record.get("query_id") or "") for record in inputs]
+    pred_ids = [str(record.get("query_id") or "") for record in predictions]
+    for label, query_ids in (("input", input_ids), ("prediction", pred_ids)):
+        empty_count = sum(not query_id for query_id in query_ids)
+        if empty_count:
+            checks.fail("query_ids non-empty", f"{label} x{empty_count}")
+        for query_id, count in Counter(query_ids).items():
+            if query_id and count > 1:
+                checks.fail(
+                    "query_ids duplicate-free", f"{label} {query_id} x{count}"
+                )
+    if strict:
+        for label, records in (("input", inputs), ("prediction", predictions)):
+            for position, record in enumerate(records, start=1):
+                raw_query_id = record.get("query_id")
+                if (
+                    not isinstance(raw_query_id, str)
+                    or not raw_query_id.strip()
+                    or raw_query_id != raw_query_id.strip()
+                ):
+                    checks.fail(
+                        "query_ids are canonical strings",
+                        f"{label} record {position}",
+                    )
+
+    input_by_id = {
+        str(record.get("query_id") or ""): record for record in inputs
+    }
     input_by_id.pop("", None)
 
-    pred_ids = [str(record.get("query_id") or "") for record in predictions]
-    for query_id, count in Counter(pred_ids).items():
-        if count > 1:
-            checks.fail("query_ids duplicate-free", f"{query_id} x{count}")
     missing = sorted(set(input_by_id) - set(pred_ids))
     extra = sorted(set(pred_ids) - set(input_by_id) - {""})
     for query_id in missing:
@@ -500,7 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     checks = CheckCounter()
 

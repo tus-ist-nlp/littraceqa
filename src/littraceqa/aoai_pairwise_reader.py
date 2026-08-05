@@ -21,8 +21,9 @@ import json
 import math
 import re
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Required, TypedDict, cast
 
 from littraceqa.candidate_handoff import (
     CandidatePaper,
@@ -33,8 +34,13 @@ from littraceqa.di_pipeline.agent.evidence import evidence_from_result
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 from littraceqa.di_pipeline.contracts import Answer, Prediction, Query, RetrievalResult
 from littraceqa.di_pipeline.llm.base import LLMClient
+from littraceqa.mineru_record import (
+    coarse_locator,
+    readable_image_path,
+    record_source_type,
+    submission_evidence_eligible,
+)
 from littraceqa.submission import deterministic_mc_letter
-
 
 JUDGMENT_PROMPT_VERSION = "pairwise-paper-judge-v1"
 ANSWER_PROMPT_VERSION = "accepted-evidence-answer-v10"
@@ -55,11 +61,38 @@ RELEVANT_LABELS = frozenset(
     {"direct_answer", "partial_answer", "supporting_only"}
 )
 JUDGMENT_IMAGE_MODES = frozenset({"full", "text_then_relevant_images"})
-OFFICIAL_SOURCE_TYPES = frozenset(
-    {"text_span", "table", "figure", "citation_context", "equation_algorithm"}
-)
 _LABEL_PRIORITY = {label: index for index, label in enumerate(reversed(JUDGMENT_LABELS))}
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+%/^-]*")
+
+
+class PaperBatch(TypedDict):
+    """One bounded paper slice sent to the judgment model."""
+
+    text: str
+    records_by_id: dict[str, Record]
+    image_paths: list[str]
+
+
+class AnswerContext(TypedDict):
+    """Accepted evidence rendered for the final answer model call."""
+
+    text: str
+    records_by_id: dict[str, Record]
+    image_paths: list[str]
+
+
+class CompletionResult(TypedDict, total=False):
+    """Serializable model response plus optional provider metadata."""
+
+    text: Required[str]
+    request_id: str | None
+    model: str | None
+    deployment: str
+    usage: Any
+    latency_seconds: float
+    requested_image_count: int
+    attached_image_count: int
+    image_fallback_reason: str
 
 
 class ReadingResponseError(RuntimeError):
@@ -89,6 +122,87 @@ def _is_image_content_policy_violation(exc: Exception) -> bool:
         getattr(exc, "status_code", None) in (None, 400)
         and "content_policy_violation" in str(exc).lower()
     )
+
+
+def _judgment_call_record(
+    completion: CompletionResult,
+    *,
+    phase: str,
+    attempt: str,
+    parse_error: str | None,
+    batch_index: int,
+    batch_count: int,
+    batch: PaperBatch,
+) -> dict[str, Any]:
+    """Build the durable audit record for one judgment model call."""
+    return {
+        **{key: value for key, value in completion.items() if key != "text"},
+        "usage": completion.get("usage"),
+        "phase": phase,
+        "attempt": attempt,
+        "batch_index": batch_index,
+        "batch_count": batch_count,
+        "chunk_ids": list(batch["records_by_id"]),
+        "image_paths": list(batch["image_paths"]),
+        "raw_response": completion["text"],
+        "parse_error": parse_error,
+    }
+
+
+def merge_batch_judgments(
+    judgments: list[dict[str, Any]],
+    *,
+    prefer_later_on_label_tie: bool = False,
+) -> dict[str, Any]:
+    """Merge independently parsed paper batches without model or store state."""
+    # Hybrid pair merging supplies text_screen first and visual_refine second.
+    # On an equal label, the image-grounded candidate answer wins while evidence
+    # remains unioned in its original text-then-visual order.
+    best_candidates = reversed(judgments) if prefer_later_on_label_tie else judgments
+    best = max(best_candidates, key=lambda item: _LABEL_PRIORITY[item["label"]])
+    final_label = str(best["label"])
+    evidence_judgments = (
+        [item for item in judgments if item["label"] in RELEVANT_LABELS]
+        if final_label in RELEVANT_LABELS
+        else judgments
+    )
+    evidence: list[dict[str, Any]] = []
+    seen_chunks: set[str] = set()
+    for item in evidence_judgments:
+        for evidence_item in item["evidence"]:
+            chunk_id = evidence_item["chunk_id"]
+            if chunk_id not in seen_chunks:
+                seen_chunks.add(chunk_id)
+                evidence.append(evidence_item)
+    return {
+        "label": final_label,
+        "relevant": final_label in RELEVANT_LABELS,
+        "answerable_from_this_paper": any(
+            bool(item["answerable_from_this_paper"]) for item in judgments
+        ),
+        "satisfied_constraints": _ordered_unique(
+            value
+            for item in evidence_judgments
+            for value in item["satisfied_constraints"]
+        ),
+        "missing_constraints": _ordered_unique(
+            value
+            for item in evidence_judgments
+            for value in item["missing_constraints"]
+        ),
+        "evidence": evidence,
+        "evidence_chunk_ids": [item["chunk_id"] for item in evidence],
+        "candidate_answer": dict(best["candidate_answer"]),
+        "candidate_answers_by_batch": [
+            item["candidate_answer"]
+            for item in evidence_judgments
+            if item["candidate_answer"]
+        ],
+        "confidence": max(float(item["confidence"]) for item in evidence_judgments),
+        "reason": " | ".join(
+            str(item["reason"]) for item in judgments if item["reason"]
+        ),
+    }
 
 
 class PairwiseAOAIReader:
@@ -194,7 +308,7 @@ class PairwiseAOAIReader:
                 batches=batches,
                 phase="full",
             )
-            merged = self._merge_batch_judgments(batch_judgments)
+            merged = merge_batch_judgments(batch_judgments)
         else:
             text_batches = self._paper_batches(records, include_images=False)
             text_batch_judgments, text_calls = self._judge_batches(
@@ -203,7 +317,7 @@ class PairwiseAOAIReader:
                 batches=text_batches,
                 phase="text_screen",
             )
-            text_judgment = self._merge_batch_judgments(text_batch_judgments)
+            text_judgment = merge_batch_judgments(text_batch_judgments)
             merged = text_judgment
             batch_judgments = list(text_batch_judgments)
             calls = list(text_calls)
@@ -225,12 +339,10 @@ class PairwiseAOAIReader:
                         batches=visual_batches,
                         phase="visual_refine",
                     )
-                    visual_judgment = self._merge_batch_judgments(
-                        visual_batch_judgments
-                    )
+                    visual_judgment = merge_batch_judgments(visual_batch_judgments)
                     visual_refinement_status = "complete"
                     visual_conflict = not bool(visual_judgment["relevant"])
-                    merged = self._merge_batch_judgments(
+                    merged = merge_batch_judgments(
                         [text_judgment, visual_judgment],
                         prefer_later_on_label_tie=True,
                     )
@@ -265,7 +377,7 @@ class PairwiseAOAIReader:
         *,
         query: Query,
         candidate: CandidatePaper,
-        batches: list[dict[str, Any]],
+        batches: list[PaperBatch],
         phase: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         batch_judgments: list[dict[str, Any]] = []
@@ -280,25 +392,6 @@ class PairwiseAOAIReader:
             )
             completion = self._complete(prompt, batch["image_paths"])
 
-            def call_record(
-                value: dict[str, Any],
-                *,
-                attempt: str,
-                parse_error: str | None,
-            ) -> dict[str, Any]:
-                return {
-                    **{key: item for key, item in value.items() if key != "text"},
-                    "usage": value.get("usage"),
-                    "phase": phase,
-                    "attempt": attempt,
-                    "batch_index": batch_index,
-                    "batch_count": len(batches),
-                    "chunk_ids": list(batch["records_by_id"]),
-                    "image_paths": list(batch["image_paths"]),
-                    "raw_response": value["text"],
-                    "parse_error": parse_error,
-                }
-
             try:
                 parsed = self._parse_judgment(
                     query=query,
@@ -309,10 +402,14 @@ class PairwiseAOAIReader:
                 )
             except JudgmentEvidenceChunkError as exc:
                 calls.append(
-                    call_record(
+                    _judgment_call_record(
                         completion,
+                        phase=phase,
                         attempt="initial",
                         parse_error=str(exc),
+                        batch_index=batch_index,
+                        batch_count=len(batches),
+                        batch=batch,
                     )
                 )
                 repair_prompt = self._judgment_evidence_repair_prompt(
@@ -334,18 +431,26 @@ class PairwiseAOAIReader:
                     batch_index=batch_index,
                 )
                 calls.append(
-                    call_record(
+                    _judgment_call_record(
                         repair_completion,
+                        phase=phase,
                         attempt="evidence_repair",
                         parse_error=None,
+                        batch_index=batch_index,
+                        batch_count=len(batches),
+                        batch=batch,
                     )
                 )
             else:
                 calls.append(
-                    call_record(
+                    _judgment_call_record(
                         completion,
+                        phase=phase,
                         attempt="initial",
                         parse_error=None,
+                        batch_index=batch_index,
+                        batch_count=len(batches),
+                        batch=batch,
                     )
                 )
             parsed["phase"] = phase
@@ -354,7 +459,7 @@ class PairwiseAOAIReader:
 
     def _paper_batches(
         self, records: list[Record], *, include_images: bool = True
-    ) -> list[dict[str, Any]]:
+    ) -> list[PaperBatch]:
         segments: list[tuple[Record, str]] = []
         # Reserve space for instructions and the query.  A single oversized
         # MinerU chunk is sliced, while retaining its original chunk_id so the
@@ -380,7 +485,7 @@ class PairwiseAOAIReader:
                     )
                 )
 
-        batches: list[dict[str, Any]] = []
+        batches: list[PaperBatch] = []
         parts: list[str] = []
         records_by_id: dict[str, Record] = {}
         image_paths: list[str] = []
@@ -403,7 +508,7 @@ class PairwiseAOAIReader:
             used_chars = 0
 
         for record, formatted in segments:
-            image_path = _readable_image_path(record) if include_images else ""
+            image_path = readable_image_path(record) if include_images else ""
             adds_image = bool(image_path and image_path not in image_paths)
             exceeds_chars = bool(parts and used_chars + len(formatted) > self.max_batch_chars)
             exceeds_images = bool(
@@ -433,7 +538,7 @@ class PairwiseAOAIReader:
         *,
         query: Query,
         candidate: CandidatePaper,
-        batch: dict[str, Any],
+        batch: PaperBatch,
         batch_index: int,
         batch_count: int,
     ) -> str:
@@ -522,8 +627,8 @@ class PairwiseAOAIReader:
             evidence.append(
                 {
                     "chunk_id": chunk_id,
-                    "source_type": _record_source_type(record),
-                    "locator": _coarse_locator(record),
+                    "source_type": record_source_type(record),
+                    "locator": coarse_locator(record),
                     "quote_or_value": str(item.get("quote_or_value") or "").strip(),
                 }
             )
@@ -575,69 +680,6 @@ class PairwiseAOAIReader:
             + rejected_response
             + "\n</rejected_response>\nReturn one corrected JSON object only."
         )
-
-    def _merge_batch_judgments(
-        self,
-        judgments: list[dict[str, Any]],
-        *,
-        prefer_later_on_label_tie: bool = False,
-    ) -> dict[str, Any]:
-        # Hybrid pair merging supplies text_screen first and visual_refine
-        # second.  On an equal label, the image-grounded candidate answer is
-        # the representative value, while evidence is still unioned below in
-        # its original text-then-visual order.
-        best_candidates = (
-            reversed(judgments) if prefer_later_on_label_tie else judgments
-        )
-        best = max(
-            best_candidates, key=lambda item: _LABEL_PRIORITY[item["label"]]
-        )
-        final_label = str(best["label"])
-        evidence_judgments = (
-            [item for item in judgments if item["label"] in RELEVANT_LABELS]
-            if final_label in RELEVANT_LABELS
-            else judgments
-        )
-        evidence: list[dict[str, Any]] = []
-        seen_chunks: set[str] = set()
-        for item in evidence_judgments:
-            for evidence_item in item["evidence"]:
-                chunk_id = evidence_item["chunk_id"]
-                if chunk_id not in seen_chunks:
-                    seen_chunks.add(chunk_id)
-                    evidence.append(evidence_item)
-        label = final_label
-        return {
-            "label": label,
-            "relevant": label in RELEVANT_LABELS,
-            "answerable_from_this_paper": any(
-                bool(item["answerable_from_this_paper"]) for item in judgments
-            ),
-            "satisfied_constraints": _ordered_unique(
-                value
-                for item in evidence_judgments
-                for value in item["satisfied_constraints"]
-            ),
-            "missing_constraints": _ordered_unique(
-                value
-                for item in evidence_judgments
-                for value in item["missing_constraints"]
-            ),
-            "evidence": evidence,
-            "evidence_chunk_ids": [item["chunk_id"] for item in evidence],
-            "candidate_answer": dict(best["candidate_answer"]),
-            "candidate_answers_by_batch": [
-                item["candidate_answer"]
-                for item in evidence_judgments
-                if item["candidate_answer"]
-            ],
-            "confidence": max(
-                float(item["confidence"]) for item in evidence_judgments
-            ),
-            "reason": " | ".join(
-                str(item["reason"]) for item in judgments if item["reason"]
-            ),
-        }
 
     # ---- Stage 2: accepted evidence -> answer -----------------------------
 
@@ -782,7 +824,7 @@ class PairwiseAOAIReader:
 
     def _answer_context(
         self, query: Query, relevant: list[dict[str, Any]]
-    ) -> dict[str, Any]:
+    ) -> AnswerContext:
         primary: list[tuple[Record, str]] = []
         neighbours: list[tuple[Record, str]] = []
         seen_primary: set[str] = set()
@@ -838,7 +880,7 @@ class PairwiseAOAIReader:
             paper_id: [
                 record
                 for record, _ in paper_records
-                if _readable_image_path(record)
+                if readable_image_path(record)
             ]
             for paper_id, paper_records in by_paper.items()
         }
@@ -943,7 +985,7 @@ class PairwiseAOAIReader:
                 chunk_id = str(record.get("chunk_id") or "")
                 if chunk_id not in records_by_id:
                     continue
-                image_path = _readable_image_path(record)
+                image_path = readable_image_path(record)
                 if image_path and image_path not in image_paths:
                     image_paths.append(image_path)
 
@@ -964,7 +1006,7 @@ class PairwiseAOAIReader:
         self,
         query: Query,
         relevant: list[dict[str, Any]],
-        context: dict[str, Any],
+        context: AnswerContext,
     ) -> str:
         relevant_summary: list[dict[str, Any]] = []
         for item in relevant:
@@ -1100,7 +1142,7 @@ class PairwiseAOAIReader:
         eligible_chunk_ids = [
             chunk_id
             for chunk_id, record in context_records.items()
-            if _valid_submission_evidence_record(record)
+            if submission_evidence_eligible(record)
         ]
         return (
             original_prompt
@@ -1155,7 +1197,7 @@ class PairwiseAOAIReader:
                     raise ReadingResponseError(
                         f"{query.query_id}: answer invented/cross-cited chunk {chunk_id!r}"
                     )
-                if not _valid_submission_evidence_record(record):
+                if not submission_evidence_eligible(record):
                     raise AnswerEvidenceLocatorError(
                         f"{query.query_id}: answer cited chunk {chunk_id!r} without a "
                         "valid official page/table/figure locator"
@@ -1247,7 +1289,7 @@ class PairwiseAOAIReader:
             selected_paper_ids.append(paper_id)
             for chunk_id in paper["evidence_chunk_ids"]:
                 record = context_records[chunk_id]
-                if not _valid_submission_evidence_record(record):
+                if not submission_evidence_eligible(record):
                     raise ReadingResponseError(
                         f"{query.query_id}: validated answer contains an invalid locator"
                     )
@@ -1256,7 +1298,7 @@ class PairwiseAOAIReader:
                     paper_id=paper_id,
                     score=0.0,
                     text=str(record.get("text") or ""),
-                    chunk_type=_record_source_type(record),
+                    chunk_type=record_source_type(record),
                     metadata=dict(record.get("metadata") or {}),
                     source="aoai_pairwise_reader",
                 )
@@ -1311,10 +1353,10 @@ class PairwiseAOAIReader:
 
     def _complete(
         self, prompt: str, image_paths: list[str] | None = None
-    ) -> dict[str, Any]:
+    ) -> CompletionResult:
         started = time.monotonic()
 
-        def invoke(paths: list[str] | None) -> dict[str, Any]:
+        def invoke(paths: list[str] | None) -> CompletionResult:
             complete_with_metadata = getattr(
                 self.llm, "complete_with_metadata", None
             )
@@ -1326,7 +1368,7 @@ class PairwiseAOAIReader:
                     raise ReadingResponseError(
                         "LLM metadata response must contain text"
                     )
-                return dict(response)
+                return cast(CompletionResult, dict(response))
 
             complete = getattr(self.llm, "complete", None)
             if callable(complete):
@@ -1379,14 +1421,14 @@ class PairwiseAOAIReader:
         header = {
             "paper_id": record.get("paper_id"),
             "chunk_id": record.get("chunk_id"),
-            "source_type": _record_source_type(record),
+            "source_type": record_source_type(record),
             "locator": locator,
         }
         if segment and segment[1] > 1:
             header["segment"] = f"{segment[0]}/{segment[1]}"
         if selected is not None:
             header["stage1_selected"] = selected
-            header["submission_eligible"] = _valid_submission_evidence_record(record)
+            header["submission_eligible"] = submission_evidence_eligible(record)
         return "[chunk " + _json_dumps(header) + "]\n" + text
 
     def _image_legend(
@@ -1397,7 +1439,7 @@ class PairwiseAOAIReader:
             chunk_ids = [
                 chunk_id
                 for chunk_id, record in records_by_id.items()
-                if _readable_image_path(record) == path
+                if readable_image_path(record) == path
             ]
             lines.append(
                 f"Image {index}: chunk_ids={','.join(chunk_ids)} file={Path(path).name}"
@@ -1422,54 +1464,6 @@ def _candidate_payload(candidate: CandidatePaper) -> dict[str, Any]:
         "venue": candidate.venue,
         "year": candidate.year,
     }
-
-
-def _record_source_type(record: Record) -> str:
-    chunk_type = str(record.get("chunk_type") or "")
-    if chunk_type == "title_abstract":
-        chunk_type = "text_span"
-    metadata = record.get("metadata") or {}
-    section = str(metadata.get("section") or "").strip().lower()
-    if chunk_type == "text_span" and (
-        metadata.get("citation_id")
-        or section in {"references", "bibliography"}
-        or section.startswith("references ")
-    ):
-        return "citation_context"
-    return chunk_type
-
-
-def _coarse_locator(record: Record) -> dict[str, Any]:
-    metadata = record.get("metadata") or {}
-    locator: dict[str, Any] = {"page": metadata.get("page")}
-    source_type = _record_source_type(record)
-    if source_type == "table":
-        locator["table_id"] = metadata.get("table_id")
-    elif source_type == "figure":
-        locator["figure_id"] = metadata.get("figure_id")
-    return locator
-
-
-def _valid_submission_evidence_record(record: Record) -> bool:
-    source_type = _record_source_type(record)
-    if source_type not in OFFICIAL_SOURCE_TYPES:
-        return False
-    metadata = record.get("metadata") or {}
-    page = metadata.get("page")
-    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
-        return False
-    if source_type == "table" and not str(metadata.get("table_id") or "").strip():
-        return False
-    if source_type == "figure" and not str(metadata.get("figure_id") or "").strip():
-        return False
-    return True
-
-
-def _readable_image_path(record: Record) -> str:
-    if str(record.get("chunk_type") or "") not in {"table", "figure"}:
-        return ""
-    path = str((record.get("metadata") or {}).get("image_path") or "")
-    return path if path and Path(path).is_file() else ""
 
 
 def _split_text(text: str, max_chars: int, overlap: int) -> list[str]:
@@ -1524,7 +1518,7 @@ def _image_content_sha256(records: list[Record]) -> str | None:
     seen: set[str] = set()
     count = 0
     for record in records:
-        image_path = _readable_image_path(record)
+        image_path = readable_image_path(record)
         if not image_path:
             continue
         resolved = str(Path(image_path).resolve())

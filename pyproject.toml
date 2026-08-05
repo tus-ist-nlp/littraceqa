@@ -12,7 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 # Reading-only MinerU + Azure OpenAI environment. This deliberately avoids the
 # heavy indexing/PDF-processing stack and does not run Azure Search or DI.
-corpus_qa = [
+pairwise_reader = [
     "PyYAML>=6.0",
     "openai>=1.109.1",
     "python-dotenv>=1.2.2",

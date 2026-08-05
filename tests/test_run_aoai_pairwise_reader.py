@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -10,8 +10,15 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from littraceqa.candidate_handoff import CandidatePaper
+from littraceqa.di_pipeline.contracts import (
+    Answer,
+    Evidence,
+    EvidenceLocator,
+    Prediction,
+    Query,
+)
 from littraceqa.di_pipeline.llm import azure_openai as azure_openai_module
-
 
 ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
@@ -148,12 +155,16 @@ def test_manifest_fingerprints_all_pairwise_runtime_dependencies(
     tmp_path, monkeypatch
 ):
     expected_dependencies = {
+        "src/littraceqa/__init__.py",
+        "src/littraceqa/di_pipeline/__init__.py",
+        "src/littraceqa/di_pipeline/agent/__init__.py",
         "src/littraceqa/di_pipeline/agent/evidence.py",
         "src/littraceqa/di_pipeline/agent/json_utils.py",
         "src/littraceqa/di_pipeline/contracts.py",
         "src/littraceqa/di_pipeline/llm/azure_openai.py",
         "src/littraceqa/di_pipeline/llm/base.py",
         "src/littraceqa/di_pipeline/llm/fake.py",
+        "src/littraceqa/di_pipeline/llm/__init__.py",
         "src/littraceqa/di_pipeline/registry.py",
     }
     actual_dependencies = {
@@ -268,14 +279,14 @@ def _checkpointed_run(
     )
     store = _RUNNER.ChunkStore(chunks)
     reader = _RUNNER.PairwiseAOAIReader(store, _RUNNER.FakeLLM())
-    query = _RUNNER.Query(
+    query = Query(
         query_id="q1",
         question="What value is reported?",
         answer_types=["freeform"],
         table_schema=None,
     )
     candidates = tuple(
-        _RUNNER.CandidatePaper(f"p{index}", index)
+        CandidatePaper(f"p{index}", index)
         for index in range(1, candidate_count + 1)
     )
     handoff = _RUNNER.CandidateHandoff(query=query, candidate_papers=candidates)
@@ -308,18 +319,18 @@ def _checkpointed_run(
             }
         )
 
-    prediction = _RUNNER.Prediction(
+    prediction = Prediction(
         query_id=query.query_id,
         gold_papers=[{"paper_id": "p1"}],
         evidence=[
-            _RUNNER.Evidence(
+            Evidence(
                 paper_id="p1",
                 source_type="text_span",
-                locator=_RUNNER.EvidenceLocator(page=1),
+                locator=EvidenceLocator(page=1),
                 evidence_text_or_value="42",
             )
         ],
-        answer=_RUNNER.Answer(freeform={"text": "42"}),
+        answer=Answer(freeform={"text": "42"}),
         candidate_papers=[candidate.paper_id for candidate in candidates],
     )
     answer_record = {
