@@ -1,9 +1,10 @@
 """Production-safe loader for search results handed to the reading agent.
 
-The held-out LitTraceQA input contains only ``query_id``, ``question``,
-``answer_types`` and ``table_schema``.  Development handoff files may contain
-``_gold`` and other analysis fields, so callers must never pass an input record
-through wholesale.  This module projects the input and the search result into
+Current LitTraceQA inputs contain the four common fields ``query_id``,
+``benchmark``, ``question`` and ``answer_types``, plus conditional
+``multiple_choice_options`` or ``table_schema``. Development handoff files may
+contain ``_gold`` and other analysis fields, so callers must never pass an input
+record through wholesale. This module projects input and retrieval output into
 small typed objects before any prompt is built.
 """
 
@@ -54,47 +55,117 @@ class CandidateHandoff:
 
 
 def production_query_from_record(record: dict[str, Any]) -> Query:
-    """Project a possibly gold-shaped record onto the four official fields."""
+    """Project a possibly gold-shaped record onto the released input fields."""
 
     missing = [name for name in ("query_id", "question") if not record.get(name)]
     if missing:
         raise ValueError(f"production input is missing required fields: {missing}")
+    for name in ("query_id", "question"):
+        value = record[name]
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string")
+        if not value.strip():
+            raise ValueError(f"{name} must not be blank")
+    benchmark = record.get("benchmark") or "LitTraceQA"
+    if not isinstance(benchmark, str):
+        raise TypeError("benchmark must be a string")
+    if benchmark != "LitTraceQA":
+        raise ValueError(f"unsupported benchmark: {benchmark!r}")
     answer_types = record.get("answer_types") or []
     if not isinstance(answer_types, list):
         raise TypeError("answer_types must be a list")
+    if not answer_types:
+        raise ValueError("answer_types must not be empty")
+    if any(not isinstance(item, str) for item in answer_types):
+        raise TypeError("answer_types entries must be strings")
+    if len(answer_types) != len(set(answer_types)):
+        raise ValueError("answer_types must not contain duplicates")
     unknown_answer_types = sorted(set(answer_types) - OFFICIAL_ANSWER_TYPES)
     if unknown_answer_types:
         raise ValueError(f"unknown answer types: {unknown_answer_types}")
+
     table_schema = record.get("table_schema")
     if table_schema is not None and not isinstance(table_schema, list):
         raise TypeError("table_schema must be a list or null")
     if "table" in answer_types and not table_schema:
         raise ValueError("table answer type requires a non-empty table_schema")
-    return Query(
-        query_id=str(record["query_id"]),
-        question=str(record["question"]),
-        answer_types=[str(item) for item in answer_types],
-        table_schema=table_schema,
-        options=None,
-        task_family=None,
-        primary_evidence_type=None,
-    )
+    if "table" not in answer_types and table_schema is not None:
+        raise ValueError("table_schema is only valid for table answer types")
+    if table_schema is not None:
+        _validate_table_schema(table_schema)
+
+    projected = {
+        "query_id": str(record["query_id"]),
+        "benchmark": benchmark,
+        "question": str(record["question"]),
+        "answer_types": list(answer_types),
+    }
+    if "multiple_choice_options" in record:
+        projected["multiple_choice_options"] = record["multiple_choice_options"]
+    if "options" in record:
+        projected["options"] = record["options"]
+    if table_schema is not None:
+        projected["table_schema"] = table_schema
+    query = Query.from_dict(projected)
+    if "multiple_choice" in answer_types:
+        if query.options is None or len(query.options) < 2:
+            raise ValueError(
+                "multiple_choice answer type requires at least two "
+                "multiple_choice_options"
+            )
+    elif query.options is not None:
+        raise ValueError(
+            "multiple_choice_options is only valid for multiple_choice answer types"
+        )
+    return query
+
+
+def _validate_table_schema(table_schema: list[Any]) -> None:
+    """Validate the released table-column shape before it enters a prompt."""
+
+    seen_names: set[str] = set()
+    for position, column in enumerate(table_schema, start=1):
+        if not isinstance(column, dict) or set(column) != {
+            "name",
+            "type",
+            "is_row_key",
+        }:
+            raise TypeError(
+                f"table_schema[{position}] must contain only name, type, is_row_key"
+            )
+        name = column["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"table_schema[{position}] has an empty name")
+        if name in seen_names:
+            raise ValueError(f"duplicate table_schema column: {name}")
+        seen_names.add(name)
+        if column["type"] not in {"string", "number", "boolean"}:
+            raise ValueError(
+                f"table_schema[{position}] has invalid type: {column['type']!r}"
+            )
+        if not isinstance(column["is_row_key"], bool):
+            raise TypeError(
+                f"table_schema[{position}].is_row_key must be a boolean"
+            )
 
 
 def require_production_query(query: Query) -> None:
     """Fail closed if development-only information reaches the agent."""
 
     forbidden = {
-        "options": query.options,
         "task_family": query.task_family,
         "primary_evidence_type": query.primary_evidence_type,
     }
     present = sorted(name for name, value in forbidden.items() if value is not None)
     if present:
         raise ValueError(
-            "pairwise reader accepts only the four official input fields; "
+            "pairwise reader rejects values outside the four official input fields "
+            "and conditional answer schemas; "
             f"forbidden values are present: {', '.join(present)}"
         )
+    # Reuse the same conditional checks as file loading without allowing a
+    # caller to smuggle development fields through a directly constructed Query.
+    production_query_from_record(query.to_dict())
 
 
 def candidate_papers_from_record(record: dict[str, Any]) -> tuple[CandidatePaper, ...]:
@@ -193,7 +264,7 @@ def load_candidate_handoffs(
 ) -> list[CandidateHandoff]:
     """Join official inputs with retrieval output by ``query_id``.
 
-    ``queries_path`` remains authoritative for the four official fields.
+    ``queries_path`` remains authoritative for the official input fields.
     ``candidates_path`` must be a separate sidecar containing only ``query_id``,
     ``candidate_papers`` and optional ``_meta``. Oracle, development and copied
     query fields are rejected rather than silently ignored.

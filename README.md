@@ -36,47 +36,78 @@ see `CLAUDE.md` and `configs/README.md` for the full design and usage) and
 is run via `scripts/run_search.py`, e.g.:
 
 ```bash
+uv run python scripts/sync_official_release.py
+
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
   --process configs/process_style/mineru.yaml \
   --search configs/search_style/abstract_specter2_body_qwen3.yaml \
   --agent configs/agent_style/reading.yaml \
-  --queries data/validation_inputs.jsonl \
+  --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \
   --output predictions.jsonl
 ```
 
+`run_search.py` now strips validation-only fields and constructs every query
+from the organizer's production input contract by default. The explicit
+`--include-development-fields` escape hatch exists only to reproduce old
+experiments; results from that mode are not comparable to the held-out test.
+This legacy runner writes rich development traces, not a strict official
+submission. Use the pairwise reader and its submission validator below for an
+upload file.
+
 ## Pairwise AOAI reader (primary reading path)
 
-PR #7 contains a query-specific ranked list of papers, not chunk text. Each
-candidate has only `rank`, `paper_id`, `title`, `venue`, and `year`. Retrieval
-and reranking are therefore already finished. The primary reader does not run
-DI, search, reranking, or re-search:
-
-The sanitized validation sidecar contains every candidate supplied by PR #7:
-3--50 papers per query (2,227 total; 30 of 55 queries have all 50). The reader
-judges every supplied candidate rather than assuming that every query has 50.
-
-1. hydrate one candidate paper from the student-built MinerU corpus;
-2. send one `query x candidate paper` pair to Azure OpenAI and require exact
-   evidence chunk IDs;
-3. repeat for every ranked candidate (up to all 50);
-4. send only the accepted original evidence chunks to Azure OpenAI again to
-   construct the answer.
-
-Long papers are deterministically split inside step 2. API errors, invalid JSON,
-and invented IDs stop the run and are never silently treated as irrelevant.
-Every paper judgment is checkpointed separately.
-
-Use the small reading-only environment for this path (the generic `openai`
-client supplies Azure OpenAI support; Azure Search/DI SDKs are not installed):
+This path reads a separate, fixed candidate-paper ranking and the student's
+MinerU corpus. It does not run DI, retrieval, reranking, or re-search. Use the
+small reading-only environment:
 
 ```bash
 uv sync --extra pairwise_reader --group dev
 ```
 
-PR #7 originally colocates `_gold` with the candidate ranking. Never pass that
-file directly to an agent. Create a physical gold-free sidecar first (the
-checked-in `data/validation_candidates.jsonl` was generated this way):
+### Pin the current organizer release
+
+The production contract is pinned in
+`configs/official_release_manifest.json`. Download the exact organizer inputs,
+schemas, metadata, validator, and reference evaluator into the ignored
+`artifacts/` tree; every file is SHA-256 checked:
+
+```bash
+uv run python scripts/sync_official_release.py
+```
+
+The pinned input has four common fields—`query_id`, `benchmark`, `question`,
+and `answer_types`—plus `multiple_choice_options` for multiple-choice questions
+or `table_schema` for table questions. It never contains `task_family` or
+`primary_evidence_type`. Option counts are variable and may include label `E`.
+
+The released splits at the pinned revision are:
+
+- `validation_inputs.jsonl`: 55 questions;
+- `test.jsonl`: 71 required leaderboard questions;
+- `test_extra.jsonl`: 4,901 optional diagnostic questions.
+
+`test` scores papers, evidence, and answers. `test_extra` scores papers and
+answers, so its uploaded evidence field is optional. The reader still requires
+source-grounded papers/chunks internally for both splits; `--evidence-policy`
+controls only whether those validated locators are serialized into the final
+submission, never whether the model may answer without grounding.
+
+### Candidate-sidecar prerequisite
+
+PR #7 contains rankings for the 55 validation questions only. It does **not**
+contain rankings for the 71 `test` or 4,901 `test_extra` questions. The reader
+therefore cannot run a challenge split until the retrieval owner creates a
+gold-free sidecar with exactly this shape:
+
+```json
+{"query_id":"ltqa_...","candidate_papers":[{"paper_id":"acl2025_00001","rank":1,"title":"...","venue":"ACL","year":2025}]}
+```
+
+The loader requires exact query coverage and rejects gold answers, evidence,
+development hints, copied options, extra query IDs, duplicate papers, and
+non-consecutive ranks. Never pass PR #7's combined development file directly to
+the model. The checked-in validation sidecar was sanitized with:
 
 ```bash
 git show a020604:data/validation_with_candidates.jsonl \
@@ -84,6 +115,30 @@ git show a020604:data/validation_with_candidates.jsonl \
       --input - \
       --output data/validation_candidates.jsonl
 ```
+
+### Reading and validation flow
+
+For every question, the reader:
+
+1. hydrates each candidate paper from MinerU and asks AOAI whether that exact
+   paper supplies an answer, a required partial row/operand, a constraint, or
+   only a distractor/mention;
+2. checks target-paper ownership, hard settings, visual availability, exact
+   chunk IDs, and batch conflicts before accepting a paper; a claim of visual
+   inspection is rejected unless the source image was actually attached;
+3. gives only accepted original chunks and bounded neighbours to AOAI to build
+   the answer;
+4. binds every calculation input to named source facts, then deterministically
+   recomputes arithmetic, rounded/exact division, counts, argmax/argmin, Yes/No
+   comparisons, option label/text mapping, table columns/types, and evidence
+   support; every operation is also bound to its final answer fragment, so one
+   of several counts cannot silently disagree with the selected option;
+5. keeps the broader `paper_relevance` set separate from the minimal chunks
+   directly supporting the selected answer.
+
+Long papers are split deterministically. Every paper judgment is checkpointed.
+API errors, invalid JSON, invented IDs, absent required images, inconsistent
+calculations, and invalid official locators never become silent guesses.
 
 Configure Azure OpenAI in the repository-root `.env` (never commit real values):
 
@@ -94,42 +149,77 @@ AZURE_OPENAI_API_VERSION=2025-04-01-preview
 AZURE_OPENAI_CHAT_DEPLOYMENT=<chat-deployment-name>
 ```
 
-The candidate sidecar contains no question, gold, answer, evidence, task family,
-or primary evidence type. The reader projects the query onto exactly the four
-organizer-confirmed fields: `query_id`, `question`, `answer_types`, and
-`table_schema`. Never use PR #7's combined file directly as inference input.
+### Inspect the exact AOAI prompts without an API call
+
+The pairwise prompts and their synthetic few-shot examples can be rendered for
+review before running Azure OpenAI. With only an organizer input JSONL, the
+command uses conspicuously synthetic paper/evidence placeholders:
+
+```bash
+uv run python scripts/render_aoai_prompts.py \
+  --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/test.jsonl \
+  --query-id ltqa_03af2c583a696a04 \
+  --stage all \
+  --format markdown \
+  --output runs/prompt_previews/test_001.md
+```
+
+Add a sanitized candidate sidecar and real, already-formatted context to inspect
+the corresponding live-task prompt body. This command still makes no API call:
+
+```bash
+uv run python scripts/render_aoai_prompts.py \
+  --queries /path/to/test.jsonl \
+  --query-id ltqa_03af2c583a696a04 \
+  --candidates /path/to/test_candidates.jsonl \
+  --paper-id acl2025_00001 \
+  --paper-text-file /path/to/formatted_paper_batch.txt \
+  --accepted-summary-file /path/to/accepted_summary.json \
+  --evidence-file /path/to/formatted_answer_evidence.txt \
+  --stage all \
+  --format json \
+  --output runs/prompt_previews/test_001.json
+```
+
+The preview records the system and user messages, prompt version, SHA-256,
+selected few-shot IDs, official query projection, and whether synthetic context
+was used. Do not treat a synthetic preview as an executable scientific answer.
 
 First run the gold-free corpus check. `--image-root` rebases the absolute image
-paths embedded by MinerU after copying the corpus to another machine:
+paths embedded on the student's machine. If MinerU declares images but none are
+readable, preflight stops even when the isolated-missing-image override is set.
+`answer_types=["table"]` is an output shape and does not force table evidence:
 
 ```bash
 uv run python scripts/preflight_candidate_corpus.py \
-  --queries data/validation_inputs.jsonl \
+  --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \
   --candidates data/validation_candidates.jsonl \
-  --paper-metadata data/paper_metadata.jsonl \
+  --paper-metadata artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/paper_metadata.jsonl \
   --chunks /path/to/mineru_chunks.jsonl \
   --chunk-index runs/mineru_chunks.offsets.json \
-  --image-root /path/to/mineru/output
+  --image-root artifacts/student_corpus/mineru_images_candidates
 ```
 
-Run one complete validation question first. Do not reduce `--max-candidates`
-for a scored run: q_022 needs rank 44 and q_045 needs rank 37.
+Run one complete validation question first. The runner judges every candidate
+in a sidecar row by default. Do not set `--max-candidates` for a scored run:
+the validation sidecar has up to 50 papers per query, q_022 needs rank 44, and
+q_045 needs rank 37; a future challenge sidecar may contain a different count.
 
 ```bash
 uv run python scripts/run_aoai_pairwise_reader.py \
-  --queries data/validation_inputs.jsonl \
+  --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \
   --candidates data/validation_candidates.jsonl \
-  --paper-metadata data/paper_metadata.jsonl \
+  --paper-metadata artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/paper_metadata.jsonl \
   --chunks /path/to/mineru_chunks.jsonl \
   --chunk-index runs/mineru_chunks.offsets.json \
-  --image-root /path/to/mineru/output \
   --reader configs/agent_style/aoai_pairwise_reader.yaml \
   --run-dir runs/aoai_validation \
   --query-id q_001
 ```
 
-To screen all papers from text first and attach images only when a paper is
-accepted, replace the reader config with
+To screen all papers from text first and attach images only for relevant,
+caption-only, or visually unreadable cases that merit refinement, replace the
+reader config with
 `configs/agent_style/aoai_pairwise_reader_hybrid.yaml`.
 
 Resume the same question after interruption by adding `--resume`. To inspect or
@@ -158,9 +248,9 @@ Run the gold-free submission gate before upload:
 
 ```bash
 uv run python -m littraceqa.validate_submission \
-  --inputs data/validation_inputs.jsonl \
+  --inputs artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \
   --predictions runs/aoai_validation/submission.jsonl \
-  --paper-metadata data/paper_metadata.jsonl \
+  --paper-metadata artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/paper_metadata.jsonl \
   --strict-official-shape
 ```
 
@@ -181,19 +271,9 @@ answer reasoning, serialization, and dataset inconsistencies. It also evaluates
 papers that own gold evidence separately from official `gold_papers`, which may
 contain multiple-choice distractor papers.
 
-The four-field contract omits multiple-choice option text. The reader extracts
-a meaning-level answer into the trace, but no system can derive an A-D mapping
-that was never supplied. The submission letter is therefore only a deterministic
-structural placeholder; the post-hoc validation report marks this separately as
-`multiple_choice_protocol_blocker`.
-
-The current
-[public Hugging Face format page](https://huggingface.co/datasets/LitTraceQA/LitTraceQA/blob/main/docs/format.md)
-still describes `benchmark` and `multiple_choice_options`. That page conflicts
-with the organizer's later direct clarification that held-out input contains
-only `query_id`, `question`, `answer_types`, and `table_schema`. This production
-path deliberately follows the direct clarification and physically discards
-every other input field.
+For multiple choice, the reader now solves the semantic answer first, returns
+both the released label and exact option text, validates the pair, and writes
+that real label to the submission. There is no production placeholder.
 
 ## Azure RAG pipeline (legacy baseline)
 

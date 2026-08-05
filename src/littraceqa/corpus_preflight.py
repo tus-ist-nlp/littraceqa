@@ -15,12 +15,34 @@ from littraceqa.mineru_record import record_source_type, submission_evidence_eli
 from littraceqa.submission import OFFICIAL_SOURCE_TYPES
 
 _TABLE_RE = re.compile(r"\b(table|row|column)\b", re.IGNORECASE)
-_FIGURE_RE = re.compile(r"\b(figure|fig\.?|plot|chart|diagram)\b", re.IGNORECASE)
+_FIGURE_RE = re.compile(
+    r"\b(figure|fig\.?|plot|chart|graph|diagram|panel|subplot)\b",
+    re.IGNORECASE,
+)
 _EQUATION_RE = re.compile(
     r"\b(equation|objective|loss function|formula|algorithm)\b", re.IGNORECASE
 )
 _CITATION_RE = re.compile(
     r"\b(citation|cited|reference|bibliography)\b", re.IGNORECASE
+)
+
+# Keep the image-availability gate deliberately conservative.  In particular,
+# a question about "image generation" does not necessarily require inspecting
+# an image. Figure numbers, panels, charts/plots/graphs, and wording that
+# explicitly asks the reader to inspect an image do.
+_VISUAL_IMAGE_REQUIRED_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bfig(?:ure)?\.?\s*(?:\d+[a-z]?|[ivx]+)(?:\s*\([a-z0-9]+\))?\b",
+        r"\b(?:panel|subplot)s?(?:\s*\([a-z0-9]+\)|\s+[a-z0-9]+)?\b",
+        r"\b(?:chart|plot)s?\b",
+        r"\b(?:according to|shown in|visible in|depicted in|displayed in|"
+        r"read from|inspect|from)\s+(?:an?\s+|the\s+|this\s+|that\s+)?"
+        r"(?:image|figure|graph|diagram)\b",
+        r"\b(?:image|figure|graph|diagram)\s+"
+        r"(?:shows|depicts|displays|illustrates|contains)\b",
+        r"\b(?:plotted|graphed)\s+(?:value|ratio|curve|point|result)s?\b",
+    )
 )
 
 
@@ -127,8 +149,9 @@ def inspect_corpus(
             papers_without_valid_evidence.append(paper_id)
 
     queries_without_valid_evidence: list[str] = []
-    missing_required_modalities: list[dict[str, str]] = []
-    queries_without_figure_images: list[str] = []
+    missing_source_hints: list[dict[str, str]] = []
+    visual_image_required_queries: list[str] = []
+    queries_without_required_visual_images: list[str] = []
     for handoff in handoffs:
         paper_ids = [paper.paper_id for paper in handoff.candidate_papers]
         union_types: set[str] = set()
@@ -138,16 +161,20 @@ def inspect_corpus(
             union_image_types.update(image_types_by_paper.get(paper_id, set()))
         if not union_types:
             queries_without_valid_evidence.append(handoff.query.query_id)
-        for source_type in sorted(_required_modalities(handoff)):
+        for source_type in sorted(_source_modality_hints(handoff)):
             if source_type not in union_types:
-                missing_required_modalities.append(
+                missing_source_hints.append(
                     {
                         "query_id": handoff.query.query_id,
                         "source_type": source_type,
                     }
                 )
-        if "figure" in _required_modalities(handoff) and "figure" not in union_image_types:
-            queries_without_figure_images.append(handoff.query.query_id)
+        if requires_visual_image(handoff.query.question):
+            visual_image_required_queries.append(handoff.query.query_id)
+            if "figure" not in union_image_types:
+                queries_without_required_visual_images.append(
+                    handoff.query.query_id
+                )
 
     corpus_ids = set(store.paper_ids())
     canonical_missing: list[str] = []
@@ -168,30 +195,39 @@ def inspect_corpus(
         errors.append(
             f"{len(queries_without_valid_evidence)} queries have no valid evidence locator"
         )
-    if missing_required_modalities:
-        errors.append(
-            f"{len(missing_required_modalities)} query/modality requirements have no valid locator"
+    if missing_source_hints:
+        warnings.append(
+            f"{len(missing_source_hints)} query/source hints have no matching "
+            "submission-eligible chunk; source hints are diagnostic only"
         )
-    if queries_without_figure_images:
+    if queries_without_required_visual_images:
         message = (
-            f"{len(queries_without_figure_images)} figure queries have no readable "
-            "candidate image"
+            f"{len(queries_without_required_visual_images)} explicit visual-reading "
+            "queries have no readable candidate figure/chart image"
         )
         if allow_missing_figure_images:
             warnings.append(
-                message + " (allowed by --allow-missing-figure-images)"
+                message
+                + " (allowed by --allow-missing-required-visual-images after "
+                "global image-path validation)"
             )
         else:
             errors.append(message)
-    if image_unreadable:
-        errors.append(
-            f"{image_unreadable} declared image files are unreadable or corrupt"
-        )
-
     image_missing = len(image_paths_seen) - image_existing - image_unreadable
     image_without_path = image_eligible - image_declared
+    if image_declared and image_existing == 0:
+        errors.append(
+            "all declared table/figure images are unavailable "
+            f"(0 of {len(image_paths_seen)} unique paths readable); check "
+            "--image-root. This global configuration failure cannot be "
+            "overridden by --allow-missing-required-visual-images"
+        )
     if image_without_path:
         warnings.append(f"{image_without_path} table/figure chunks have no image_path")
+    if image_unreadable:
+        warnings.append(
+            f"{image_unreadable} declared image files are unreadable or corrupt"
+        )
     if image_missing:
         warnings.append(f"{image_missing} declared image files do not exist")
     if chunk_types.get("citation_context", 0) == 0:
@@ -217,8 +253,15 @@ def inspect_corpus(
         "missing_candidate_papers": missing_papers,
         "papers_without_valid_evidence": papers_without_valid_evidence,
         "queries_without_valid_evidence": queries_without_valid_evidence,
-        "missing_required_modalities": missing_required_modalities,
-        "queries_without_figure_images": queries_without_figure_images,
+        "missing_source_hints": missing_source_hints,
+        # Backwards-compatible report aliases. These are warnings/diagnostics,
+        # not hard source requirements under the current input contract.
+        "missing_required_modalities": missing_source_hints,
+        "visual_image_required_queries": visual_image_required_queries,
+        "queries_without_required_visual_images": (
+            queries_without_required_visual_images
+        ),
+        "queries_without_figure_images": queries_without_required_visual_images,
         "chunk_types": dict(sorted(chunk_types.items())),
         "invalid_page_by_type": dict(sorted(invalid_pages.items())),
         "invalid_object_id_by_type": dict(sorted(invalid_object_ids.items())),
@@ -240,19 +283,33 @@ def inspect_corpus(
     return report, errors
 
 
-def _required_modalities(handoff: CandidateHandoff) -> set[str]:
+def _source_modality_hints(handoff: CandidateHandoff) -> set[str]:
+    """Return non-binding source hints inferred from observable query text.
+
+    ``answer_types`` describes the output representation, not where evidence
+    must be found. A table-shaped answer may be assembled from prose,
+    equations, citations, or several papers, so it must never imply that a
+    table chunk is required.
+    """
+
     query = handoff.query
     text = query.question
-    required: set[str] = set()
-    if "table" in query.answer_types or _TABLE_RE.search(text):
-        required.add("table")
+    hints: set[str] = set()
+    if _TABLE_RE.search(text):
+        hints.add("table")
     if _FIGURE_RE.search(text):
-        required.add("figure")
+        hints.add("figure")
     if _EQUATION_RE.search(text):
-        required.add("equation_algorithm")
+        hints.add("equation_algorithm")
     if _CITATION_RE.search(text):
-        required.add("citation_context")
-    return required or {"text_span"}
+        hints.add("citation_context")
+    return hints
+
+
+def requires_visual_image(question: str) -> bool:
+    """Return whether the observable wording explicitly requires visual reading."""
+
+    return any(pattern.search(question) for pattern in _VISUAL_IMAGE_REQUIRED_PATTERNS)
 
 
 def _nonempty_string(value: Any) -> bool:

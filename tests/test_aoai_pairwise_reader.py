@@ -109,10 +109,13 @@ def _judgment(
     )
     return json.dumps(
         {
+            "paper_role": "target_owner" if chunk_id else "topic_only",
             "label": label,
             "answerable_from_this_paper": label == "direct_answer",
             "satisfied_constraints": ["Method X value"] if chunk_id else [],
             "missing_constraints": [] if chunk_id else ["Method X value"],
+            "blocking_mismatches": [],
+            "visual": {"required": False, "status": "not_needed"},
             "evidence": evidence,
             "candidate_answer": {"meaning": answer_meaning} if chunk_id else {},
             "confidence": 0.98,
@@ -122,15 +125,49 @@ def _judgment(
 
 
 def _answer() -> str:
-    return json.dumps(
-        {
-            "papers": [
-                {"paper_id": "p1", "evidence_chunk_ids": ["p1#table"]}
+    return json.dumps(_structured_answer_payload({"p1": ["p1#table"]}))
+
+
+def _structured_answer_payload(
+    paper_chunks: dict[str, list[str]],
+) -> dict[str, object]:
+    first_paper = next(iter(paper_chunks))
+    first_chunk = paper_chunks[first_paper][0]
+    return {
+        "status": "ready",
+        "paper_relevance": [
+            {"paper_id": paper_id, "role": "target_owner", "reason": "owner"}
+            for paper_id in paper_chunks
+        ],
+        "papers": [
+            {"paper_id": paper_id, "evidence_chunk_ids": chunk_ids}
+            for paper_id, chunk_ids in paper_chunks.items()
+        ],
+        "derivation": {
+            "facts": [
+                {
+                    "id": "f_reported_value",
+                    "name": "reported value",
+                    "value": "42",
+                    "value_kind": "reported",
+                    "paper_id": first_paper,
+                    "chunk_ids": [first_chunk],
+                }
             ],
-            "answer": {"freeform": {"text": "42"}},
-            "completeness": {"answered_parts": ["value"], "missing": []},
-        }
-    )
+            "operations": [],
+            "final_semantic_answer": "42",
+        },
+        "answer": {"freeform": {"text": "42"}},
+        "support": [
+            {
+                "answer_path": "answer.freeform.text",
+                "paper_id": paper_id,
+                "chunk_ids": chunk_ids,
+            }
+            for paper_id, chunk_ids in paper_chunks.items()
+        ],
+        "completeness": {"answered_parts": ["value"], "missing": []},
+    }
 
 
 def test_each_candidate_is_judged_independently_then_answered(tmp_path):
@@ -163,6 +200,205 @@ def test_each_candidate_is_judged_independently_then_answered(tmp_path):
     assert answer_record["accepted_paper_ids"] == ["p1"]
     assert submission["answer"] == {"freeform": {"text": "42"}}
     assert submission["gold_papers"] == [{"paper_id": "p1"}]
+
+
+def test_paper_relevance_is_separate_from_minimal_answer_support(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    query = _query()
+    raw = _structured_answer_payload({"p1": ["p1#table"]})
+    raw["paper_relevance"] = [
+        {"paper_id": "p1", "role": "target_owner", "reason": "direct owner"},
+        {
+            "paper_id": "p2",
+            "role": "comparison_source",
+            "reason": "named comparison paper",
+        },
+    ]
+    context_records = {
+        record["chunk_id"]: record
+        for paper_id in ("p1", "p2")
+        for record in reader.chunk_store.load_paper(paper_id)
+    }
+    payload = reader._parse_answer(
+        query=query,
+        payload_text=json.dumps(raw),
+        relevant_paper_ids={"p1", "p2"},
+        context_records=context_records,
+    )
+    prediction = reader._build_prediction(
+        query=query,
+        payload=payload,
+        context_records=context_records,
+        candidate_ids=["p1", "p2"],
+        relevant=[{"paper_id": "p1"}, {"paper_id": "p2"}],
+        image_count=0,
+    )
+
+    assert prediction.gold_papers == [{"paper_id": "p1"}, {"paper_id": "p2"}]
+    assert {item.paper_id for item in prediction.evidence} == {"p1"}
+
+
+def test_one_chunk_can_support_multiple_table_cells(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    query = Query(
+        "ltqa_table",
+        "Copy the supported row.",
+        ["table"],
+        table_schema=[
+            {"name": "Method", "type": "string", "is_row_key": True},
+            {"name": "Score", "type": "number", "is_row_key": False},
+        ],
+    )
+    raw = {
+        "status": "ready",
+        "paper_relevance": [
+            {"paper_id": "p1", "role": "target_owner", "reason": "owner"}
+        ],
+        "papers": [{"paper_id": "p1", "evidence_chunk_ids": ["p1#table"]}],
+        "derivation": {
+            "facts": [
+                {
+                    "id": "f_row",
+                    "name": "row",
+                    "value": {"Method": "X", "Score": 42},
+                    "value_kind": "reported",
+                    "paper_id": "p1",
+                    "chunk_ids": ["p1#table"],
+                }
+            ],
+            "operations": [],
+            "final_semantic_answer": "X | 42",
+        },
+        "answer": {"table": {"rows": [{"Method": "X", "Score": 42}]}},
+        "support": [
+            {
+                "answer_path": "answer.table.rows[0].Method",
+                "paper_id": "p1",
+                "chunk_ids": ["p1#table"],
+            },
+            {
+                "answer_path": "answer.table.rows[0].Score",
+                "paper_id": "p1",
+                "chunk_ids": ["p1#table"],
+            },
+        ],
+        "completeness": {"answered_parts": ["X row"], "missing": []},
+    }
+    context_records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+
+    payload = reader._parse_answer(
+        query=query,
+        payload_text=json.dumps(raw),
+        relevant_paper_ids={"p1"},
+        context_records=context_records,
+    )
+
+    assert payload["support"] == raw["support"]
+
+
+def test_official_multiple_choice_label_is_used_without_placeholder(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    query = Query(
+        "ltqa_mc",
+        "Which option is supported?",
+        ["multiple_choice"],
+        options={"A": "Alpha", "E": "Epsilon"},
+    )
+    raw = _structured_answer_payload({"p1": ["p1#table"]})
+    raw["derivation"]["final_semantic_answer"] = "Epsilon"
+    raw["answer"] = {
+        "multiple_choice": {
+            "label": "E",
+            "selected_option_text": "Epsilon",
+        }
+    }
+    raw["support"][0]["answer_path"] = "answer.multiple_choice"
+    context_records = {
+        record["chunk_id"]: record for record in reader.chunk_store.load_paper("p1")
+    }
+    payload = reader._parse_answer(
+        query=query,
+        payload_text=json.dumps(raw),
+        relevant_paper_ids={"p1"},
+        context_records=context_records,
+    )
+    prediction = reader._build_prediction(
+        query=query,
+        payload=payload,
+        context_records=context_records,
+        candidate_ids=["p1"],
+        relevant=[{"paper_id": "p1"}],
+        image_count=0,
+    )
+
+    assert prediction.answer.multiple_choice == {"gold": "E"}
+    assert prediction_to_submission(query, prediction)["answer"] == {
+        "multiple_choice": {"gold": "E"}
+    }
+
+
+def test_stage_two_visual_fact_requires_its_actual_attached_image(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_paths = _write_image_corpus(corpus, tmp_path, image_count=1)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    query = Query(
+        "ltqa_visual",
+        "How many panels are visible in Figure 1?",
+        ["freeform"],
+    )
+    raw = _structured_answer_payload({"p1": ["p1#fig1"]})
+    raw["derivation"]["facts"][0]["value_kind"] = "visual"
+    context_records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+
+    with pytest.raises(ReadingResponseError, match="no actually attached source image"):
+        reader._parse_answer(
+            query=query,
+            payload_text=json.dumps(raw),
+            relevant_paper_ids={"p1"},
+            context_records=context_records,
+            attached_image_paths=[],
+        )
+
+    payload = reader._parse_answer(
+        query=query,
+        payload_text=json.dumps(raw),
+        relevant_paper_ids={"p1"},
+        context_records=context_records,
+        attached_image_paths=image_paths,
+    )
+    assert payload["derivation"]["facts"][0]["value_kind"] == "visual"
+
+
+def test_stage_two_rejects_malformed_completeness(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    raw = _structured_answer_payload({"p1": ["p1#table"]})
+    raw["completeness"] = {}
+    context_records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+
+    with pytest.raises(ReadingResponseError, match="exactly answered_parts and missing"):
+        reader._parse_answer(
+            query=_query(),
+            payload_text=json.dumps(raw),
+            relevant_paper_ids={"p1"},
+            context_records=context_records,
+        )
 
 
 def test_invented_stage_one_chunk_id_is_a_hard_error(tmp_path):
@@ -278,6 +514,157 @@ def test_irrelevant_batch_evidence_is_not_merged_into_relevant_paper():
     assert merged["evidence_chunk_ids"] == ["p1#table"]
 
 
+def test_owner_mismatch_overrides_same_numbered_figure_positive_batch():
+    positive = {
+        "paper_role": "answer_source",
+        "label": "direct_answer",
+        "answerable_from_this_paper": True,
+        "satisfied_constraints": ["Figure 4 panel count"],
+        "missing_constraints": [],
+        "blocking_mismatches": [],
+        "visual": {"required": True, "status": "inspected"},
+        "evidence": [{"chunk_id": "fastmoe#fig4"}],
+        "candidate_answer": {"units": [{"name": "panels", "value": 2}]},
+        "confidence": 0.95,
+        "reason": "this batch contains a Figure 4",
+    }
+    owner_conflict = {
+        "paper_role": "distractor",
+        "label": "irrelevant",
+        "answerable_from_this_paper": False,
+        "satisfied_constraints": [],
+        "missing_constraints": ["WavePipe Figure 4"],
+        "blocking_mismatches": ["candidate is FastMoE, not WavePipe"],
+        "visual": {"required": True, "status": "inspected"},
+        "evidence": [],
+        "candidate_answer": {},
+        "confidence": 0.99,
+        "reason": "wrong owning paper",
+    }
+
+    merged = merge_batch_judgments([positive, owner_conflict])
+
+    assert merged["label"] == "irrelevant"
+    assert merged["relevant"] is False
+    assert merged["identity_conflict"] is True
+    assert merged["paper_role"] == "distractor"
+
+
+def test_owner_mismatch_veto_does_not_depend_on_english_phrase():
+    positive = {
+        "paper_role": "answer_source",
+        "label": "direct_answer",
+        "answerable_from_this_paper": True,
+        "satisfied_constraints": ["Figure 4 panel count"],
+        "missing_constraints": [],
+        "blocking_mismatches": [],
+        "visual": {"required": True, "status": "inspected"},
+        "evidence": [{"chunk_id": "fastmoe#fig4"}],
+        "candidate_answer": {"units": [{"name": "panels", "value": 2}]},
+        "confidence": 0.95,
+        "reason": "this batch contains a Figure 4",
+    }
+    owner_conflict = {
+        **positive,
+        "paper_role": "distractor",
+        "label": "irrelevant",
+        "answerable_from_this_paper": False,
+        "blocking_mismatches": ["著者と題名が指定対象に一致しない"],
+        "evidence": [],
+        "candidate_answer": {},
+    }
+
+    merged = merge_batch_judgments([positive, owner_conflict])
+
+    assert merged["label"] == "irrelevant"
+    assert merged["identity_conflict"] is True
+
+
+def test_stage_one_rejects_relevant_distractor_role(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    payload = json.loads(_judgment("direct_answer", "p1#table"))
+    payload["paper_role"] = "distractor"
+    payload["blocking_mismatches"] = ["wrong owner"]
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record for record in reader.chunk_store.load_paper("p1")
+    }
+
+    with pytest.raises(ReadingResponseError, match="incompatible with relevant label"):
+        reader._parse_judgment(
+            query=_query(),
+            candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+            payload_text=json.dumps(payload),
+            allowed_records=records,
+            batch_index=1,
+        )
+
+
+def test_stage_one_rejects_claimed_visual_inspection_without_attachment(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_image_corpus(corpus, tmp_path, image_count=1)
+    payload = json.loads(_judgment("direct_answer", "p1#fig1"))
+    payload["visual"] = {"required": True, "status": "inspected"}
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+
+    with pytest.raises(ReadingResponseError, match="actually attached image"):
+        reader._parse_judgment(
+            query=_query(),
+            candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+            payload_text=json.dumps(payload),
+            allowed_records=records,
+            batch_index=1,
+            attached_image_count=0,
+        )
+
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=json.dumps(payload),
+        allowed_records=records,
+        batch_index=1,
+        attached_image_count=1,
+    )
+    assert parsed["visual"] == {"required": True, "status": "inspected"}
+
+
+def test_later_satisfied_constraint_resolves_same_missing_constraint():
+    base = {
+        "paper_role": "answer_source",
+        "label": "partial_answer",
+        "answerable_from_this_paper": False,
+        "blocking_mismatches": [],
+        "visual": {"required": False, "status": "not_needed"},
+        "evidence": [{"chunk_id": "p1#c1"}],
+        "candidate_answer": {"units": [{"name": "value", "value": 42}]},
+        "confidence": 0.9,
+        "reason": "partial batch",
+    }
+    merged = merge_batch_judgments(
+        [
+            {
+                **base,
+                "satisfied_constraints": [],
+                "missing_constraints": [" Dataset Y score "],
+            },
+            {
+                **base,
+                "satisfied_constraints": ["dataset y score"],
+                "missing_constraints": [],
+                "evidence": [{"chunk_id": "p1#c2"}],
+            },
+        ]
+    )
+
+    assert merged["satisfied_constraints"] == ["dataset y score"]
+    assert merged["missing_constraints"] == []
+
+
 def test_answer_evidence_cap_is_round_robin_across_papers(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     records = [
@@ -385,9 +772,9 @@ def test_answer_prompt_preserves_q029_constraint_conflict_and_cache_inputs(
 
     prompt = reader._answer_prompt(query, [judgment], context)
 
-    summary_text = prompt.split("Accepted paper summary:\n", 1)[1].split(
-        "\n\n", 1
-    )[0]
+    summary_text = prompt.split(
+        "Accepted paper summary (fallible hints, not evidence):\n", 1
+    )[1].split("\n\n", 1)[0]
     summary = json.loads(summary_text)
     assert summary == [
             {
@@ -395,21 +782,20 @@ def test_answer_prompt_preserves_q029_constraint_conflict_and_cache_inputs(
                 "title": "",
                 "rank": 1,
             "label": "partial_answer",
+            "paper_role": "uncertain",
             "satisfied_constraints": ["ECM-XL 102.4M is listed"],
             "missing_constraints": [missing],
+            "blocking_mismatches": [],
             "candidate_answer": {"dataset": "ImageNet", "fid": 2.49},
             "candidate_answers_by_batch": [],
             "reason": reason,
             "visual_conflict": True,
         }
     ]
-    assert "dataset, evaluation split, model variant or size" in prompt
-    assert (
-        "training budget, NFE, and step or checkpoint as hard constraints" in prompt
-    )
-    assert "different constraint setting" in prompt
-    assert "record it in completeness.missing" in prompt
-    assert "do not fabricate the corresponding row" in prompt
+    assert "dataset, split, model variant/size" in prompt
+    assert "Never borrow a nearby value from another setting" in prompt
+    assert "completeness" in prompt
+    assert missing in prompt
 
     base_key = reader.answer_cache_key(query, [judgment])
     changed_keys = {
@@ -422,9 +808,15 @@ def test_answer_prompt_preserves_q029_constraint_conflict_and_cache_inputs(
         reader.answer_cache_key(
             query, [{**judgment, "visual_conflict": False}]
         ),
+        reader.answer_cache_key(
+            query, [{**judgment, "paper_role": "comparison_source"}]
+        ),
+        reader.answer_cache_key(
+            query, [{**judgment, "blocking_mismatches": ["wrong setting"]}]
+        ),
     }
     assert base_key not in changed_keys
-    assert len(changed_keys) == 3
+    assert len(changed_keys) == 5
 
 
 def test_q052_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path):
@@ -461,25 +853,22 @@ def test_q052_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path)
 
     prompt = reader._answer_prompt(query, relevant, context)
 
-    assert "use every table_schema name verbatim as its JSON key" in prompt
-    assert "do not rename keys or add columns" in prompt
-    assert "exact string displayed in the cited source cell" in prompt
-    assert "Do not append %, units, explanatory prose" in prompt
-    assert "unless they literally appear in that source cell" in prompt
+    assert "Use every table_schema name verbatim" in prompt
+    assert "exact string displayed in the cited" in prompt
+    assert "Do not append %, units, or explanatory prose" in prompt
+    assert "unless they literally appear in" in prompt
     assert "Preserve punctuation and typography byte-for-byte as displayed" in prompt
-    assert "a decimal displayed as `.9` must be returned as `.9`, never `0.9`" in prompt
-    assert "printed dash or minus-like missing-value mark" in prompt
-    assert "ASCII string `-`, never as an empty string" in prompt
-    assert "only a genuinely blank source cell may be empty" in prompt
-    assert "Never replace a dash or blank with 'unreported', 'N/A', null" in prompt
+    assert "A displayed `.9` remains `.9`, not `0.9`" in prompt
+    assert "printed dash or" in prompt
+    assert "minus-like missing-value mark" in prompt
+    assert "ASCII string `-`" in prompt
+    assert "only a genuinely" in prompt
+    assert "Never replace a dash or blank" in prompt
     assert "attached table image conflicts with lossy OCR or extracted Markdown" in prompt
     assert "use the cell visibly printed in the image" in prompt
-    assert "Every emitted cell must be directly grounded in the cited evidence" in prompt
-    assert "silently self-check every row and cell" in prompt
-    assert "(1) exact schema keys, (2) exact source typography" in prompt
-    assert "(3) leading-dot decimals, (4) printed dash versus genuine blank" in prompt
-    assert "(5) no added characters, and (6) cited evidence support" in prompt
-    assert '"each exact table_schema name": "exact displayed source cell string"' in prompt
+    assert "Every emitted cell must be directly" in prompt
+    assert '"Method":"source string"' in prompt
+    assert '"Score":"source string"' in prompt
 
 
 def test_q055_prompt_preserves_conflicting_batch_answers_for_source_reconciliation(
@@ -521,28 +910,18 @@ def test_q055_prompt_preserves_conflicting_batch_answers_for_source_reconciliati
     }
 
     prompt = reader._answer_prompt(query, [judgment], context)
-    summary_payload = prompt.split("Accepted paper summary:\n", 1)[1].split(
-        "\n\n", 1
-    )[0]
+    summary_payload = prompt.split(
+        "Accepted paper summary (fallible hints, not evidence):\n", 1
+    )[1].split("\n\n", 1)[0]
     summary = json.loads(summary_payload)
 
     assert summary[0]["candidate_answers_by_batch"] == batch_answers
     assert summary[0]["batch_answer_conflict"] is True
     assert summary[0]["candidate_answer"] == {}
-    assert "fallible hints that may conflict" in prompt
-    assert "Do not let the first candidate_answer dominate" in prompt
-    assert "candidate_answer is intentionally empty" in prompt
-    assert "never reconstruct or privilege the old merged shortcut" in prompt
-    assert "Resolve all conflicts only from the original chunks and attached images" in prompt
-    assert "map rotated axis labels to their bars carefully" in prompt
-    assert (
-        "cross-check chart comparisons against accepted list, table, and text evidence"
-        in prompt
-    )
-    assert "For every yes/no comparison" in prompt
-    assert "final Yes/No polarity agrees with both the numbers and its explanation" in prompt
-    assert "if A is greater than B" in prompt
-    assert "the answer must be Yes" in prompt
+    assert "Stage-1 summaries are fallible hints, never evidence" in prompt
+    assert "A2_yes_no_polarity" in prompt
+    assert '"kind":"compare"' in prompt
+    assert "final polarity and selected option must agree" in prompt
 
     changed_judgment = {
         **judgment,
@@ -596,18 +975,14 @@ def test_q056_table_prompt_uses_canonical_row_keys_and_splits_named_settings(
     prompt = reader._answer_prompt(query, relevant, context)
 
     assert "row-key entity or method name" in prompt
-    assert "canonical spelling visibly supported by the source" in prompt
+    assert "canonical spelling visibly" in prompt
     assert "question contains an obvious typo" in prompt
-    assert "deliberate exception to byte-for-byte source formatting" in prompt
     assert "numeric uncertainty compactly as `x±y` with no spaces around `±`" in prompt
-    assert "question joins two named settings with 'and'" in prompt
-    assert "two separately requested rows" in prompt
-    assert "not as one impossible combined setting" in prompt
-    assert "never invent a missing value" in prompt
-    assert "prefer each method's owning/original paper" in prompt
-    assert "that paper's own reported result" in prompt
-    assert "later paper's comparison or reproduction value" in prompt
-    assert "one direct table, figure, or text chunk per requested item" in prompt
+    assert "two\n  separately requested rows" in prompt
+    assert "not one impossible combined setting" in prompt
+    assert "Never invent" in prompt
+    assert "Prefer the owning paper" in prompt
+    assert "one direct object chunk per answer unit" in prompt
 
 
 def test_stage_two_summary_bounds_batch_answer_hints(tmp_path):
@@ -630,9 +1005,9 @@ def test_stage_two_summary_bounds_batch_answer_hints(tmp_path):
     context = {"text": "accepted evidence", "records_by_id": {}, "image_paths": []}
 
     prompt = reader._answer_prompt(query, [judgment], context)
-    summary_payload = prompt.split("Accepted paper summary:\n", 1)[1].split(
-        "\n\n", 1
-    )[0]
+    summary_payload = prompt.split(
+        "Accepted paper summary (fallible hints, not evidence):\n", 1
+    )[1].split("\n\n", 1)[0]
     summary = json.loads(summary_payload)
 
     assert summary[0]["candidate_answers_by_batch"] == batch_answers[:64]
@@ -862,22 +1237,8 @@ def test_answer_rejects_chunk_without_official_locator(tmp_path):
     llm = FakeLLM(
         responses=[
             _judgment("direct_answer", "p1#bad"),
-            json.dumps(
-                {
-                    "papers": [
-                        {"paper_id": "p1", "evidence_chunk_ids": ["p1#bad"]}
-                    ],
-                    "answer": {"freeform": {"text": "42"}},
-                }
-            ),
-            json.dumps(
-                {
-                    "papers": [
-                        {"paper_id": "p1", "evidence_chunk_ids": ["p1#bad"]}
-                    ],
-                    "answer": {"freeform": {"text": "42"}},
-                }
-            ),
+            json.dumps(_structured_answer_payload({"p1": ["p1#bad"]})),
+            json.dumps(_structured_answer_payload({"p1": ["p1#bad"]})),
         ]
     )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
@@ -910,21 +1271,12 @@ def test_answer_repairs_invalid_locator_once_and_keeps_fail_closed_evidence(tmp_
         "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
     )
     first_answer = json.dumps(
-        {
-            "papers": [
-                {"paper_id": "p1", "evidence_chunk_ids": ["p1#table"]},
-                {"paper_id": "p2", "evidence_chunk_ids": ["p2#bad-table"]},
-            ],
-            "answer": {"freeform": {"text": "42"}},
-        }
+        _structured_answer_payload(
+            {"p1": ["p1#table"], "p2": ["p2#bad-table"]}
+        )
     )
     repaired_answer = json.dumps(
-        {
-            "papers": [
-                {"paper_id": "p1", "evidence_chunk_ids": ["p1#table"]}
-            ],
-            "answer": {"freeform": {"text": "42"}},
-        }
+        _structured_answer_payload({"p1": ["p1#table"]})
     )
     llm = FakeLLM(responses=[first_answer, repaired_answer])
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm, answer_neighbor_chunks=0)
@@ -966,6 +1318,92 @@ def test_answer_repairs_invalid_locator_once_and_keeps_fail_closed_evidence(tmp_
     assert len(answer_record["attempts"]) == 2
     assert "valid official" in answer_record["attempts"][0]["parse_error"]
     assert answer_record["attempts"][1]["parse_error"] is None
+
+
+def test_answer_repairs_comparison_polarity_once(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    query = Query(
+        query_id="q-compare",
+        question="Does the first value exceed the second value?",
+        answer_types=["freeform"],
+    )
+    first = _structured_answer_payload({"p1": ["p1#table"]})
+    first["derivation"]["facts"] = [
+        {
+            "id": "f_left",
+            "name": "first value",
+            "value": 30,
+            "value_kind": "reported",
+            "paper_id": "p1",
+            "chunk_ids": ["p1#table"],
+        },
+        {
+            "id": "f_right",
+            "name": "second value",
+            "value": 21,
+            "value_kind": "reported",
+            "paper_id": "p1",
+            "chunk_ids": ["p1#table"],
+        },
+    ]
+    first["derivation"]["operations"] = [
+        {
+            "id": "compare_values",
+            "kind": "compare",
+            "fact_ids": ["f_left", "f_right"],
+            "left": 30,
+            "operator": ">",
+            "right": 21,
+            "result": False,
+            "answer_binding": {
+                "answer_path": "answer.freeform.text",
+                "expected": False,
+                "answer_fragment": "No",
+            },
+        }
+    ]
+    first["derivation"]["final_semantic_answer"] = "No"
+    first["answer"] = {"freeform": {"text": "No"}}
+    repaired = _structured_answer_payload({"p1": ["p1#table"]})
+    repaired["derivation"]["facts"] = first["derivation"]["facts"]
+    repaired["derivation"]["operations"] = [
+        {
+            "id": "compare_values",
+            "kind": "compare",
+            "fact_ids": ["f_left", "f_right"],
+            "left": 30,
+            "operator": ">",
+            "right": 21,
+            "result": True,
+            "answer_binding": {
+                "answer_path": "answer.freeform.text",
+                "expected": True,
+                "answer_fragment": "Yes",
+            },
+        }
+    ]
+    repaired["derivation"]["final_semantic_answer"] = "Yes"
+    repaired["answer"] = {"freeform": {"text": "Yes"}}
+    llm = FakeLLM(responses=[json.dumps(first), json.dumps(repaired)])
+    reader = PairwiseAOAIReader(ChunkStore(corpus), llm, answer_neighbor_chunks=0)
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    judgment = {
+        "paper_id": "p1",
+        "rank": 1,
+        "relevant": True,
+        "label": "direct_answer",
+        "evidence": [{"chunk_id": "p1#table", "quote_or_value": "30 and 21"}],
+    }
+
+    prediction, answer_record = reader.answer_from_judgments(
+        query, (candidate,), [judgment]
+    )
+
+    assert prediction.answer.freeform == {"text": "Yes"}
+    assert len(llm.calls) == 2
+    assert "30 > 21 is True" in answer_record["attempts"][0]["parse_error"]
+    assert "Correct the JSON once and recompute" in llm.calls[1]
 
 
 def test_candidate_cache_key_changes_when_image_bytes_change(tmp_path):
@@ -1010,7 +1448,7 @@ def test_image_policy_rejection_falls_back_to_text_and_is_recorded(tmp_path):
             self.calls = []
 
         def complete_with_metadata(self, prompt, image_paths=None):
-            self.calls.append(image_paths)
+            self.calls.append({"prompt": prompt, "image_paths": image_paths})
             if image_paths:
                 raise ImagePolicyError("content_policy_violation")
             return {"text": "{}", "usage": None}
@@ -1022,7 +1460,10 @@ def test_image_policy_rejection_falls_back_to_text_and_is_recorded(tmp_path):
 
     result = reader._complete("prompt", ["blocked.jpg"])
 
-    assert llm.calls == [["blocked.jpg"], None]
+    assert [item["image_paths"] for item in llm.calls] == [["blocked.jpg"], None]
+    assert "No image is attached" in llm.calls[1]["prompt"]
+    assert "Ignore every earlier image mapping" in llm.calls[1]["prompt"]
+    assert "do not claim visual inspection" in llm.calls[1]["prompt"]
     assert result["image_fallback_reason"] == "content_policy_violation"
     assert result["requested_image_count"] == 1
     assert result["attached_image_count"] == 0
@@ -1120,6 +1561,39 @@ def test_hybrid_visual_refine_upgrades_label_and_unions_evidence(tmp_path):
     assert judgment["label"] == "direct_answer"
     assert judgment["evidence_chunk_ids"] == ["p1#fig1", "p1#fig2"]
     assert judgment["visual_conflict"] is False
+
+
+def test_hybrid_refines_text_unreadable_paper_with_available_image(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_paths = _write_image_corpus(corpus, tmp_path, image_count=1)
+    unreadable = json.loads(_judgment("unreadable"))
+    unreadable.update(
+        {
+            "paper_role": "target_owner",
+            "missing_constraints": ["visible Figure 1 panels"],
+            "visual": {"required": True, "status": "missing"},
+        }
+    )
+    direct = json.loads(_judgment("direct_answer", "p1#fig1"))
+    direct["visual"] = {"required": True, "status": "inspected"}
+    llm = _RecordingMultimodalLLM(
+        [json.dumps(unreadable), json.dumps(direct)]
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus),
+        llm,
+        judgment_image_mode="text_then_relevant_images",
+    )
+
+    judgment = reader.judge_candidate(
+        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    )
+
+    assert [call["image_paths"] for call in llm.calls] == [[], image_paths]
+    assert judgment["text_judgment"]["label"] == "unreadable"
+    assert judgment["visual_judgment"]["label"] == "direct_answer"
+    assert judgment["label"] == "direct_answer"
+    assert judgment["visual_refinement_status"] == "complete"
 
 
 def test_hybrid_same_label_prefers_visual_candidate_answer_and_unions_evidence(

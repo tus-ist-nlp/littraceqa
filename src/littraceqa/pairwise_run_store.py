@@ -24,7 +24,11 @@ from littraceqa.di_pipeline.contracts import (
     Prediction,
     Query,
 )
-from littraceqa.submission import TOP_LEVEL_KEYS, prediction_to_submission
+from littraceqa.submission import (
+    TOP_LEVEL_KEYS,
+    TOP_LEVEL_KEYS_WITHOUT_EVIDENCE,
+    prediction_to_submission,
+)
 
 
 @dataclass(frozen=True)
@@ -281,18 +285,25 @@ def _prediction_from_checkpoint(raw: Any, *, query_id: str) -> Prediction:
 
 
 def _submission_from_answer_checkpoint(
-    query: Query, answer_record: dict[str, Any]
+    query: Query,
+    answer_record: dict[str, Any],
+    *,
+    require_evidence: bool = True,
 ) -> dict[str, Any]:
     prediction = _prediction_from_checkpoint(
         answer_record.get("prediction"), query_id=query.query_id
     )
-    return prediction_to_submission(query, prediction)
+    return prediction_to_submission(
+        query, prediction, require_evidence=require_evidence
+    )
 
 
 def materialize_run_outputs(
     run_dir: Path,
     handoffs: list[CandidateHandoff],
     reader: PairwiseAOAIReader,
+    *,
+    require_evidence: bool = True,
 ) -> tuple[int, int]:
     """Rebuild aggregate traces/submissions only from valid checkpoints."""
     traces: list[dict[str, Any]] = []
@@ -351,14 +362,19 @@ def materialize_run_outputs(
                 trace["completeness"] = answer_record.get("completeness")
                 trace["prediction"] = answer_record.get("prediction")
                 regenerated_submission = _submission_from_answer_checkpoint(
-                    handoff.query, answer_record
+                    handoff.query,
+                    answer_record,
+                    require_evidence=require_evidence,
                 )
 
         if paths.submission.exists() and answer_is_current:
             submission = json.loads(paths.submission.read_text(encoding="utf-8"))
+            allowed_top_level_keys = {TOP_LEVEL_KEYS}
+            if not require_evidence:
+                allowed_top_level_keys.add(TOP_LEVEL_KEYS_WITHOUT_EVIDENCE)
             if (
                 not isinstance(submission, dict)
-                or set(submission) != TOP_LEVEL_KEYS
+                or frozenset(submission) not in allowed_top_level_keys
                 or submission.get("query_id") != query_id
             ):
                 raise ValueError(f"invalid per-query submission: {paths.submission}")

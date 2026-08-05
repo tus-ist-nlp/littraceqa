@@ -13,11 +13,101 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE
-from evaluate import CANDIDATE_RECALL_KS, evaluate
+from evaluate import CANDIDATE_RECALL_KS, coarse_evidence_key, evaluate, evidence_set
 
 # 看板指標の k（reading.yaml の max_candidates と一致）。カーブにも含まれている前提。
 CANDIDATE_RECALL_K = 20
 assert CANDIDATE_RECALL_K in CANDIDATE_RECALL_KS
+
+
+def test_evidence_keys_match_current_official_locator_contract() -> None:
+    assert coarse_evidence_key(
+        {
+            "paper_id": "p1",
+            "source_type": "text_span",
+            "locator": {"section": "Results"},
+        }
+    ) == ("p1", "text_span", "Results", "")
+    assert coarse_evidence_key(
+        {
+            "paper_id": "p1",
+            "source_type": "equation_algorithm",
+            "locator": {"equation_id": "6"},
+        }
+    ) == ("p1", "equation_algorithm", "", "equation 6")
+    assert coarse_evidence_key(
+        {
+            "paper_id": "p1",
+            "source_type": "citation_context",
+            "locator": {"citation_id": "24"},
+        }
+    ) == ("p1", "citation_context", "", "citation 24")
+    assert evidence_set(
+        {
+            "evidence": [
+                {
+                    "paper_id": "p1",
+                    "source_type": "citation_context",
+                    "locator": {"citation_id": "24"},
+                }
+            ]
+        }
+    ) == {("p1", "citation_context", "", "citation 24")}
+
+
+def test_evaluation_targets_exclude_unscored_test_extra_evidence() -> None:
+    gold = _gold("q1", SINGLE, ["p1"])
+    gold.update(
+        {
+            "evaluation_targets": ["paper", "answer"],
+            "answer_types": ["multiple_choice"],
+            "answer": {"multiple_choice": {"gold": "E"}},
+            "evidence": [
+                {
+                    "paper_id": "p1",
+                    "source_type": "text_span",
+                    "locator": {"page": 1},
+                }
+            ],
+        }
+    )
+    pred = _pred("q1", ["p1"])
+    pred.update(
+        {
+            "gold_papers": [{"paper_id": "p1"}],
+            "answer": {"multiple_choice": {"gold": "E"}},
+            "evidence": [],
+        }
+    )
+
+    metrics = evaluate([gold], [pred])["metrics"]
+
+    assert metrics["paper_f1_macro"] == 1.0
+    assert metrics["multiple_choice_accuracy"] == 1.0
+    assert metrics["evidence_precision_macro"] is None
+    assert metrics["evidence_recall_macro"] is None
+    assert metrics["evidence_f1_macro"] is None
+
+
+def test_answer_only_target_does_not_emit_paper_or_candidate_scores() -> None:
+    gold = _gold("q1", SINGLE, ["p1"])
+    gold.update(
+        {
+            "evaluation_targets": ["answer"],
+            "answer_types": ["freeform"],
+            "answer": {"freeform": {"text": "answer"}},
+        }
+    )
+    pred = _pred("q1", ["p1"])
+    pred["answer"] = {"freeform": {"text": "answer"}}
+
+    metrics = evaluate([gold], [pred])["metrics"]
+
+    assert metrics["paper_precision_macro"] is None
+    assert metrics["paper_recall_macro"] is None
+    assert metrics["paper_f1_macro"] is None
+    assert metrics["candidate_recall_at20_total_macro"] is None
+    assert metrics["freeform_exact_match"] == 1.0
 
 
 def _gold(query_id: str, task_family: str, paper_ids: list[str]) -> dict:

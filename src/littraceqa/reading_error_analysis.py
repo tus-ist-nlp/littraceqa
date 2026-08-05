@@ -30,6 +30,7 @@ from littraceqa.reading_error_annotations import (
     ANSWER_REQUIRED_PAPER_IDS,
     KNOWN_DATASET_ISSUES,
 )
+from littraceqa.submission import coarse_evidence_key
 
 ERROR_CATEGORIES = (
     "candidate_missing",
@@ -47,7 +48,7 @@ ERROR_CATEGORIES = (
 _NON_TEXT_MODALITIES = frozenset(
     {"table", "figure", "citation_context", "equation_algorithm"}
 )
-_MC_LETTER = re.compile(r"[A-D]")
+_MC_LETTER = re.compile(r"[A-Z]")
 _SAFE_QUERY_ID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?")
 
 
@@ -635,14 +636,9 @@ def _evidence_keys(items: Sequence[dict[str, Any]]) -> set[tuple[str, str, str, 
         paper_id = _normalize_id(item.get("paper_id"))
         source_type = _normalize_id(item.get("source_type"))
         locator = item.get("locator") if isinstance(item.get("locator"), dict) else {}
-        page = _normalize_id(locator.get("page"))
-        object_id = ""
-        if source_type == "table":
-            object_id = _normalize_visible_id(locator.get("table_id"), "table")
-        elif source_type == "figure":
-            object_id = _normalize_visible_id(locator.get("figure_id"), "figure")
-        if paper_id and source_type and page:
-            keys.add((paper_id, source_type, page, object_id))
+        key = coarse_evidence_key(paper_id, source_type, locator)
+        if key[0] and key[1] and (key[2] or key[3]):
+            keys.add(key)
     return keys
 
 
@@ -759,9 +755,8 @@ def _answer_metrics(
         reading_exact_values.append(table_exact)
 
     metrics["answer_exact"] = bool(exact_values) and all(exact_values)
-    # Official A-D accuracy and reading quality are distinct when the organizer
-    # withholds option text.  Use the semantic option match for root-cause
-    # classification, while retaining answer_exact for the official shape.
+    # Official option-label accuracy and semantic reading quality are distinct.
+    # Current organizer inputs expose option text and may use labels beyond D.
     metrics["reading_answer_exact"] = bool(reading_exact_values) and all(
         reading_exact_values
     )
@@ -791,7 +786,7 @@ def _answer_format_issues(
         and "multiple_choice" in predicted
         and not _mc_letter(predicted.get("multiple_choice"))
     ):
-        issues.append("multiple_choice answer is not a letter A-D")
+        issues.append("multiple_choice answer is not a released A-Z label")
     if "table" in requested and "table" in predicted:
         table = predicted.get("table")
         rows = table.get("rows") if isinstance(table, dict) else None
@@ -963,23 +958,17 @@ def _normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", text)
 
 
-def _normalize_visible_id(value: Any, prefix: str) -> str:
-    text = _normalize_text(value)
-    if not text:
-        return ""
-    match = re.fullmatch(rf"{prefix}\s*(\d+[a-z]?)", text)
-    if match:
-        return f"{prefix} {match.group(1)}"
-    if re.fullmatch(r"\d+[a-z]?", text):
-        return f"{prefix} {text}"
-    return text
-
-
 def _nested_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
-        for key in ("text", "answer", "value", "semantic_answer"):
+        for key in (
+            "text",
+            "selected_option_text",
+            "answer",
+            "value",
+            "semantic_answer",
+        ):
             if value.get(key) is not None:
                 return str(value[key]).strip()
     return ""
@@ -991,6 +980,7 @@ def _mc_letter(value: Any) -> str:
     elif isinstance(value, dict):
         candidate = str(
             value.get("gold")
+            or value.get("label")
             or value.get("answer")
             or value.get("predicted_answer_id")
             or ""

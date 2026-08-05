@@ -1,6 +1,10 @@
 # PR #7 の固定候補を1論文ずつAOAIで読解判定し、採択根拠だけで回答する。
 # 検索、rerank、DI、再検索は行わない。認証値はリポジトリ直下の .env から読む。
 name: aoai_pairwise_reader
+# MinerU chunk metadata contains absolute paths from the student's machine.
+# Rebase them to the candidate-image bundle checked out beside this repository.
+# `--image-root` overrides this path on another machine.
+image_root: artifacts/student_corpus/mineru_images_candidates
 llm:
   name: azure_openai
   params:
@@ -17,5 +21,6 @@ params:
   # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
   answer_neighbor_chunks: 0
   max_answer_images: 12
-  # 最大候補50本すべてが採択されても、各論文の根拠を最低1件は残せる値。
-  max_evidence: 64
+  # 回答部品へ直接対応する最小根拠だけを提出する。関連論文集合は別管理する。
+  max_evidence: 32
+  max_evidence_per_paper: 4

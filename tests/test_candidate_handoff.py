@@ -48,12 +48,16 @@ def test_loader_projects_query_to_exact_production_fields(tmp_path):
         [
             {
                 "query_id": "q1",
+                "benchmark": "LitTraceQA",
                 "question": "What value is reported?",
-                "answer_types": ["freeform"],
-                "table_schema": None,
+                "answer_types": ["multiple_choice"],
+                "multiple_choice_options": [
+                    {"label": "A", "text": "One"},
+                    {"label": "B", "text": "Two"},
+                    {"label": "E", "text": "Five"},
+                ],
                 "task_family": "multi_paper",
                 "primary_evidence_type": "table",
-                "options": {"A": sentinel},
                 "_gold": {"answer": sentinel},
             }
         ],
@@ -63,15 +67,32 @@ def test_loader_projects_query_to_exact_production_fields(tmp_path):
     handoff = load_candidate_handoffs(queries, candidates)[0]
 
     assert handoff.query.query_id == "q1"
-    assert handoff.query.options is None
+    assert handoff.query.benchmark == "LitTraceQA"
+    assert handoff.query.options == {"A": "One", "B": "Two", "E": "Five"}
+    assert handoff.query.option_labels == ("A", "B", "E")
     assert handoff.query.task_family is None
     assert handoff.query.primary_evidence_type is None
     assert sentinel not in json.dumps(handoff.query.to_dict())
+    assert set(handoff.query.to_dict()) == {
+        "query_id",
+        "benchmark",
+        "question",
+        "answer_types",
+        "multiple_choice_options",
+    }
 
 
 @pytest.mark.parametrize(
     "oracle_field",
-    ["_gold", "answer", "evidence", "gold_papers", "task_family", "options"],
+    [
+        "_gold",
+        "answer",
+        "evidence",
+        "gold_papers",
+        "task_family",
+        "options",
+        "multiple_choice_options",
+    ],
 )
 def test_candidate_sidecar_rejects_oracle_fields(oracle_field):
     with pytest.raises(ValueError, match="oracle/development"):
@@ -81,6 +102,94 @@ def test_candidate_sidecar_rejects_oracle_fields(oracle_field):
 def test_candidate_sidecar_rejects_query_payload():
     with pytest.raises(ValueError, match="separate sidecar"):
         candidate_papers_from_record(_candidate_record(question="must not be here"))
+
+
+def test_production_loader_accepts_legacy_option_mapping(tmp_path):
+    queries = tmp_path / "queries.jsonl"
+    candidates = tmp_path / "candidates.jsonl"
+    _write_jsonl(
+        queries,
+        [
+            {
+                "query_id": "q1",
+                "question": "Choose one",
+                "answer_types": ["multiple_choice"],
+                "options": {"A": "First", "E": "Fifth"},
+            }
+        ],
+    )
+    _write_jsonl(candidates, [_candidate_record()])
+
+    query = load_candidate_handoffs(queries, candidates)[0].query
+
+    assert query.options == {"A": "First", "E": "Fifth"}
+    assert "options" not in query.to_dict()
+    assert query.to_dict()["multiple_choice_options"] == [
+        {"label": "A", "text": "First"},
+        {"label": "E", "text": "Fifth"},
+    ]
+
+
+def test_production_loader_requires_options_for_multiple_choice(tmp_path):
+    queries = tmp_path / "queries.jsonl"
+    candidates = tmp_path / "candidates.jsonl"
+    _write_jsonl(
+        queries,
+        [
+            {
+                "query_id": "q1",
+                "question": "Choose one",
+                "answer_types": ["multiple_choice"],
+            }
+        ],
+    )
+    _write_jsonl(candidates, [_candidate_record()])
+
+    with pytest.raises(ValueError, match="requires at least two"):
+        load_candidate_handoffs(queries, candidates)
+
+
+def test_production_loader_rejects_noncanonical_official_option_label(tmp_path):
+    queries = tmp_path / "queries.jsonl"
+    candidates = tmp_path / "candidates.jsonl"
+    _write_jsonl(
+        queries,
+        [
+            {
+                "query_id": "q1",
+                "question": "Choose one",
+                "answer_types": ["multiple_choice"],
+                "multiple_choice_options": [
+                    {"label": "a", "text": "First"},
+                    {"label": "B", "text": "Second"},
+                ],
+            }
+        ],
+    )
+    _write_jsonl(candidates, [_candidate_record()])
+
+    with pytest.raises(ValueError, match="already be uppercase"):
+        load_candidate_handoffs(queries, candidates)
+
+
+def test_production_loader_rejects_development_options_on_freeform(tmp_path):
+    queries = tmp_path / "queries.jsonl"
+    candidates = tmp_path / "candidates.jsonl"
+    _write_jsonl(
+        queries,
+        [
+            {
+                "query_id": "q1",
+                "question": "Answer freely",
+                "answer_types": ["freeform"],
+                "options": {"A": "First", "B": "Second"},
+            }
+        ],
+    )
+    _write_jsonl(candidates, [_candidate_record()])
+
+    with pytest.raises(ValueError, match="only valid for multiple_choice"):
+        load_candidate_handoffs(queries, candidates)
 
 
 def test_candidate_ranks_must_be_consecutive():

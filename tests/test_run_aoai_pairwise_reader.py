@@ -93,6 +93,16 @@ def test_pairwise_build_llm_injects_fixed_grounding_system(monkeypatch):
     assert "検索や外部知識を使わない" in captured["system"]
 
 
+def test_evidence_policy_auto_distinguishes_test_extra() -> None:
+    assert _RUNNER.require_evidence_for_input("data/test.jsonl", "auto") is True
+    assert (
+        _RUNNER.require_evidence_for_input("data/test_extra.jsonl", "auto")
+        is False
+    )
+    assert _RUNNER.require_evidence_for_input("anything.jsonl", "required") is True
+    assert _RUNNER.require_evidence_for_input("anything.jsonl", "optional") is False
+
+
 def test_query_id_path_guard_rejects_dot_segments():
     assert _SAFE_QUERY_ID.fullmatch("q_001")
     assert not _SAFE_QUERY_ID.fullmatch(".")
@@ -136,7 +146,7 @@ def test_missing_figure_fallback_is_explicit_and_part_of_manifest(tmp_path):
     parser = _RUNNER.build_parser()
     strict_args = parser.parse_args(base_args)
     allowed_args = parser.parse_args(
-        [*base_args, "--allow-missing-figure-images"]
+        [*base_args, "--allow-missing-required-visual-images"]
     )
     store = _RUNNER.ChunkStore(chunks)
     config = {"llm": {"name": "fake", "params": {}}, "params": {}}
@@ -149,6 +159,58 @@ def test_missing_figure_fallback_is_explicit_and_part_of_manifest(tmp_path):
     assert strict_manifest["reader"]["allow_missing_figure_images"] is False
     assert allowed_manifest["reader"]["allow_missing_figure_images"] is True
     assert strict_manifest != allowed_manifest
+
+
+def test_legacy_missing_figure_flag_remains_a_cli_alias():
+    parser = _RUNNER.build_parser()
+    base_args = [
+        "--queries",
+        "queries.jsonl",
+        "--candidates",
+        "candidates.jsonl",
+        "--chunks",
+        "chunks.jsonl",
+        "--run-dir",
+        "run",
+    ]
+
+    preferred = parser.parse_args(
+        [*base_args, "--allow-missing-required-visual-images"]
+    )
+    legacy = parser.parse_args([*base_args, "--allow-missing-figure-images"])
+
+    assert preferred.allow_missing_figure_images is True
+    assert legacy.allow_missing_figure_images is True
+
+
+def test_resolve_image_root_prefers_cli_and_resolves_config_from_repo(tmp_path):
+    repo_root = tmp_path / "repo"
+    config_root = repo_root / "artifacts" / "images"
+    cli_root = tmp_path / "cli-images"
+    config_root.mkdir(parents=True)
+    cli_root.mkdir()
+    config = {"image_root": "artifacts/images"}
+
+    resolved_config, config_source = _RUNNER.resolve_image_root(
+        None, config, repo_root=repo_root
+    )
+    resolved_cli, cli_source = _RUNNER.resolve_image_root(
+        cli_root, config, repo_root=repo_root
+    )
+
+    assert resolved_config == str(config_root.resolve())
+    assert config_source == "config"
+    assert resolved_cli == str(cli_root.resolve())
+    assert cli_source == "cli"
+
+
+def test_resolve_image_root_rejects_missing_directory(tmp_path):
+    with pytest.raises(ValueError, match="config image root is not a directory"):
+        _RUNNER.resolve_image_root(
+            None,
+            {"image_root": "missing-images"},
+            repo_root=tmp_path,
+        )
 
 
 def test_manifest_fingerprints_all_pairwise_runtime_dependencies(
@@ -260,7 +322,11 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 
 def _checkpointed_run(
-    tmp_path: Path, *, candidate_count: int = 1, judgment_count: int | None = None
+    tmp_path: Path,
+    *,
+    candidate_count: int = 1,
+    judgment_count: int | None = None,
+    include_evidence: bool = True,
 ):
     judgment_count = candidate_count if judgment_count is None else judgment_count
     chunks = tmp_path / "chunks.jsonl"
@@ -322,14 +388,18 @@ def _checkpointed_run(
     prediction = Prediction(
         query_id=query.query_id,
         gold_papers=[{"paper_id": "p1"}],
-        evidence=[
-            Evidence(
-                paper_id="p1",
-                source_type="text_span",
-                locator=EvidenceLocator(page=1),
-                evidence_text_or_value="42",
-            )
-        ],
+        evidence=(
+            [
+                Evidence(
+                    paper_id="p1",
+                    source_type="text_span",
+                    locator=EvidenceLocator(page=1),
+                    evidence_text_or_value="42",
+                )
+            ]
+            if include_evidence
+            else []
+        ),
         answer=Answer(freeform={"text": "42"}),
         candidate_papers=[candidate.paper_id for candidate in candidates],
     )
@@ -339,7 +409,9 @@ def _checkpointed_run(
         "cache_key": reader.answer_cache_key(query, judgments),
         "prediction": prediction.to_dict(),
     }
-    submission = _RUNNER.prediction_to_submission(query, prediction)
+    submission = _RUNNER.prediction_to_submission(
+        query, prediction, require_evidence=include_evidence
+    )
     run_dir = tmp_path / "run"
     query_dir = run_dir / query.query_id
     query_dir.mkdir(parents=True)
@@ -366,6 +438,33 @@ def test_materialize_rejects_submission_that_differs_from_answer_checkpoint(
 
     with pytest.raises(ValueError, match="does not match answer checkpoint"):
         _RUNNER.materialize_run_outputs(run_dir, [handoff], reader)
+
+
+def test_materialize_accepts_test_extra_submission_without_evidence(tmp_path):
+    run_dir, handoff, reader, submission = _checkpointed_run(
+        tmp_path, include_evidence=False
+    )
+
+    assert set(submission) == {"query_id", "gold_papers", "answer"}
+    assert _RUNNER.materialize_run_outputs(
+        run_dir,
+        [handoff],
+        reader,
+        require_evidence=False,
+    ) == (1, 1)
+
+
+def test_materialize_ignores_stale_answer_payload_until_it_is_recomputed(tmp_path):
+    run_dir, handoff, reader, _ = _checkpointed_run(tmp_path)
+    answer_path = run_dir / "q1" / "answer.json"
+    answer_record = json.loads(answer_path.read_text(encoding="utf-8"))
+    answer_record["cache_key"] = "stale-prompt-version"
+    answer_record["prediction"] = "old payload no longer parseable"
+    answer_path.write_text(json.dumps(answer_record), encoding="utf-8")
+
+    assert _RUNNER.materialize_run_outputs(run_dir, [handoff], reader) == (1, 0)
+    trace = json.loads((run_dir / "reading_traces.jsonl").read_text(encoding="utf-8"))
+    assert trace["answer_checkpoint_current"] is False
 
 
 def test_materialize_rejects_answer_with_missing_candidate_judgment(tmp_path):
@@ -429,18 +528,66 @@ def test_runner_checkpoints_each_pair_and_emits_analyzer_trace(tmp_path):
         ],
     )
     judgment = {
+        "paper_role": "target_owner",
         "label": "direct_answer",
         "answerable_from_this_paper": True,
         "satisfied_constraints": ["reported value"],
         "missing_constraints": [],
-        "evidence": [{"chunk_id": "p1#1", "quote_or_value": "42"}],
-        "candidate_answer": {"meaning": "42"},
+        "blocking_mismatches": [],
+        "visual": {"required": False, "status": "not_needed"},
+        "evidence": [
+            {
+                "chunk_id": "p1#1",
+                "purpose": "answer",
+                "quote_or_value": "42",
+            }
+        ],
+        "candidate_answer": {
+            "units": [
+                {
+                    "name": "reported value",
+                    "value": "42",
+                    "value_kind": "reported",
+                    "matched_option_labels": [],
+                }
+            ],
+            "rows": [],
+        },
         "confidence": 1.0,
         "reason": "direct statement",
     }
     answer = {
+        "status": "ready",
         "papers": [{"paper_id": "p1", "evidence_chunk_ids": ["p1#1"]}],
+        "paper_relevance": [
+            {
+                "paper_id": "p1",
+                "role": "target_owner",
+                "reason": "owns and reports the requested value",
+            }
+        ],
+        "derivation": {
+            "facts": [
+                {
+                    "id": "f_reported_value",
+                    "name": "reported value",
+                    "value": "42",
+                    "value_kind": "reported",
+                    "paper_id": "p1",
+                    "chunk_ids": ["p1#1"],
+                }
+            ],
+            "operations": [],
+            "final_semantic_answer": "42",
+        },
         "answer": {"freeform": {"text": "42"}},
+        "support": [
+            {
+                "answer_path": "answer.freeform.text",
+                "paper_id": "p1",
+                "chunk_ids": ["p1#1"],
+            }
+        ],
         "completeness": {"answered_parts": ["value"], "missing": []},
     }
     config.write_text(

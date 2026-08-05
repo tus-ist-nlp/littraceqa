@@ -5,11 +5,11 @@ submission. This linter validates a prediction file against only the released
 inputs file and converts silent zero-score failure modes into pre-submission
 errors: unparsable lines, missing/duplicate query_ids, answer objects that do
 not match the declared answer_types, out-of-range multiple-choice letters
-(strict mode requires A-D when no option mapping is known),
+(current inputs provide the valid labels per question),
 empty freeform answers, empty table rows on table-typed questions (guaranteed
-zero table metrics), evidence items missing the fields the evaluator keys on
-(it silently drops items without paper_id/source_type/page, and table or
-figure items without their object id), and empty paper lists.
+zero table metrics), evidence items missing the fields the evaluator keys on,
+and empty paper lists. Multiple-choice labels are checked against each released
+input row's ``multiple_choice_options``; the number of options is not fixed.
 
 The default mode remains backwards compatible with existing repository output
 aliases and richer locator objects. ``--strict-official-shape`` additionally
@@ -35,6 +35,7 @@ from .submission import (
     MULTIPLE_CHOICE_KEYS,
     OFFICIAL_SOURCE_TYPES,
     TOP_LEVEL_KEYS,
+    TOP_LEVEL_KEYS_WITHOUT_EVIDENCE,
 )
 
 FREEFORM_WARN_CHARS = 200
@@ -101,8 +102,8 @@ def read_predictions(path: Path, checks: CheckCounter) -> list[Record]:
 def load_option_keys(path: Path | None) -> dict[str, tuple[str, ...]]:
     """Map query_id -> valid multiple-choice letter keys.
 
-    Accepts either an options sidecar with a top-level ``options`` object or a
-    gold-shaped file with ``answer.multiple_choice.options``.
+    Accepts current ``multiple_choice_options``, a legacy top-level ``options``
+    object, or a gold-shaped ``answer.multiple_choice.options`` object.
     """
     if path is None:
         return {}
@@ -111,10 +112,24 @@ def load_option_keys(path: Path | None) -> dict[str, tuple[str, ...]]:
         query_id = str(record.get("query_id") or "")
         if not query_id:
             continue
+        current_options = record.get("multiple_choice_options")
+        if isinstance(current_options, list):
+            labels = tuple(
+                str(option.get("label") or "").strip().upper()
+                for option in current_options
+                if isinstance(option, dict)
+            )
+            if labels and all(SINGLE_LETTER_RE.fullmatch(label) for label in labels):
+                keys[query_id] = labels
+                continue
         options = record.get("options")
         if not isinstance(options, dict):
             answer = record.get("answer") if isinstance(record.get("answer"), dict) else {}
-            mc = answer.get("multiple_choice") if isinstance(answer.get("multiple_choice"), dict) else {}
+            mc = (
+                answer.get("multiple_choice")
+                if isinstance(answer.get("multiple_choice"), dict)
+                else {}
+            )
             options = mc.get("options")
         if isinstance(options, dict) and options:
             keys[query_id] = tuple(str(key).upper() for key in options)
@@ -156,10 +171,10 @@ def check_answer(
             checks.fail("multiple_choice object exact", query_id)
         letter = predicted_letter(record, strict=strict)
         valid = option_keys.get(query_id)
-        if strict:
-            letter_valid = letter in MULTIPLE_CHOICE_KEYS
-        else:
-            letter_valid = bool(SINGLE_LETTER_RE.fullmatch(letter))
+        letter_valid = (
+            bool(SINGLE_LETTER_RE.fullmatch(letter))
+            and letter in MULTIPLE_CHOICE_KEYS
+        )
         if not letter_valid or (valid is not None and letter not in valid):
             checks.fail("multiple_choice letter within valid keys", query_id)
 
@@ -185,15 +200,12 @@ def check_answer(
     if "table" in answer_types:
         table = answer.get("table")
         table_keys = set(table) if isinstance(table, dict) else set()
-        if strict and table_keys not in ({"rows"}, {"rows", "schema"}):
+        # The pinned organizer validator and submission JSON schema allow only
+        # ``rows`` here.  Some prose documentation calls a repeated schema
+        # optional, but accepting it locally would green-light a file that the
+        # released upload validator rejects.
+        if strict and table_keys != {"rows"}:
             checks.fail("table object exact", query_id)
-        if (
-            strict
-            and isinstance(table, dict)
-            and "schema" in table
-            and table.get("schema") != table_schema
-        ):
-            checks.fail("table schema matches input", query_id)
         rows = table.get("rows") if isinstance(table, dict) else None
         if not isinstance(rows, list) or not rows:
             # Empty rows guarantee zero table metrics, so this is an error.
@@ -295,20 +307,49 @@ def check_evidence(
             page_valid = not isinstance(page, bool) and isinstance(page, int) and page >= 1
         else:
             page_valid = bool(str(page if page is not None else "").strip())
-        if not page_valid:
-            checks.fail("evidence locator has page", query_id)
         allowed_locator_keys = {"page"}
+        location_valid = page_valid
         if source_type == "table":
+            allowed_locator_keys.add("section")
+            location_valid = page_valid or bool(
+                str(locator.get("section") or "").strip()
+            )
             table_id = locator.get("table_id")
             if not str(table_id or "").strip():
                 checks.fail("table evidence has locator.table_id", query_id)
             allowed_locator_keys.add("table_id")
-        if source_type == "figure":
+        elif source_type == "figure":
+            allowed_locator_keys.add("section")
+            location_valid = page_valid or bool(
+                str(locator.get("section") or "").strip()
+            )
             figure_id = locator.get("figure_id")
             if not str(figure_id or "").strip():
                 checks.fail("figure evidence has locator.figure_id", query_id)
             allowed_locator_keys.add("figure_id")
-        if strict and set(locator) != allowed_locator_keys:
+        elif source_type == "text_span":
+            allowed_locator_keys.add("section")
+            location_valid = page_valid or bool(str(locator.get("section") or "").strip())
+        elif source_type == "equation_algorithm":
+            allowed_locator_keys.update(
+                {"section", "equation_id", "algorithm_id"}
+            )
+            location_valid = page_valid or any(
+                str(locator.get(key) or "").strip()
+                for key in ("section", "equation_id", "algorithm_id")
+            )
+        elif source_type == "citation_context":
+            allowed_locator_keys.update({"section", "citation_id"})
+            location_valid = page_valid or any(
+                str(locator.get(key) or "").strip()
+                for key in ("section", "citation_id")
+            )
+        if not location_valid:
+            checks.fail("evidence locator has official location", query_id)
+        if strict and (
+            not set(locator).issubset(allowed_locator_keys)
+            or not location_valid
+        ):
             checks.fail("evidence locator is coarse official shape", query_id)
 
 
@@ -352,8 +393,18 @@ def validate(
     *,
     strict: bool = False,
     canonical_papers: set[str] | None = None,
+    evidence_required: bool = True,
 ) -> None:
     canonical_papers = canonical_papers or set()
+    input_option_keys = load_option_keys_from_records(inputs)
+    for query_id, labels in option_keys.items():
+        existing = input_option_keys.get(query_id)
+        if existing is not None and existing != labels:
+            raise ValueError(
+                f"option labels disagree between input and sidecar for {query_id}"
+            )
+        input_option_keys[query_id] = labels
+    option_keys = input_option_keys
     base_checks = (
         "query_id sets identical",
         "query_ids non-empty",
@@ -367,7 +418,7 @@ def validate(
         "evidence item is an object",
         "evidence item has paper_id",
         "evidence source_type in official values",
-        "evidence locator has page",
+        "evidence locator has official location",
         "table evidence has locator.table_id",
         "figure evidence has locator.figure_id",
         "papers list non-empty",
@@ -380,7 +431,6 @@ def validate(
         "freeform object exact",
         "freeform text is string",
         "table object exact",
-        "table schema matches input",
         "table rows match schema columns",
         "table cell types match schema",
         "table row keys non-empty",
@@ -437,8 +487,12 @@ def validate(
 
     for record in predictions:
         query_id = str(record.get("query_id") or "")
-        if strict and set(record) != TOP_LEVEL_KEYS:
-            checks.fail("top-level keys exact", query_id)
+        if strict:
+            allowed_top_level_keys = {TOP_LEVEL_KEYS}
+            if not evidence_required:
+                allowed_top_level_keys.add(TOP_LEVEL_KEYS_WITHOUT_EVIDENCE)
+            if frozenset(record) not in allowed_top_level_keys:
+                checks.fail("top-level keys exact", query_id)
         sample = input_by_id.get(query_id)
         if sample is None:
             continue
@@ -455,13 +509,14 @@ def validate(
         submitted_papers = check_papers(
             record, canonical_papers, checks, strict=strict
         )
-        check_evidence(
-            record,
-            submitted_papers,
-            canonical_papers,
-            checks,
-            strict=strict,
-        )
+        if evidence_required or "evidence" in record:
+            check_evidence(
+                record,
+                submitted_papers,
+                canonical_papers,
+                checks,
+                strict=strict,
+            )
 
 
 def print_summary(checks: CheckCounter) -> None:
@@ -478,6 +533,27 @@ def print_summary(checks: CheckCounter) -> None:
         print(f"{name:<{width}}  {count:>5}  {status}")
         if count and name in checks.examples:
             print(f"{'':<{width}}         e.g. {', '.join(checks.examples[name])}")
+
+
+def load_option_keys_from_records(
+    records: list[Record],
+) -> dict[str, tuple[str, ...]]:
+    """Extract current official labels without requiring a sidecar file."""
+
+    keys: dict[str, tuple[str, ...]] = {}
+    for record in records:
+        query_id = str(record.get("query_id") or "")
+        options = record.get("multiple_choice_options")
+        if not query_id or not isinstance(options, list):
+            continue
+        labels = tuple(
+            str(option.get("label") or "").strip().upper()
+            for option in options
+            if isinstance(option, dict)
+        )
+        if labels:
+            keys[query_id] = labels
+    return keys
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -516,10 +592,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Optional JSONL with per-question multiple-choice options "
-            "(top-level 'options' or gold-shaped answer.multiple_choice.options). "
-            "Questions without known options accept A-D only."
+            "Legacy compatibility JSONL with per-question options. Current "
+            "official inputs provide multiple_choice_options directly."
         ),
+    )
+    parser.add_argument(
+        "--evidence-optional",
+        action="store_true",
+        help="Allow evidence to be omitted for the official test_extra split.",
     )
     return parser
 
@@ -552,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
         checks,
         strict=args.strict_official_shape,
         canonical_papers=canonical_papers,
+        evidence_required=not args.evidence_optional,
     )
     print(f"inputs: {len(inputs)} questions ({args.inputs})")
     print(f"predictions: {len(predictions)} parsed lines ({args.predictions})")

@@ -23,11 +23,11 @@ from dataclasses import dataclass, field
 
 # 1. Query -- システムへの入力1件（質問）。
 #
-# 本番の入力に実際に入っているのは query_id / question / answer_types / table_schema の
-# 4つだけで、task_family と primary_evidence_type は与えられない（手元の
-# validation_inputs.jsonl にはこの2つが入っているが、本番では欠ける）。
-# そのため両者は Optional とし、無い場合は littraceqa.di_pipeline.agent.task_family で question から
-# 推定する。
+# 現行の公式入力は query_id / benchmark / question / answer_types と、回答形式に応じた
+# multiple_choice_options / table_schema から成る。task_family と
+# primary_evidence_type は開発用 validation にしか無く、本番では与えられない。
+# そのため後二者は後方互換のためだけに Optional で保持し、本番入力を直列化する
+# ``to_dict`` には含めない。
 @dataclass
 class Query:
     query_id: str
@@ -35,40 +35,140 @@ class Query:
     answer_types: list[str]
     # 回答が table 型のときだけ与えられる列定義: [{"name": ..., "type": ..., "is_row_key": bool}]
     table_schema: list[dict] | None = None
-    # multiple_choice の選択肢 {"A": "...", "B": "..."}。**本番入力には無い**（本番は
-    # query_id / question / answer_types / table_schema の4つだけ）。よってここが埋まるのは
-    # run_search.py --options-file で validation.jsonl から結合した oracle 実行のときだけで、
-    # 「選択肢を教えてもらえたら何点取れるか」を測る ablation 用。本番では常に None になり、
-    # そのとき ReadingAgent は multiple_choice を答えられない（選択肢が分からなければ
-    # どの文字を出すべきか決まらない）。
-    options: dict | None = None
+    # 内部では参照しやすい label -> text の順序付き辞書に正規化する。公式 JSONL は
+    # ``multiple_choice_options: [{"label": "A", "text": "..."}, ...]`` 形式。
+    # 選択肢数は4個とは限らず、E などの label も有効。
+    options: dict[str, str] | None = None
+    benchmark: str = "LitTraceQA"
     # 以下2つは本番入力には無い。手元の検証データにだけ入っている。
     task_family: str | None = None  # 観測値: "hidden_source_single_paper" / "multi_paper"
     primary_evidence_type: str | None = None  # 観測値: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
 
+    def __post_init__(self) -> None:
+        if self.options is not None:
+            self.options = _normalize_multiple_choice_options(
+                self.options, field_name="options"
+            )
+
+    @property
+    def option_labels(self) -> tuple[str, ...]:
+        """Return valid multiple-choice labels in the released input order."""
+
+        return tuple(self.options or ())
+
     def to_dict(self) -> dict:
-        return {
+        """Serialize the released participant-input shape.
+
+        Development-only classifier hints and the ambiguous legacy ``options``
+        mapping are deliberately omitted.
+        """
+
+        output = {
             "query_id": self.query_id,
+            "benchmark": self.benchmark,
             "question": self.question,
             "answer_types": self.answer_types,
-            "table_schema": self.table_schema,
-            "options": self.options,
-            "task_family": self.task_family,
-            "primary_evidence_type": self.primary_evidence_type,
         }
+        if self.options is not None:
+            output["multiple_choice_options"] = [
+                {"label": label, "text": text}
+                for label, text in self.options.items()
+            ]
+        if self.table_schema:
+            output["table_schema"] = self.table_schema
+        return output
 
     @classmethod
     def from_dict(cls, d: dict) -> Query:
-        """入力 jsonl の1レコードから Query を作る。本番に無いフィールドは None になる。"""
+        """Create a query from current official or legacy input records.
+
+        The current official list form is canonical.  A top-level legacy
+        ``options`` mapping remains accepted so old validation scripts can be
+        migrated without copying gold answers into prompts.
+        """
+
+        official_options = d.get("multiple_choice_options")
+        legacy_options = d.get("options")
+        if official_options is not None and legacy_options is not None:
+            normalized_official = _normalize_multiple_choice_options(
+                official_options, field_name="multiple_choice_options"
+            )
+            normalized_legacy = _normalize_multiple_choice_options(
+                legacy_options, field_name="options"
+            )
+            if normalized_official != normalized_legacy:
+                raise ValueError(
+                    "multiple_choice_options and legacy options disagree"
+                )
+            options = normalized_official
+        else:
+            raw_options = (
+                official_options if official_options is not None else legacy_options
+            )
+            options = (
+                _normalize_multiple_choice_options(
+                    raw_options,
+                    field_name=(
+                        "multiple_choice_options"
+                        if official_options is not None
+                        else "options"
+                    ),
+                )
+                if raw_options is not None
+                else None
+            )
         return cls(
             query_id=d["query_id"],
             question=d["question"],
             answer_types=d.get("answer_types") or [],
             table_schema=d.get("table_schema"),
-            options=d.get("options"),
+            options=options,
+            benchmark=str(d.get("benchmark") or "LitTraceQA"),
             task_family=d.get("task_family"),
             primary_evidence_type=d.get("primary_evidence_type"),
         )
+
+
+def _normalize_multiple_choice_options(
+    raw_options: object, *, field_name: str
+) -> dict[str, str]:
+    """Normalize official list and legacy mapping option shapes."""
+
+    if isinstance(raw_options, dict):
+        items = list(raw_options.items())
+    elif isinstance(raw_options, list):
+        items = []
+        for position, item in enumerate(raw_options, start=1):
+            if not isinstance(item, dict) or set(item) != {"label", "text"}:
+                raise TypeError(
+                    f"{field_name}[{position}] must contain only label and text"
+                )
+            items.append((item["label"], item["text"]))
+    else:
+        raise TypeError(f"{field_name} must be a list or mapping")
+
+    normalized: dict[str, str] = {}
+    for raw_label, raw_text in items:
+        if not isinstance(raw_label, str) or not raw_label.isascii():
+            raise TypeError(f"{field_name} labels must be strings")
+        label = raw_label.strip().upper()
+        if field_name == "multiple_choice_options" and raw_label != label:
+            raise ValueError(
+                "multiple_choice_options labels must already be uppercase A-Z "
+                f"letters: {raw_label!r}"
+            )
+        if len(label) != 1 or not ("A" <= label <= "Z"):
+            raise ValueError(
+                f"{field_name} label must be one uppercase A-Z letter: {raw_label!r}"
+            )
+        if label in normalized:
+            raise ValueError(f"duplicate multiple-choice label: {label}")
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            raise ValueError(f"{field_name} option {label} has empty text")
+        normalized[label] = raw_text.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} must not be empty")
+    return normalized
 
 
 # 2. PaperMeta -- data/paper_metadata.jsonl の1レコード。
@@ -189,6 +289,7 @@ class EvidenceLocator:
     region: str | None = None
     # equation_algorithm
     equation_id: str | None = None
+    algorithm_id: str | None = None
     # citation_context
     citation_id: str | None = None
     cited_paper: str | None = None
@@ -206,6 +307,7 @@ class EvidenceLocator:
             "figure_id": self.figure_id,
             "region": self.region,
             "equation_id": self.equation_id,
+            "algorithm_id": self.algorithm_id,
             "citation_id": self.citation_id,
             "cited_paper": self.cited_paper,
         }

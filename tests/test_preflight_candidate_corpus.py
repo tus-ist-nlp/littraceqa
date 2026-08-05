@@ -6,6 +6,7 @@ from pathlib import Path
 
 from littraceqa.candidate_handoff import CandidateHandoff, CandidatePaper
 from littraceqa.chunk_store import ChunkStore
+from littraceqa.corpus_preflight import requires_visual_image
 from littraceqa.di_pipeline.contracts import Query
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "preflight_candidate_corpus.py"
@@ -135,15 +136,23 @@ def test_preflight_rejects_corrupt_image_for_figure_query(tmp_path):
     assert report["image_paths"]["unreadable"] == 1
     assert report["queries_without_figure_images"] == ["q1"]
 
-    # The fallback is intentionally limited to missing images. A declared but
-    # corrupt image remains a fatal, independently reported preflight error.
+    # The per-query gate can be downgraded explicitly, but a corpus whose entire
+    # declared image set is unreadable remains a non-overridable root/data error.
     allowed_report, allowed_errors = MODULE.inspect_corpus(
         [handoff],
         ChunkStore(chunks),
         {"p1"},
         allow_missing_figure_images=True,
     )
-    assert allowed_errors == ["1 declared image files are unreadable or corrupt"]
+    assert len(allowed_errors) == 1
+    assert "all declared table/figure images are unavailable" in allowed_errors[0]
+    assert not any(
+        "explicit visual-reading queries" in error for error in allowed_errors
+    )
+    assert any(
+        "1 declared image files are unreadable or corrupt" in warning
+        for warning in allowed_report["warnings"]
+    )
     assert allowed_report["allow_missing_figure_images"] is True
 
 
@@ -184,12 +193,247 @@ def test_preflight_can_explicitly_warn_for_missing_figure_images(tmp_path):
     )
 
     assert strict_report["allow_missing_figure_images"] is False
-    assert strict_errors == [
-        "1 figure queries have no readable candidate image"
-    ]
-    assert allowed_errors == []
+    assert any("explicit visual-reading queries" in error for error in strict_errors)
+    assert any(
+        "all declared table/figure images are unavailable" in error
+        for error in strict_errors
+    )
+    # The per-query escape hatch cannot hide a globally wrong image root.
+    assert len(allowed_errors) == 1
+    assert "all declared table/figure images are unavailable" in allowed_errors[0]
     assert allowed_report["queries_without_figure_images"] == ["q1"]
     assert any(
-        "allowed by --allow-missing-figure-images" in warning
+        "allowed by --allow-missing-required-visual-images" in warning
         for warning in allowed_report["warnings"]
     )
+
+
+def test_preflight_table_answer_type_does_not_require_table_source(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    chunks.write_text(
+        json.dumps(
+            {
+                "paper_id": "p1",
+                "chunk_id": "p1#text",
+                "chunk_type": "text_span",
+                "text": "The paper reports Alpha=1 and Beta=2.",
+                "metadata": {"page": 1},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    handoff = CandidateHandoff(
+        Query(
+            "q1",
+            "Compile the reported Alpha and Beta values.",
+            ["table"],
+            [
+                {"name": "name", "type": "string", "is_row_key": True},
+                {"name": "value", "type": "number", "is_row_key": False},
+            ],
+        ),
+        (CandidatePaper("p1", 1),),
+    )
+
+    report, errors = MODULE.inspect_corpus([handoff], ChunkStore(chunks), {"p1"})
+
+    assert errors == []
+    assert report["missing_source_hints"] == []
+    assert report["visual_image_required_queries"] == []
+
+
+def test_preflight_source_word_hints_are_warning_only(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    chunks.write_text(
+        json.dumps(
+            {
+                "paper_id": "p1",
+                "chunk_id": "p1#text",
+                "chunk_type": "text_span",
+                "text": "The extracted prose contains the requested values.",
+                "metadata": {"page": 1},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    handoff = CandidateHandoff(
+        Query(
+            "q1",
+            "Report the values discussed around Table 1 and Equation 2.",
+            ["freeform"],
+            None,
+        ),
+        (CandidatePaper("p1", 1),),
+    )
+
+    report, errors = MODULE.inspect_corpus([handoff], ChunkStore(chunks), {"p1"})
+
+    assert errors == []
+    assert report["missing_source_hints"] == [
+        {"query_id": "q1", "source_type": "equation_algorithm"},
+        {"query_id": "q1", "source_type": "table"},
+    ]
+    assert any("diagnostic only" in warning for warning in report["warnings"])
+    assert report["queries_without_required_visual_images"] == []
+
+
+def test_global_image_path_failure_is_fatal_even_for_nonvisual_query_and_override(
+    tmp_path,
+):
+    chunks = tmp_path / "chunks.jsonl"
+    chunks.write_text(
+        json.dumps(
+            {
+                "paper_id": "p1",
+                "chunk_id": "p1#table",
+                "chunk_type": "table",
+                "text": "Table 1 text is still extractable.",
+                "metadata": {
+                    "page": 1,
+                    "table_id": "Table 1",
+                    "image_path": str(tmp_path / "wrong-root" / "table.png"),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    handoff = CandidateHandoff(
+        Query("q1", "What value does the paper report?", ["freeform"], None),
+        (CandidatePaper("p1", 1),),
+    )
+
+    report, errors = MODULE.inspect_corpus(
+        [handoff],
+        ChunkStore(chunks),
+        {"p1"},
+        allow_missing_figure_images=True,
+    )
+
+    assert report["visual_image_required_queries"] == []
+    assert len(errors) == 1
+    assert "all declared table/figure images are unavailable" in errors[0]
+    assert "cannot be overridden" in errors[0]
+
+
+def test_isolated_corrupt_image_is_warning_for_nonvisual_query(tmp_path):
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"not-an-image")
+    readable = tmp_path / "readable.png"
+    readable.write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+    chunks = tmp_path / "chunks.jsonl"
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#table",
+            "chunk_type": "table",
+            "text": "Table 1",
+            "metadata": {
+                "page": 1,
+                "table_id": "Table 1",
+                "image_path": str(corrupt),
+            },
+        },
+        {
+            "paper_id": "p2",
+            "chunk_id": "p2#table",
+            "chunk_type": "table",
+            "text": "Table 2",
+            "metadata": {
+                "page": 2,
+                "table_id": "Table 2",
+                "image_path": str(readable),
+            },
+        },
+    ]
+    chunks.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    handoff = CandidateHandoff(
+        Query("q1", "What values do the papers report?", ["freeform"], None),
+        (CandidatePaper("p1", 1), CandidatePaper("p2", 2)),
+    )
+
+    report, errors = MODULE.inspect_corpus(
+        [handoff], ChunkStore(chunks), {"p1", "p2"}
+    )
+
+    assert errors == []
+    assert report["image_paths"]["unreadable"] == 1
+    assert any("unreadable or corrupt" in warning for warning in report["warnings"])
+
+
+def test_isolated_missing_visual_image_can_be_explicitly_allowed(tmp_path):
+    readable_table = tmp_path / "table.png"
+    readable_table.write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+    chunks = tmp_path / "chunks.jsonl"
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#figure",
+            "chunk_type": "figure",
+            "text": "Figure 4 caption",
+            "metadata": {
+                "page": 2,
+                "figure_id": "Figure 4",
+                "image_path": str(tmp_path / "missing-figure.png"),
+            },
+        },
+        {
+            "paper_id": "p2",
+            "chunk_id": "p2#table",
+            "chunk_type": "table",
+            "text": "Table 1",
+            "metadata": {
+                "page": 3,
+                "table_id": "Table 1",
+                "image_path": str(readable_table),
+            },
+        },
+    ]
+    chunks.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    handoff = CandidateHandoff(
+        Query("q1", "How many panels are shown in Figure 4?", ["freeform"], None),
+        (CandidatePaper("p1", 1), CandidatePaper("p2", 2)),
+    )
+
+    strict_report, strict_errors = MODULE.inspect_corpus(
+        [handoff], ChunkStore(chunks), {"p1", "p2"}
+    )
+    allowed_report, allowed_errors = MODULE.inspect_corpus(
+        [handoff],
+        ChunkStore(chunks),
+        {"p1", "p2"},
+        allow_missing_figure_images=True,
+    )
+
+    assert strict_report["image_paths"]["existing"] == 1
+    assert strict_errors == [
+        "1 explicit visual-reading queries have no readable candidate figure/chart image"
+    ]
+    assert allowed_errors == []
+    assert allowed_report["queries_without_required_visual_images"] == ["q1"]
+
+
+def test_visual_image_requirement_is_conservative():
+    required = [
+        "According to Figure 4(a), how many curves are shown?",
+        "What does the chart show?",
+        "How many panels are visible?",
+        "What value is visible in the image?",
+        "What is the plotted ratio at the lowest difficulty?",
+    ]
+    not_required = [
+        "What speedup is reported for 2K image generation?",
+        "Compile the reported values as a table answer.",
+        "Which image dataset is used for training?",
+        "Across these graph-focused works, how many categories are reported?",
+        "What value does the paper report?",
+    ]
+
+    assert all(requires_visual_image(question) for question in required)
+    assert not any(requires_visual_image(question) for question in not_required)

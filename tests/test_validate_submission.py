@@ -10,6 +10,10 @@ def _input() -> dict:
         "query_id": "q1",
         "question": "question",
         "answer_types": ["multiple_choice", "table"],
+        "multiple_choice_options": [
+            {"label": "A", "text": "First"},
+            {"label": "E", "text": "Fifth"},
+        ],
         "table_schema": [
             {"name": "Method", "type": "string", "is_row_key": True},
             {"name": "Score", "type": "number", "is_row_key": False},
@@ -50,6 +54,40 @@ def test_strict_validator_accepts_official_shape():
     assert not checks.failed
 
 
+def test_strict_validator_uses_per_query_labels_including_e():
+    prediction = _prediction()
+    prediction["answer"]["multiple_choice"]["gold"] = "E"
+    checks = CheckCounter()
+
+    validate(
+        [_input()],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+    )
+
+    assert not checks.failed
+
+
+def test_strict_validator_rejects_global_letter_missing_from_query_options():
+    prediction = _prediction()
+    prediction["answer"]["multiple_choice"]["gold"] = "C"
+    checks = CheckCounter()
+
+    validate(
+        [_input()],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+    )
+
+    assert checks.failures["multiple_choice letter within valid keys"] == 1
+
+
 def test_strict_validator_rejects_silent_zero_score_shapes():
     prediction = _prediction()
     prediction["trace"] = []
@@ -77,7 +115,7 @@ def test_strict_validator_rejects_silent_zero_score_shapes():
 
     assert checks.failures["top-level keys exact"] == 1
     assert checks.failures["multiple_choice letter within valid keys"] == 1
-    assert checks.failures["evidence locator has page"] == 1
+    assert checks.failures["evidence locator has official location"] == 1
     assert checks.failures["evidence locator is coarse official shape"] == 1
     assert checks.failures["evidence paper is submitted"] == 1
     assert checks.failures["paper entries duplicate-free"] == 1
@@ -110,10 +148,10 @@ def test_strict_validator_rejects_nested_oracle_and_alias_shapes():
     assert checks.failures["evidence item keys exact"] == 1
     assert checks.failures["multiple_choice object exact"] == 1
     assert checks.failures["multiple_choice letter within valid keys"] == 1
-    assert checks.failures["table schema matches input"] == 1
+    assert checks.failures["table object exact"] == 1
 
 
-def test_strict_validator_accepts_optional_matching_table_schema():
+def test_strict_validator_rejects_repeated_matching_table_schema():
     prediction = _prediction()
     prediction["answer"]["table"]["schema"] = _input()["table_schema"]
     checks = CheckCounter()
@@ -127,7 +165,7 @@ def test_strict_validator_accepts_optional_matching_table_schema():
         canonical_papers={"p1"},
     )
 
-    assert not checks.failed
+    assert checks.failures["table object exact"] == 1
 
 
 def test_strict_validator_rejects_non_string_freeform_text():
@@ -152,6 +190,101 @@ def test_strict_validator_rejects_non_string_freeform_text():
 
     assert checks.failures["freeform text is string"] == 1
     assert checks.failures["freeform text non-empty"] == 1
+
+
+@pytest.mark.parametrize(
+    "source_type,locator",
+    [
+        ("text_span", {"section": "3 Results"}),
+        ("table", {"section": "Results", "table_id": "Table 2"}),
+        ("figure", {"section": "Results", "figure_id": "Figure 4"}),
+        ("equation_algorithm", {"page": 4, "algorithm_id": "Algorithm 2"}),
+        ("equation_algorithm", {"page": 5, "equation_id": "Equation 6"}),
+        ("equation_algorithm", {"algorithm_id": "Algorithm 2"}),
+        ("citation_context", {"citation_id": "24"}),
+        ("citation_context", {"section": "References"}),
+    ],
+)
+def test_strict_validator_accepts_current_official_evidence_locators(
+    source_type, locator
+):
+    sample = {
+        "query_id": "q1",
+        "question": "question",
+        "answer_types": ["freeform"],
+    }
+    prediction = {
+        "query_id": "q1",
+        "gold_papers": [{"paper_id": "p1"}],
+        "evidence": [
+            {
+                "paper_id": "p1",
+                "source_type": source_type,
+                "locator": locator,
+            }
+        ],
+        "answer": {"freeform": {"text": "answer"}},
+    }
+    checks = CheckCounter()
+
+    validate(
+        [sample],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+    )
+
+    assert not checks.failed
+
+
+def test_strict_validator_allows_test_extra_to_omit_evidence():
+    sample = {
+        "query_id": "q1",
+        "question": "question",
+        "answer_types": ["freeform"],
+    }
+    prediction = _prediction()
+    prediction["answer"] = {"freeform": {"text": "answer"}}
+    prediction.pop("evidence")
+    checks = CheckCounter()
+
+    validate(
+        [sample],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+        evidence_required=False,
+    )
+
+    assert not checks.failed
+
+
+def test_strict_validator_requires_evidence_on_scored_test_split():
+    sample = {
+        "query_id": "q1",
+        "question": "question",
+        "answer_types": ["freeform"],
+    }
+    prediction = _prediction()
+    prediction["answer"] = {"freeform": {"text": "answer"}}
+    prediction.pop("evidence")
+    checks = CheckCounter()
+
+    validate(
+        [sample],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+    )
+
+    assert checks.failures["top-level keys exact"] == 1
+    assert checks.failures["evidence list non-empty"] == 1
 
 
 def test_compatible_validator_accepts_legacy_aliases_and_rich_locators():

@@ -18,7 +18,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--paper-metadata", default="data/paper_metadata.jsonl")
     parser.add_argument("--chunks", required=True)
     parser.add_argument("--chunk-index", default=None)
-    parser.add_argument("--image-root", default=None)
+    parser.add_argument(
+        "--image-root",
+        default=None,
+        help="MinerU directory containing paper_id/auto/images.",
+    )
+    parser.add_argument(
+        "--allow-missing-required-visual-images",
+        "--allow-missing-figure-images",
+        dest="allow_missing_figure_images",
+        action="store_true",
+        help=(
+            "Warn for isolated explicit visual queries without an image. A global "
+            "image-root failure remains fatal."
+        ),
+    )
     parser.add_argument("--output", default=None, help="Optional JSON report path")
     return parser
 
@@ -35,12 +49,27 @@ def main() -> None:
     }
     if not canonical_paper_ids:
         raise SystemExit("paper metadata has no canonical paper IDs")
+    image_root = None
+    if args.image_root is not None:
+        image_root_path = Path(args.image_root).expanduser().resolve()
+        if not image_root_path.is_dir():
+            raise SystemExit(
+                "--image-root is not a directory: "
+                f"{image_root_path}. Point it at the MinerU directory containing "
+                "paper_id/auto/images."
+            )
+        image_root = str(image_root_path)
     store = ChunkStore(
         args.chunks,
         index_path=args.chunk_index,
-        image_root=args.image_root,
+        image_root=image_root,
     )
-    report, errors = inspect_corpus(handoffs, store, canonical_paper_ids)
+    report, errors = inspect_corpus(
+        handoffs,
+        store,
+        canonical_paper_ids,
+        allow_missing_figure_images=args.allow_missing_figure_images,
+    )
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     print(rendered)
     if args.output:

@@ -1,13 +1,14 @@
 """RetrievalResult から提出用の Evidence を組み立てるヘルパ。
 
-MinerU のチャンクは metadata に page / table_id / figure_id / section / equation_id を
-持っており、chunk_type の語彙（table / figure / text_span / equation_algorithm /
-citation_context）は Evidence.source_type の観測値とそのまま一致する。
+MinerU のチャンクは metadata に page / section と、table_id / figure_id /
+equation_id / algorithm_id / citation_id を持っており、chunk_type の語彙（table /
+figure / text_span / equation_algorithm / citation_context）は
+Evidence.source_type の観測値とそのまま一致する。
 つまり「どのチャンクが根拠か」さえ決まれば Evidence は機械的に組める。
 
-scripts/evaluate.py の採点キーは (paper_id, source_type, page, object_id) の4つ組で、
-table なら table_id、figure なら figure_id しか見ない（coarse_evidence_key）。
-gold にある row / column / sentence_start などは埋めなくても evidence F1 は取れる。
+公式採点キーは (paper_id, source_type, page_or_section, object_id) の4つ組。
+object_id は table / figure / equation・algorithm / citation に応じた可視IDである。
+gold にある row / column / sentence_start などは evidence F1 の比較対象外。
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ def evidence_from_result(result: RetrievalResult) -> Evidence:
         sentence_start=metadata.get("sentence_start"),
         sentence_end=metadata.get("sentence_end"),
         equation_id=metadata.get("equation_id"),
+        algorithm_id=metadata.get("algorithm_id"),
         citation_id=metadata.get("citation_id"),
         cited_paper=metadata.get("cited_paper"),
     )

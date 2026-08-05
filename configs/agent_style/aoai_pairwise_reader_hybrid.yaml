@@ -1,6 +1,7 @@
 # PR #7 の固定候補を、テキスト一次判定後に有望論文だけ画像付きで再判定する。
 # 検索、rerank、DI、再検索は行わない。認証値はリポジトリ直下の .env から読む。
 name: aoai_pairwise_reader
+image_root: artifacts/student_corpus/mineru_images_candidates
 llm:
   name: azure_openai
   params:
@@ -14,6 +15,8 @@ params:
     - direct_answer
     - partial_answer
     - supporting_only
+    - mention_only
+    - unreadable
   # 一次判定は文字数だけで分割する。画像上限は画像再判定にだけ適用する。
   max_batch_chars: 160000
   batch_overlap_chars: 1000
@@ -22,4 +25,5 @@ params:
   # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
   answer_neighbor_chunks: 0
   max_answer_images: 12
-  max_evidence: 64
+  max_evidence: 32
+  max_evidence_per_paper: 4

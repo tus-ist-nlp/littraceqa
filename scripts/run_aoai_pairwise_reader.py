@@ -38,6 +38,7 @@ from littraceqa.pairwise_run_store import (
     validate_judgment_checkpoint,
     write_judgments,
 )
+from littraceqa.pairwise_prompts import PAIRWISE_SYSTEM_PROMPT
 from littraceqa.submission import prediction_to_submission
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,11 +48,13 @@ _RUNTIME_FILES = (
     Path(__file__),
     ROOT / "src/littraceqa/__init__.py",
     ROOT / "src/littraceqa/aoai_pairwise_reader.py",
+    ROOT / "src/littraceqa/answer_derivation.py",
     ROOT / "src/littraceqa/candidate_handoff.py",
     ROOT / "src/littraceqa/chunk_store.py",
     ROOT / "src/littraceqa/corpus_preflight.py",
     ROOT / "src/littraceqa/mineru_record.py",
     ROOT / "src/littraceqa/pairwise_run_store.py",
+    ROOT / "src/littraceqa/pairwise_prompts.py",
     ROOT / "src/littraceqa/submission.py",
     ROOT / "src/littraceqa/di_pipeline/__init__.py",
     ROOT / "src/littraceqa/di_pipeline/agent/__init__.py",
@@ -69,12 +72,7 @@ _RUNTIME_FILES = (
 _SAFE_QUERY_ID = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?"
 )
-_PAIRWISE_SYSTEM = (
-    "あなたは科学論文QAの読解コンポーネントとして動作しています。"
-    "与えられた候補論文と根拠だけを読み、検索や外部知識を使わないでください。"
-    "指示された出力フォーマットに厳密に従ってください。"
-    "JSON を求められたら、前置きや説明を付けずに JSON だけを出力してください。"
-)
+_PAIRWISE_SYSTEM = PAIRWISE_SYSTEM_PROMPT
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -85,6 +83,36 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if config.get("name") != "aoai_pairwise_reader":
         raise ValueError("reader config name must be aoai_pairwise_reader")
     return config
+
+
+def resolve_image_root(
+    cli_image_root: str | Path | None,
+    config: dict[str, Any],
+    *,
+    repo_root: Path = ROOT,
+) -> tuple[str | None, str]:
+    """Resolve and validate the CLI/config image root before corpus scanning."""
+
+    source = "cli" if cli_image_root is not None else "config"
+    raw = cli_image_root if cli_image_root is not None else config.get("image_root")
+    if raw is None:
+        return None, "corpus paths"
+    if not isinstance(raw, (str, Path)) or not str(raw).strip():
+        raise ValueError("image_root must be a non-empty filesystem path")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        # Config paths are repository-relative and therefore independent of the
+        # shell's current directory. Explicit CLI paths retain normal cwd-relative
+        # command-line semantics.
+        base = Path.cwd() if source == "cli" else repo_root
+        path = base / path
+    path = path.resolve()
+    if not path.is_dir():
+        raise ValueError(
+            f"{source} image root is not a directory: {path}. "
+            "Point it at the MinerU directory containing paper_id/auto/images."
+        )
+    return str(path), source
 
 
 def build_llm(config: dict[str, Any]):
@@ -190,7 +218,11 @@ def build_parser() -> argparse.ArgumentParser:
             "then answer from accepted MinerU evidence."
         )
     )
-    parser.add_argument("--queries", required=True, help="Organizer four-field JSONL")
+    parser.add_argument(
+        "--queries",
+        required=True,
+        help="Current official input JSONL, including conditional answer schemas",
+    )
     parser.add_argument(
         "--candidates",
         required=True,
@@ -201,13 +233,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--paper-metadata", default="data/paper_metadata.jsonl"
     )
     parser.add_argument("--chunk-index", default=None)
-    parser.add_argument("--image-root", default=None)
     parser.add_argument(
+        "--image-root",
+        default=None,
+        help=(
+            "MinerU image directory containing paper_id/auto/images. Overrides "
+            "reader config image_root; relative CLI paths use the current directory."
+        ),
+    )
+    parser.add_argument(
+        "--allow-missing-required-visual-images",
         "--allow-missing-figure-images",
+        dest="allow_missing_figure_images",
         action="store_true",
         help=(
-            "Explicitly allow figure queries with no readable candidate image; "
-            "all other corpus preflight errors remain fatal"
+            "Allow an isolated explicit Figure/chart/image/panel query to proceed "
+            "without a readable candidate image. This never bypasses a globally "
+            "wrong --image-root where every declared image is unavailable."
         ),
     )
     parser.add_argument(
@@ -219,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--query-id",
         action="append",
         default=[],
-        help="Run only this query; repeat for several. Default is all 55.",
+        help="Run only this query; repeat for several. Default is every input row.",
     )
     parser.add_argument(
         "--paper-id",
@@ -232,8 +274,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-candidates",
         type=int,
-        default=50,
-        help="Use all 50 in the real run; lower only for a smoke test.",
+        default=None,
+        help=(
+            "Optional positive cap for a smoke test. By default every candidate "
+            "in each sidecar row is judged; scored runs should normally omit it."
+        ),
+    )
+    parser.add_argument(
+        "--evidence-policy",
+        choices=("auto", "required", "optional"),
+        default="auto",
+        help=(
+            "Official test requires evidence; test_extra does not score it. "
+            "auto recognizes a test_extra JSONL filename."
+        ),
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -242,6 +296,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Recompute selected query/paper; requires --query-id.",
     )
     return parser
+
+
+def require_evidence_for_input(path: str | Path, policy: str) -> bool:
+    """Resolve official test versus test_extra submission policy."""
+
+    if policy == "required":
+        return True
+    if policy == "optional":
+        return False
+    if policy != "auto":
+        raise ValueError(f"unknown evidence policy: {policy!r}")
+    normalized_name = Path(path).name.lower()
+    return not (
+        normalized_name == "test_extra.jsonl"
+        or normalized_name.startswith("test_extra_")
+    )
 
 
 def _select_handoffs(
@@ -264,8 +334,8 @@ def _select_handoffs(
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.max_candidates < 1 or args.max_candidates > 50:
-        raise SystemExit("--max-candidates must be between 1 and 50")
+    if args.max_candidates is not None and args.max_candidates < 1:
+        raise SystemExit("--max-candidates must be positive")
     if args.force and not args.query_id:
         raise SystemExit("--force requires at least one --query-id")
     if args.paper_id and (
@@ -277,6 +347,26 @@ def main() -> None:
             raise SystemExit(f"unsafe query id: {query_id!r}")
 
     config = load_config(args.reader)
+    require_evidence = require_evidence_for_input(
+        args.queries, args.evidence_policy
+    )
+    print(
+        "submission evidence: "
+        + ("required" if require_evidence else "optional (test_extra policy)")
+    )
+    try:
+        args.image_root, image_root_source = resolve_image_root(
+            args.image_root, config
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.image_root:
+        print(f"image root ({image_root_source}): {args.image_root}")
+    else:
+        print(
+            "image root: not configured; preflight will verify paths embedded "
+            "in the corpus"
+        )
     # Fail before corpus scanning or writing a run manifest when AOAI
     # credentials/deployment are absent.
     llm = build_llm(config)
@@ -322,7 +412,14 @@ def main() -> None:
         "preflight: "
         f"{preflight['queries']} queries, "
         f"{preflight['candidate_entries']} query-paper pairs, "
-        f"{preflight['image_paths']['existing']} readable images"
+        f"{preflight['image_paths']['existing']}/"
+        f"{preflight['image_paths']['unique_declared']} readable declared images"
+    )
+    print(
+        "visual image gate: "
+        f"{len(preflight['visual_image_required_queries'])} explicitly visual "
+        f"queries, {len(preflight['queries_without_required_visual_images'])} "
+        "without a readable candidate figure/chart image"
     )
     for warning in preflight["warnings"]:
         print(f"preflight warning: {warning}")
@@ -342,7 +439,12 @@ def main() -> None:
     # Validate every previously materialized query against current chunks and
     # image bytes before making another API call. This catches an image repaired
     # or replaced between incremental runs, even when that query is not selected.
-    materialize_run_outputs(run_dir, all_handoffs, reader)
+    materialize_run_outputs(
+        run_dir,
+        all_handoffs,
+        reader,
+        require_evidence=require_evidence,
+    )
     for handoff in selected_handoffs:
         query = handoff.query
         paths = QueryRunPaths.under(run_dir, query.query_id)
@@ -434,7 +536,11 @@ def main() -> None:
                         handoff.candidate_papers,
                         list(judgments.values()),
                     )
-                    submission = prediction_to_submission(query, prediction)
+                    submission = prediction_to_submission(
+                        query,
+                        prediction,
+                        require_evidence=require_evidence,
+                    )
                 except Exception as exc:
                     record_error(
                         paths.errors,
@@ -447,7 +553,10 @@ def main() -> None:
                 atomic_write_json(paths.submission, submission)
                 print(f"[{query.query_id}] answer complete")
     trace_count, submission_count = materialize_run_outputs(
-        run_dir, all_handoffs, reader
+        run_dir,
+        all_handoffs,
+        reader,
+        require_evidence=require_evidence,
     )
     print(f"wrote {trace_count} traces to {run_dir / 'reading_traces.jsonl'}")
     print(f"wrote {submission_count} submissions to {run_dir / 'submission.jsonl'}")
