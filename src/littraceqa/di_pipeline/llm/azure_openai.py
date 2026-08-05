@@ -35,7 +35,12 @@ LLM 呼び出しを try/except で囲んでフォールバックする作りな�
 
 from __future__ import annotations
 
+import base64
+import mimetypes
 import os
+import time
+from pathlib import Path
+from typing import Any
 
 import openai
 from openai import AzureOpenAI
@@ -115,11 +120,45 @@ class AzureOpenAILLM:
 
     def __call__(self, prompt: str) -> str:
         """プロンプトを投げて、応答のテキストを返す。"""
+        return self.complete(prompt)
+
+    def complete(
+        self, prompt: str, image_paths: list[str] | None = None
+    ) -> str:
+        """テキストと任意のローカル画像を1往復で処理する。"""
+        return str(
+            self.complete_with_metadata(prompt, image_paths=image_paths)["text"]
+        )
+
+    def complete_with_metadata(
+        self, prompt: str, image_paths: list[str] | None = None
+    ) -> dict[str, Any]:
+        """応答本文に加え、再現・エラー解析用の利用量等を返す。
+
+        APIキー、endpoint、送信画像のbase64は返さない。呼び出し側はこの辞書を
+        checkpointへ安全に保存できる。
+        """
+        content: str | list[dict[str, Any]]
+        if image_paths:
+            content = [{"type": "text", "text": prompt}]
+            for image_path in image_paths:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": _image_data_url(image_path),
+                            "detail": "high",
+                        },
+                    }
+                )
+        else:
+            content = prompt
+
         kwargs: dict = {
             "model": self.deployment,  # Azure ではデプロイ名を渡す
             "messages": [
                 {"role": "system", "content": self.system},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": content},
             ],
             "max_completion_tokens": self.max_completion_tokens,
         }
@@ -130,6 +169,7 @@ class AzureOpenAILLM:
         if self.reasoning_effort is not None:
             kwargs["reasoning_effort"] = self.reasoning_effort
 
+        started = time.monotonic()
         try:
             response = self.client.chat.completions.create(**kwargs)
         except openai.AuthenticationError as exc:
@@ -137,4 +177,37 @@ class AzureOpenAILLM:
                 "Azure OpenAI の認証に失敗しました。AZURE_OPENAI_API_KEY を確認してください。"
             ) from exc
 
-        return response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            usage_payload = None
+        elif hasattr(usage, "model_dump"):
+            usage_payload = usage.model_dump(mode="json")
+        else:
+            usage_payload = {
+                key: getattr(usage, key, None)
+                for key in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                )
+            }
+        return {
+            "text": response.choices[0].message.content or "",
+            "request_id": (
+                getattr(response, "_request_id", None)
+                or getattr(response, "id", None)
+            ),
+            "model": getattr(response, "model", None),
+            "deployment": self.deployment,
+            "usage": usage_payload,
+            "latency_seconds": time.monotonic() - started,
+        }
+
+
+def _image_data_url(image_path: str | Path) -> str:
+    path = Path(image_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"image does not exist: {path}")
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
