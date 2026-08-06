@@ -148,35 +148,40 @@ uv run --with faiss-cpu==1.14.3 python scripts/subset_paper_embeddings.py \
   --max-papers 5000
 ```
 
-The search config keeps positions 1-10 unchanged and applies paper similarity
-only to positions 11-20. It uses both an explicitly identified method-owner
-paper and the normal rank-one retrieval result as bounded seeds, deduplicates
-them, and allows at most two new papers in total. It then keeps positions 1-19
-fixed and uses position 20 as a conservative exploration slot. An explicit
-high-confidence reciprocal check runs first: a new paper must be found within
-the top 20 neighbors of one of the leading eight papers, and at least six of
-those eight papers must occur in the new paper's own top 10 neighbors. At most
-32 forward candidates receive that reverse lookup, which bounds the additional
-full-matrix searches. An explicit method edge may otherwise fill the slot only
-when an independent owner-text search ranks the linked paper in its top five.
-The final fallback requires at least two of the leading three papers to agree
-on the same top-15 embedding neighbor. The reciprocal thresholds were selected
-on the current validation set, remain opt-in through these experimental
-configs, and require held-out verification. If either supporting index is
-absent or invalid, retrieval falls back to the original sparse candidate tail.
+The search config keeps positions 1-10 stable while assembling the 50-paper
+candidate set. It runs the initial dual-BM25 search and one expansion from the
+top paper; the older third local-expansion query is disabled. When the question
+contains an explicit method name, one matching method-owner paper becomes a
+bounded SPECTER2 seed. Its top seven neighbours may add at most three new
+papers to the candidate tail. The accepted baseline does not run the generic
+paper-neighbour, title/method graph, reciprocal, bridge, or dense-consensus
+lanes. If the embedding sidecar is absent or invalid, retrieval falls back to
+the sparse candidate tail.
 
 `bm25_paper_rank_seed_expansion_qwen3_reranker.yaml` fixes a 50-paper candidate
-set and reranks all 50 papers only after dense-tail and consensus exploration
-finish. A caller can request a smaller final result, such as the 20 papers used
-by the reading agent. Qwen scores the first 2,000 characters of each paper-level
-document, while the returned retrieval results retain their original evidence
-chunks. The model revision and bfloat16 dtype are explicit, and the configured
-rank fusion gives a slight preference to the original retrieval rank. Qwen can
-reorder the original top 20, but those 20 papers remain protected from
-lower-ranked candidates because the reading agent consumes 20 papers. The
-weight and protection boundary were selected conservatively on the current
-validation set and should be rechecked on held-out data. Run the model from a
-local cache in offline mode so evaluation cannot trigger a download.
+set and reranks all 50 papers after the bounded method-conditioned dense tail.
+A caller can request a smaller final result, such as the 20 papers used by the
+reading agent. Qwen scores the first 2,000 characters of each paper-level
+document, while the returned results retain their original evidence chunks.
+The model revision and bfloat16 dtype are explicit. The rank fusion uses an
+original-rank weight of 0.52, and Qwen may reorder the original top 20 without
+allowing lower-ranked papers to displace that set. The weight and protection
+boundary were selected on the current validation set and need held-out
+confirmation. Run the model from a local cache in offline mode so evaluation
+cannot trigger a download.
+
+`bm25_two_lane_qwen3_0p6b_reranker.yaml` is the wider experimental variant. Each
+core search reads 100 results from both Chunk BM25 and Paper BM25, then the
+hybrid fuser retains a 50-paper lane. This depth matches the established
+baseline and avoids losing relevant papers before fusion. The original-question
+ranking is the base lane, while the ranking produced from the leading paper's
+context is the expansion lane. Qwen3-Reranker-0.6B reranks both lanes, weighted
+RRF combines them with weights 1.0 and 1.15, and the same model reranks their
+bounded 100-paper union. Exact query-document scores are reused across these
+stages; lane-specific ranks are still recomputed. The final top 20 is not
+protected from the wider pool, so this configuration must be compared with the
+conservative 50-paper baseline before adoption. The 0.6B weights are not
+downloaded automatically because `local_files_only` is true.
 
 The same config also enables a guarded exploration slot for open-set
 enumeration questions such as `Which ... papers` or `what ... does each
@@ -199,6 +204,9 @@ uv run python scripts/eval_retrieval.py \
   --ks 1,5,8,10,20,50 \
   --output <user-owned-output.json>
 ```
+
+For the pinned two-lane Qwen3 0.6B environment and prebuilt-index layout, see
+[`docs/retrieval_0p6b_reproduction.md`](../docs/retrieval_0p6b_reproduction.md).
 
 組み合わせを変えたいときは、該当する引数だけ差し替える。他の3つはそのままでよい。
 
@@ -231,6 +239,7 @@ configs/
 │   ├── bm25_specter2.yaml    : BM25 + SPECTER2（全チャンク版）
 │   ├── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding）
 │   ├── bm25_paper_rank_seed_expansion_qwen3_reranker.yaml : 論文単位候補補充 + Qwen3 Reranker
+│   ├── bm25_two_lane_qwen3_0p6b_reranker.yaml : 2レーン候補統合 + Qwen3-Reranker-0.6B
 │   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) +
 │         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う（デフォルト、構築済み）
 └── agent_style/

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from littraceqa.di_pipeline.config import compose_config, override_rerank_pool
+from littraceqa.di_pipeline.config import (
+    compose_config,
+    load_config,
+    override_rerank_pool,
+)
 
 
 def _paths() -> dict:
@@ -178,6 +182,32 @@ def test_wrapper_paper_embedding_index_name_is_resolved_under_process_index():
     assert search["retriever_wrapper"]["params"][
         "paper_embedding_index_name"
     ] == "specter2_paper_embeddings"
+
+
+def test_portable_retrieval_paths_resolve_all_prebuilt_indexes():
+    cfg = compose_config(
+        paths=load_config("configs/paths/local_retrieval.yaml"),
+        process=load_config("configs/process_style/mineru.yaml"),
+        search=load_config(
+            "configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml"
+        ),
+        agent=_agent(),
+    )
+
+    index_dirs = {
+        item["name"]: item["params"]["index_dir"]
+        for item in cfg["retriever"]["indexers"]
+    }
+    assert index_dirs == {
+        "bm25s": "artifacts/retrieval/index/mineru/bm25s",
+        "paper_bm25": "artifacts/retrieval/index/mineru/paper_bm25",
+    }
+    assert (
+        cfg["retriever"]["retriever_wrapper"]["params"][
+            "paper_embedding_index_dir"
+        ]
+        == "artifacts/retrieval/index/mineru/specter2_paper_embeddings"
+    )
 
 
 @pytest.mark.parametrize(

@@ -21,7 +21,7 @@ DEFAULT_ORDER_SEED = "littraceqa-controlled-order-v1"
 DEFAULT_SIZES = (500, 1_000, 2_000)
 DEFAULT_READ_ONLY_ROOT = Path("/data2/iseakira")
 DEFAULT_MAX_PAPERS = 5_000
-ABSOLUTE_MAX_PAPERS = 10_000
+ABSOLUTE_MAX_PAPERS = 27_487
 
 Year = int | str
 Stratum = tuple[str, Year]

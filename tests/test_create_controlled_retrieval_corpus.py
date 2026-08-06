@@ -121,35 +121,35 @@ def test_output_root_cannot_overlap_shared_input(tmp_path: Path) -> None:
 def test_default_and_explicit_corpus_size_limits() -> None:
     validate_corpus_size_limits([5_000])
     validate_corpus_size_limits(
-        [5_000, 10_000],
-        max_papers=10_000,
-        confirm_paper_count=10_000,
+        [5_000, 10_000, 20_000, 27_487],
+        max_papers=27_487,
+        confirm_paper_count=27_487,
     )
 
     with pytest.raises(ValueError, match="exceeds --max-papers"):
         validate_corpus_size_limits([5_001])
-    with pytest.raises(ValueError, match="between 1 and 10000"):
+    with pytest.raises(ValueError, match="between 1 and 27487"):
         validate_corpus_size_limits(
-            [10_000],
-            max_papers=10_001,
-            confirm_paper_count=10_000,
+            [27_487],
+            max_papers=27_488,
+            confirm_paper_count=27_487,
         )
     with pytest.raises(ValueError, match="exceeds --max-papers"):
         validate_corpus_size_limits(
-            [10_001],
-            max_papers=10_000,
-            confirm_paper_count=10_001,
+            [27_488],
+            max_papers=27_487,
+            confirm_paper_count=27_488,
         )
 
 
-@pytest.mark.parametrize("confirmation", [None, 9_999, 10_001])
+@pytest.mark.parametrize("confirmation", [None, 27_486, 27_488])
 def test_large_corpus_requires_exact_confirmation(
     confirmation: int | None,
 ) -> None:
     with pytest.raises(ValueError, match="--confirm-paper-count"):
         validate_corpus_size_limits(
-            [5_000, 10_000],
-            max_papers=10_000,
+            [5_000, 27_487],
+            max_papers=27_487,
             confirm_paper_count=confirmation,
         )
 
@@ -210,7 +210,7 @@ def test_create_nested_corpora_writes_lists_and_refuses_implicit_overwrite(
     assert root_manifest["sizes"] == [4, 6, 8]
     assert root_manifest["generation_safety"] == {
         "default_max_papers": 5_000,
-        "absolute_max_papers": 10_000,
+        "absolute_max_papers": 27_487,
         "max_papers": 5_000,
         "confirmed_paper_count": None,
     }

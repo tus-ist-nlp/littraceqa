@@ -10,6 +10,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Lightweight environment for evaluating prebuilt retrieval indexes.  These
+# versions match the environment used for the recorded Qwen3 0.6B runs.
+retrieval = [
+    "PyYAML==6.0.3",
+    "bm25s==0.3.9",
+    "huggingface-hub",
+    "numpy==2.5.1; python_version >= '3.12'",
+    "torch==2.11.0",
+    "transformers==5.13.1",
+]
 # DIハイブリッド検索パイプライン(src/littraceqa/di_pipeline)本体。
 # `uv sync --extra di_pipeline` でインストールする。azure extra とは
 # 推移依存(marker-pdf -> pdftext -> pypdfium2==4.30.0固定)が衝突するため
@@ -60,9 +70,6 @@ packages = ["src/littraceqa"]
 
 [tool.uv]
 package = true
-# pytorch cu121 index が requests 等の無関係なパッケージも古いバージョンで
-# 提供してしまい、first-index-match だと解決不能になるため best-match にする。
-index-strategy = "unsafe-best-match"
 
 # marker-pdf は anthropic>=0.46,<0.47 を固定しているが、これは marker 自身の
 # LLM補助モード(use_llm)のためだけの依存で、MarkerChunker は use_llm=false で使う
@@ -78,7 +85,22 @@ conflicts = [
         { extra = "di_pipeline" },
         { extra = "azure" },
     ],
+    [
+        { extra = "retrieval" },
+        { extra = "di_pipeline" },
+    ],
+    [
+        { extra = "retrieval" },
+        { extra = "figures" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' and extra == 'retrieval'" },
 ]
 
 [[tool.uv.index]]
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

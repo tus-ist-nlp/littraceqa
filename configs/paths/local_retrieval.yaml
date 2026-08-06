@@ -1,0 +1,7 @@
+# Portable layout for retrieval-only evaluation from the repository root.
+# The PDF and chunks paths are required by configuration composition but are
+# not read when scripts/eval_retrieval.py loads prebuilt indexes.
+pdf_dir: artifacts/retrieval/unused-pdfs
+chunks_dir: artifacts/retrieval/chunks
+index_dir: artifacts/retrieval/index
+paper_metadata: data/paper_metadata.jsonl

@@ -43,6 +43,15 @@ class CandidateSettings:
 
 
 @dataclass(frozen=True)
+class TwoLaneSettings:
+    """How the lexical and seed-expanded paper rankings are combined."""
+
+    two_lane_rerank: bool
+    two_lane_base_weight: float
+    two_lane_expansion_weight: float
+
+
+@dataclass(frozen=True)
 class OutputSettings:
     """How many papers leave the retriever and which of them stay fixed."""
 
@@ -123,6 +132,7 @@ class SeedExpansionSettings:
     """Every stage parameter, grouped by the stage that consumes it."""
 
     candidates: CandidateSettings
+    two_lane: TwoLaneSettings
     output: OutputSettings
     open_set: OpenSetSettings
     neighborhood: NeighborhoodSettings
@@ -142,6 +152,15 @@ class SeedExpansionSettings:
                 self.candidates,
                 local_expansion_weight=float(
                     self.candidates.local_expansion_weight
+                ),
+            ),
+            two_lane=replace(
+                self.two_lane,
+                two_lane_base_weight=float(
+                    self.two_lane.two_lane_base_weight
+                ),
+                two_lane_expansion_weight=float(
+                    self.two_lane.two_lane_expansion_weight
                 ),
             ),
             neighborhood=replace(
@@ -256,6 +275,33 @@ def _validate_candidate_signals(candidates: CandidateSettings) -> None:
         candidates.literal_attribute_hints,
     )
     _require_boolean("literal_method_hints", candidates.literal_method_hints)
+
+
+def _validate_two_lane(
+    two_lane: TwoLaneSettings,
+    candidates: CandidateSettings,
+    reranker: object | None,
+) -> None:
+    _require_boolean("two_lane_rerank", two_lane.two_lane_rerank)
+    _require_non_negative_number(
+        "two_lane_base_weight",
+        two_lane.two_lane_base_weight,
+    )
+    _require_non_negative_number(
+        "two_lane_expansion_weight",
+        two_lane.two_lane_expansion_weight,
+    )
+    if two_lane.two_lane_rerank and (
+        two_lane.two_lane_base_weight == 0
+        and two_lane.two_lane_expansion_weight == 0
+    ):
+        raise ValueError("at least one two-lane weight must be positive")
+    if two_lane.two_lane_rerank and reranker is None:
+        raise ValueError("two_lane_rerank requires an enabled reranker")
+    if two_lane.two_lane_rerank and candidates.local_expansion_weight > 0:
+        raise ValueError(
+            "two_lane_rerank does not support local_expansion_weight"
+        )
 
 
 def _validate_open_set(
@@ -486,6 +532,7 @@ def validate_settings(
     _validate_candidate_pool(settings.candidates)
     _validate_output_shape(settings.output)
     _validate_candidate_signals(settings.candidates)
+    _validate_two_lane(settings.two_lane, settings.candidates, reranker)
     _validate_open_set(settings.open_set, settings.candidates, settings.output)
     _validate_neighborhood(settings.neighborhood)
     _validate_expansion_weights(settings.method, settings.dense)

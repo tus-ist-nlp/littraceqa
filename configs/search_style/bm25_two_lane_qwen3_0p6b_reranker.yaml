@@ -1,6 +1,6 @@
-# Validation-selected baseline: rerank a fixed 50-paper candidate set.
-# Several weights were selected on the current validation queries and require
-# confirmation on a separate held-out set.
+# Reproducible two-lane retrieval with the pinned Qwen3 0.6B reranker.
+# Each 50-paper lane is reranked independently, fused by weighted RRF, and
+# reranked once more over a bounded union of at most 100 papers.
 per_index_k: 100
 attribute_weight: 0.75
 indexers:
@@ -36,12 +36,9 @@ reranker:
     revision: e61197ed45024b0ed8a2d74b80b4d909f1255473
     device: cuda:0
     dtype: bfloat16
-    batch_size: 4
+    batch_size: 2
     max_tokens: 1024
     local_files_only: true
-    # A validation replay over the reduced candidate pipeline selected 0.52.
-    # This keeps the original rank as a conservative signal while allowing
-    # Qwen to repair the simpler candidate order.
     base_rank_weight: 0.52
     rank_fusion_k: 60.0
     instruction: >-
@@ -50,37 +47,30 @@ reranker:
 retriever_wrapper:
   name: seed_expansion
   params:
+    # Each search fuses Chunk BM25 and Paper BM25 into a 50-paper lane.
     candidate_k: 50
     seed_text_chars: 512
     rrf_k: 60
-    max_results: 50
+    max_results: 100
     stable_prefix_k: 10
+    two_lane_rerank: true
+    two_lane_base_weight: 1.0
+    two_lane_expansion_weight: 1.15
     protect_explicit_title_matches: true
     max_protected_titles: 4
     literal_attribute_hints: true
     literal_method_hints: true
-    # Only open-set enumeration questions run four additional seed searches.
-    # A paper must appear in at least two independent runs and reach the top
-    # two in one of them before it can fill rank 20 after final reranking.
-    # This preserves the baseline's final top 19 exactly.
     open_set_seed_k: 5
     open_set_min_support: 2
     open_set_max_seed_rank: 2
     open_set_slot_k: 20
-    # Candidate supplementation is limited to the method-conditioned dense
-    # tail and the guarded open-set slot. Graph, reciprocal, consensus, and
-    # generic paper-neighbour lanes remain at their disabled defaults.
     paper_embedding_index_name: specter2_paper_embeddings
     method_dense_tail_weight: 1.0
     method_dense_tail_seed_k: 1
     method_dense_tail_max_results: 7
     method_dense_tail_max_new_papers: 3
-    # The fixed candidate set is assembled before model scoring.
-    # The caller can still request a smaller output, such as the 20 papers
-    # consumed by the reading agent.
     rerank_final_candidates: true
     final_rerank_document_chars: 2000
-    rerank_pool_k: 50
-    # Qwen can reorder the original top 20, but papers below that boundary
-    # cannot displace a paper that the reading agent would otherwise receive.
-    final_rerank_protected_top_k: 20
+    rerank_pool_k: 100
+    # Any paper in the bounded union may enter the final top 20.
+    final_rerank_protected_top_k: 0

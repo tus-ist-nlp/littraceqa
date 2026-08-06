@@ -16,16 +16,23 @@ uv sync
 The base install covers the dataset scripts (`scripts/`) and the
 provider-agnostic tools (`littraceqa.extract_pdf_archives`,
 `littraceqa.fix_chunk_locators`, `littraceqa.validate_submission`,
-`littraceqa.compare_runs`). The two RAG pipelines each need their own
-optional extra, and **the two are mutually exclusive in one environment**
-(`di_pipeline` pins `pypdfium2==4.30.0` transitively via `marker-pdf`, which
-conflicts with `azure`'s `pypdfium2>=5.11.0`; `uv` will refuse to resolve
-both extras together):
+`littraceqa.compare_runs`). Optional features use separate extras. The full
+`di_pipeline` and `azure` extras are mutually exclusive because their
+`pypdfium2` requirements conflict. The lighter `retrieval` extra is intended
+for prebuilt-index evaluation and is also kept separate from the full
+preprocessing environment:
 
 ```bash
 uv sync --extra azure         # Azure RAG pipeline (baseline)
 uv sync --extra di_pipeline   # DI-based hybrid retrieval pipeline
+uv sync --extra retrieval     # Prebuilt-index evaluation with Qwen3 0.6B
 ```
+
+Plain `uv sync` does not install GPU retrieval dependencies. To reproduce the
+current retrieval-only experiment on another Linux/WSL2 computer, including
+the pinned Python/CUDA environment, model cache, index layout, smoke test, and
+resume command, follow
+[`docs/retrieval_0p6b_reproduction.md`](docs/retrieval_0p6b_reproduction.md).
 
 ## DI-based hybrid retrieval pipeline
 

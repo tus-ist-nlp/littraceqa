@@ -255,12 +255,18 @@ assert retriever.final_rerank_protected_top_k == 20
 assert retriever.stable_prefix_k == 10
 assert retriever.rerank_final_candidates is True
 assert retriever.final_rerank_document_chars == 2000
-assert retriever.paper_dense_consensus_seed_k == 3
-assert retriever.paper_dense_reciprocal_seed_k == 8
-assert retriever.paper_dense_reciprocal_forward_k == 20
-assert retriever.paper_dense_reciprocal_reverse_k == 10
-assert retriever.paper_dense_reciprocal_min_support == 6
-assert retriever.paper_dense_reciprocal_max_candidates == 32
+assert retriever.local_expansion_weight == 0.0
+assert retriever.paper_neighborhood_weight == 0.0
+assert retriever.method_owner_weight == 0.0
+assert retriever.method_relation_weight == 0.0
+assert retriever.method_topic_weight == 0.0
+assert retriever.method_bridge_topic_max_rank == 0
+assert retriever.method_dense_tail_weight == 1.0
+assert retriever.method_dense_tail_max_results == 7
+assert retriever.method_dense_tail_max_new_papers == 3
+assert retriever.paper_dense_tail_weight == 0.0
+assert retriever.paper_dense_consensus_seed_k == 0
+assert retriever.paper_dense_reciprocal_seed_k == 0
 assert retriever.open_set_seed_k == 5
 assert retriever.open_set_min_support == 2
 assert retriever.open_set_max_seed_rank == 2
@@ -268,7 +274,55 @@ assert retriever.open_set_slot_k == 20
 assert retriever.reranker.device == "cuda:0"
 assert retriever.reranker.dtype == "bfloat16"
 assert retriever.reranker.batch_size == 4
-assert retriever.reranker.base_rank_weight == 0.59
+assert retriever.reranker.base_rank_weight == 0.52
+assert retriever.reranker._model is None
+assert "torch" not in sys.modules
+assert "transformers" not in sys.modules
+"""
+
+    result = _run_isolated(script, str(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_two_lane_qwen0p6b_config_builds_without_loading_model(tmp_path):
+    script = r"""
+import sys
+from pathlib import Path
+
+from littraceqa.di_pipeline.config import build_pipeline, compose_config, load_config
+
+root = Path(sys.argv[1])
+cfg = compose_config(
+    paths={
+        "pdf_dir": str(root / "pdfs"),
+        "chunks_dir": str(root / "chunks"),
+        "index_dir": str(root / "index"),
+        "paper_metadata": str(root / "papers.jsonl"),
+    },
+    process={"name": "mineru", "params": {"mineru_dir": str(root / "mineru")}},
+    search=load_config(
+        "configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml"
+    ),
+    agent={"name": "simple", "params": {"top_k": 20}},
+)
+_, retriever, _ = build_pipeline(
+    cfg,
+    build_agent=False,
+    build_preprocessor=False,
+)
+
+assert retriever.retriever.per_index_k == 100
+assert retriever.candidate_k == 50
+assert retriever.two_lane_rerank is True
+assert retriever.two_lane_base_weight == 1.0
+assert retriever.two_lane_expansion_weight == 1.15
+assert retriever.max_results == 100
+assert retriever.rerank_pool_k == 100
+assert retriever.final_rerank_protected_top_k == 0
+assert retriever.reranker.model_name == "Qwen/Qwen3-Reranker-0.6B"
+assert retriever.reranker.revision == "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+assert retriever.reranker.batch_size == 2
 assert retriever.reranker._model is None
 assert "torch" not in sys.modules
 assert "transformers" not in sys.modules

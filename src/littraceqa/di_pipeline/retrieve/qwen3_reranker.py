@@ -324,6 +324,8 @@ class Qwen3Reranker:
         self.rank_fusion_k = rank_fusion_k
         self._model_loader = model_loader or _load_qwen3_scorer
         self._model: Any | None = None
+        self._score_cache_query: str | None = None
+        self._score_cache: dict[str, float] = {}
 
     def _get_model(self) -> Any:
         if self._model is None:
@@ -347,14 +349,78 @@ class Qwen3Reranker:
         if top_k <= 0 or not candidates:
             return []
 
-        pairs = [(query, candidate.text) for candidate in candidates]
-        raw_scores = self._get_model().predict(
-            pairs,
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )
-        scores = list(raw_scores)
+        scores = self.score_candidates(query, candidates)
+        return self.rerank_scored(candidates, scores, top_k)
+
+    def score_candidates(
+        self,
+        query: str,
+        candidates: list[RetrievalResult],
+    ) -> list[float]:
+        """Return raw Qwen scores, reusing exact texts for the latest query."""
+
+        if not candidates:
+            return []
+
+        if query != self._score_cache_query:
+            self._score_cache_query = query
+            self._score_cache.clear()
+
+        missing_texts: list[str] = []
+        missing_indices: list[int] = []
+        pending: set[str] = set()
+        for index, candidate in enumerate(candidates):
+            text = candidate.text
+            if text in self._score_cache or text in pending:
+                continue
+            pending.add(text)
+            missing_texts.append(text)
+            missing_indices.append(index)
+
+        if missing_texts:
+            pairs = [(query, text) for text in missing_texts]
+            raw_scores = self._get_model().predict(
+                pairs,
+                batch_size=self.batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
+            new_scores = list(raw_scores)
+            if len(new_scores) != len(missing_texts):
+                raise ValueError(
+                    "reranker returned "
+                    f"{len(new_scores)} scores for {len(missing_texts)} candidates"
+                )
+
+            validated: dict[str, float] = {}
+            for text, raw_score, candidate_index in zip(
+                missing_texts,
+                new_scores,
+                missing_indices,
+                strict=True,
+            ):
+                score = float(raw_score)
+                if not math.isfinite(score):
+                    raise ValueError(
+                        "reranker returned a non-finite score at index "
+                        f"{candidate_index}"
+                    )
+                validated[text] = score
+            self._score_cache.update(validated)
+
+        return [self._score_cache[candidate.text] for candidate in candidates]
+
+    def rerank_scored(
+        self,
+        candidates: list[RetrievalResult],
+        scores: list[float],
+        top_k: int,
+    ) -> list[RetrievalResult]:
+        """Rank candidates from raw Qwen scores without running the model."""
+
+        if top_k <= 0 or not candidates:
+            return []
+
         if len(scores) != len(candidates):
             raise ValueError(
                 "reranker returned "

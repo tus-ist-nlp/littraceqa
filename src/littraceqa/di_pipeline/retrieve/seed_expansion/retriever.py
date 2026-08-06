@@ -60,7 +60,11 @@ from littraceqa.di_pipeline.retrieve.seed_expansion.settings import (
     OpenSetSettings,
     OutputSettings,
     SeedExpansionSettings,
+    TwoLaneSettings,
     validate_settings,
+)
+from littraceqa.di_pipeline.retrieve.seed_expansion.two_lane import (
+    PaperTwoLaneReranker,
 )
 
 
@@ -121,6 +125,9 @@ class SeedExpansionRetriever:
         protect_explicit_title_matches: bool = False,
         max_protected_titles: int = 4,
         local_expansion_weight: float = 0.0,
+        two_lane_rerank: bool = False,
+        two_lane_base_weight: float = 1.0,
+        two_lane_expansion_weight: float = 1.0,
         literal_attribute_hints: bool = False,
         literal_method_hints: bool = False,
         open_set_seed_k: int = 1,
@@ -165,6 +172,11 @@ class SeedExpansionRetriever:
             local_expansion_weight=local_expansion_weight,
             literal_attribute_hints=literal_attribute_hints,
             literal_method_hints=literal_method_hints,
+        )
+        two_lane = TwoLaneSettings(
+            two_lane_rerank=two_lane_rerank,
+            two_lane_base_weight=two_lane_base_weight,
+            two_lane_expansion_weight=two_lane_expansion_weight,
         )
         output = OutputSettings(
             max_results=max_results,
@@ -220,6 +232,7 @@ class SeedExpansionRetriever:
         )
         settings = SeedExpansionSettings(
             candidates=candidates,
+            two_lane=two_lane,
             output=output,
             open_set=open_set,
             neighborhood=neighborhood,
@@ -247,6 +260,7 @@ class SeedExpansionRetriever:
 
         for group in (
             self._settings.candidates,
+            self._settings.two_lane,
             self._settings.output,
             self._settings.open_set,
             self._settings.neighborhood,
@@ -260,6 +274,7 @@ class SeedExpansionRetriever:
         """Wire the processing stages from the validated settings groups."""
 
         candidates = self._settings.candidates
+        two_lane = self._settings.two_lane
         output = self._settings.output
         open_set = self._settings.open_set
         neighborhood = self._settings.neighborhood
@@ -277,6 +292,19 @@ class SeedExpansionRetriever:
             rrf_k=candidates.rrf_k,
             local_expansion_weight=candidates.local_expansion_weight,
         )
+        self._two_lane = None
+        if two_lane.two_lane_rerank:
+            # Validation guarantees that an enabled two-lane stage has a
+            # reranker. Keeping the disabled path empty preserves existing
+            # configurations that intentionally do not use one.
+            assert self._reranker is not None
+            self._two_lane = PaperTwoLaneReranker(
+                reranker=self._reranker,
+                document_chars=output.final_rerank_document_chars,
+                rrf_k=candidates.rrf_k,
+                base_weight=two_lane.two_lane_base_weight,
+                expansion_weight=two_lane.two_lane_expansion_weight,
+            )
         self._open_set = OpenSetExploration(
             min_support=open_set.open_set_min_support,
             max_seed_rank=open_set.open_set_max_seed_rank,
@@ -428,7 +456,21 @@ class SeedExpansionRetriever:
                 open_set_runs=open_set_runs,
             )
 
-        fused = self._candidates.fuse_by_paper(initial, expanded, local_expanded)
+        if self.two_lane_rerank:
+            assert self._two_lane is not None
+            fused = self._two_lane.fuse(
+                query,
+                initial,
+                expanded,
+                self.indexers,
+                max_candidates=max(self.max_results, self.rerank_pool_k),
+            )
+        else:
+            fused = self._candidates.fuse_by_paper(
+                initial,
+                expanded,
+                local_expanded,
+            )
         return self._finalize(
             query,
             fused,

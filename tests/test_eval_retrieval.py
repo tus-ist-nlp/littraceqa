@@ -217,6 +217,12 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
             "qwen3_rank": 2,
             "rank_fusion_base_weight": 0.75,
             "rank_fusion_k": 60.0,
+            "two_lane_base_rank": 3,
+            "two_lane_expansion_rank": 1,
+            "two_lane_rrf_score": 0.04,
+            "two_lane_sources": ["base", "expansion"],
+            "two_lane_rerank_status": "applied",
+            "two_lane_rerank_error_type": None,
             "final_rerank_status": "applied",
             "final_rerank_candidate_set_preserved": True,
             "final_rerank_error_type": None,
@@ -243,6 +249,12 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
     assert detail["qwen3_rank"] == 2
     assert detail["rank_fusion_base_weight"] == 0.75
     assert detail["rank_fusion_k"] == 60.0
+    assert detail["two_lane_base_rank"] == 3
+    assert detail["two_lane_expansion_rank"] == 1
+    assert detail["two_lane_rrf_score"] == 0.04
+    assert detail["two_lane_sources"] == ["base", "expansion"]
+    assert detail["two_lane_rerank_status"] == "applied"
+    assert detail["two_lane_rerank_error_type"] is None
     assert detail["final_rerank_status"] == "applied"
     assert detail["final_rerank_candidate_set_preserved"] is True
     assert detail["final_rerank_error_type"] is None

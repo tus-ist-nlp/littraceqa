@@ -105,6 +105,89 @@ def test_empty_candidates_do_not_load_model():
     assert reranker.rerank("question", [], top_k=10) == []
 
 
+def test_union_scoring_is_reused_for_subsets_of_the_same_query():
+    predict_calls: list[list[tuple[str, str]]] = []
+
+    class FakeScorer:
+        def predict(self, pairs, **kwargs):
+            predict_calls.append(pairs)
+            return [0.1, 0.9, 0.5]
+
+    candidates = [_candidate(1, 0.8), _candidate(2, 0.7), _candidate(3, 0.6)]
+    reranker = Qwen3Reranker(
+        model_loader=lambda *args, **kwargs: FakeScorer(),
+    )
+
+    union_scores = reranker.score_candidates("question", candidates)
+    subset = [candidates[2], candidates[0]]
+    subset_scores = reranker.score_candidates("question", subset)
+    results = reranker.rerank_scored(subset, subset_scores, top_k=2)
+
+    assert union_scores == [0.1, 0.9, 0.5]
+    assert subset_scores == [0.5, 0.1]
+    assert [result.paper_id for result in results] == ["paper-3", "paper-1"]
+    assert predict_calls == [
+        [
+            ("question", "candidate text 1"),
+            ("question", "candidate text 2"),
+            ("question", "candidate text 3"),
+        ]
+    ]
+
+
+def test_duplicate_text_is_scored_once_within_one_call():
+    predict_calls: list[list[tuple[str, str]]] = []
+
+    class FakeScorer:
+        def predict(self, pairs, **kwargs):
+            predict_calls.append(pairs)
+            return [0.75]
+
+    first = _candidate(1, 0.8)
+    second = _candidate(2, 0.7)
+    second = RetrievalResult(
+        chunk_id=second.chunk_id,
+        paper_id=second.paper_id,
+        score=second.score,
+        text=first.text,
+        chunk_type=second.chunk_type,
+        metadata=second.metadata,
+        source=second.source,
+    )
+    reranker = Qwen3Reranker(
+        model_loader=lambda *args, **kwargs: FakeScorer(),
+    )
+
+    scores = reranker.score_candidates("question", [first, second])
+
+    assert scores == [0.75, 0.75]
+    assert predict_calls == [[("question", "candidate text 1")]]
+
+
+def test_score_cache_is_cleared_when_query_changes():
+    predict_calls: list[list[tuple[str, str]]] = []
+
+    class FakeScorer:
+        def predict(self, pairs, **kwargs):
+            predict_calls.append(pairs)
+            return [float(len(predict_calls))]
+
+    candidate = _candidate(1, 0.8)
+    reranker = Qwen3Reranker(
+        model_loader=lambda *args, **kwargs: FakeScorer(),
+    )
+
+    assert reranker.score_candidates("first", [candidate]) == [1.0]
+    assert reranker.score_candidates("first", [candidate]) == [1.0]
+    assert reranker.score_candidates("second", [candidate]) == [2.0]
+    assert reranker.score_candidates("first", [candidate]) == [3.0]
+    assert predict_calls == [
+        [("first", "candidate text 1")],
+        [("second", "candidate text 1")],
+        [("first", "candidate text 1")],
+    ]
+
+
 def test_non_finite_score_is_rejected():
     class FakeScorer:
         def predict(self, pairs, **kwargs):

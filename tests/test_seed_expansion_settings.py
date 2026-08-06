@@ -25,6 +25,9 @@ def test_proxies_indexers_and_exposes_final_reranker():
 
     assert retriever.indexers is inner.indexers
     assert retriever.reranker is final_reranker
+    assert retriever.two_lane_rerank is False
+    assert retriever.two_lane_base_weight == 1.0
+    assert retriever.two_lane_expansion_weight == 1.0
 
 
 @pytest.mark.parametrize(
@@ -68,6 +71,24 @@ def test_proxies_indexers_and_exposes_final_reranker():
         (
             {"rerank_final_candidates": True},
             "rerank_final_candidates",
+        ),
+        ({"two_lane_rerank": True}, "two_lane_rerank"),
+        (
+            {
+                "two_lane_rerank": True,
+                "two_lane_base_weight": 0,
+                "two_lane_expansion_weight": 0,
+                "reranker": _FakeReranker(),
+            },
+            "two-lane weight",
+        ),
+        (
+            {
+                "two_lane_rerank": True,
+                "local_expansion_weight": 0.5,
+                "reranker": _FakeReranker(),
+            },
+            "local_expansion_weight",
         ),
         ({"max_protected_titles": 0}, "max_protected_titles"),
         ({"max_protected_titles": 5}, "max_protected_titles"),
@@ -201,6 +222,7 @@ def test_validates_constructor_parameters(kwargs, message):
         ({"open_set_max_seed_rank": "2"}, "open_set_max_seed_rank"),
         ({"open_set_slot_k": None}, "open_set_slot_k"),
         ({"rerank_final_candidates": 1}, "rerank_final_candidates"),
+        ({"two_lane_rerank": 1}, "two_lane_rerank"),
         (
             {"final_rerank_document_chars": True},
             "final_rerank_document_chars",
@@ -301,6 +323,16 @@ def test_rejects_non_numeric_local_expansion_weight(weight):
         SeedExpansionRetriever(
             _FakeRetriever([[]]),
             local_expansion_weight=weight,
+        )
+
+
+@pytest.mark.parametrize("name", ["two_lane_base_weight", "two_lane_expansion_weight"])
+@pytest.mark.parametrize("weight", [True, "1.0", None])
+def test_rejects_non_numeric_two_lane_weight(name, weight):
+    with pytest.raises(TypeError, match=name):
+        SeedExpansionRetriever(
+            _FakeRetriever([[]]),
+            **{name: weight},
         )
 
 

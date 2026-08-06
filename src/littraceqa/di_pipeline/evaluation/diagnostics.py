@@ -16,6 +16,8 @@ from littraceqa.di_pipeline.evaluation.metrics import _scenario_for_gold
 
 _METHOD_RANKING_INT_FIELDS = (
     "qwen3_rank",
+    "two_lane_base_rank",
+    "two_lane_expansion_rank",
     "final_rerank_pre_protection_rank",
     "final_rerank_protected_top_k",
     "method_dense_tail_baseline_rank",
@@ -50,6 +52,7 @@ _METHOD_RANKING_INT_FIELDS = (
 )
 _METHOD_RANKING_LIST_FIELDS = (
     "attribute_matches",
+    "two_lane_sources",
     "method_dense_tail_via_papers",
     "paper_dense_tail_via_papers",
     "paper_dense_consensus_via_papers",
@@ -66,6 +69,7 @@ _METHOD_RANKING_LIST_FIELDS = (
 )
 _METHOD_RANKING_FLOAT_FIELDS = (
     "qwen3_score",
+    "two_lane_rrf_score",
     "rank_fusion_base_weight",
     "rank_fusion_k",
     "final_rerank_pre_protection_score",
@@ -94,6 +98,8 @@ _METHOD_RANKING_BOOL_FIELDS = (
 _METHOD_RANKING_STR_FIELDS = (
     "final_rerank_status",
     "final_rerank_error_type",
+    "two_lane_rerank_status",
+    "two_lane_rerank_error_type",
     "paper_dense_consensus_replaced_paper_id",
     "paper_dense_reciprocal_replaced_paper_id",
     "method_bridge_replaced_paper_id",
