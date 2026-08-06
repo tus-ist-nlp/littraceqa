@@ -60,9 +60,15 @@ def test_preflight_reports_real_locator_and_image_coverage(tmp_path):
         (CandidatePaper("p1", 1),),
     )
 
-    report, errors = MODULE.inspect_corpus([handoff], _image_store(chunks, tmp_path))
+    report, errors = MODULE.inspect_corpus(
+        [handoff], _image_store(chunks, tmp_path), image_workers=4
+    )
+    serial_report, serial_errors = MODULE.inspect_corpus(
+        [handoff], _image_store(chunks, tmp_path), image_workers=1
+    )
 
     assert errors == []
+    assert (report, errors) == (serial_report, serial_errors)
     assert report["chunk_types"] == {"figure": 1}
     assert report["image_paths"]["declared"] == 1
     assert report["image_paths"]["existing"] == 1

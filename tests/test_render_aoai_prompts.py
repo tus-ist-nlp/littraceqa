@@ -74,7 +74,31 @@ def test_json_preview_uses_official_projection_and_provided_context(tmp_path):
     )
     paper_text.write_text("[chunk p2#fig4]\nREAL_PAPER_TEXT", encoding="utf-8")
     summary.write_text(
-        json.dumps([{"paper_id": "p2", "rank": 2, "label": "direct_answer"}]),
+        json.dumps(
+            [
+                {
+                    "paper_id": "p2",
+                    "rank": 2,
+                    "label": "direct_answer",
+                    "satisfied_constraints": ["UNSAFE_STAGE1_PROSE_SENTINEL"],
+                    "missing_constraints": ["UNSAFE_STAGE1_MISSING_SENTINEL"],
+                    "blocking_mismatches": ["UNSAFE_STAGE1_BLOCKING_SENTINEL"],
+                    "candidate_answer": {
+                        "units": [{"value": "UNSAFE_STAGE1_VALUE_SENTINEL"}]
+                    },
+                    "reason": "UNSAFE_STAGE1_REASON_SENTINEL",
+                    "evidence": [
+                        {
+                            "chunk_id": "p2#fig4",
+                            "source_type": "figure",
+                            "locator": {"page": 4, "figure_id": "Figure 4"},
+                            "purpose": "answer",
+                            "quote_or_value": "UNSAFE_STAGE1_QUOTE_SENTINEL",
+                        }
+                    ],
+                }
+            ]
+        ),
         encoding="utf-8",
     )
     evidence.write_text("[chunk p2#fig4]\nREAL_ANSWER_EVIDENCE", encoding="utf-8")
@@ -126,6 +150,14 @@ def test_json_preview_uses_official_projection_and_provided_context(tmp_path):
     assert "REAL_PAPER_TEXT" in judgment["text"]
     assert "REAL_ANSWER_EVIDENCE" in answer["text"]
     assert '"label":"<one of: A, B, E>"' in answer["text"]
+    assert "UNSAFE_STAGE1_PROSE_SENTINEL" not in answer["text"]
+    assert "UNSAFE_STAGE1_MISSING_SENTINEL" not in answer["text"]
+    assert "UNSAFE_STAGE1_BLOCKING_SENTINEL" not in answer["text"]
+    assert "UNSAFE_STAGE1_VALUE_SENTINEL" not in answer["text"]
+    assert "UNSAFE_STAGE1_REASON_SENTINEL" not in answer["text"]
+    assert "UNSAFE_STAGE1_QUOTE_SENTINEL" not in answer["text"]
+    assert '"chunk_id":"p2#fig4"' in answer["text"]
+    assert '"figure_id":"Figure 4"' in answer["text"]
     for prompt in preview["prompts"]:
         assert prompt["sha256"] == hashlib.sha256(
             prompt["text"].encode("utf-8")
@@ -178,6 +210,8 @@ def test_markdown_preview_without_candidate_uses_conspicuous_samples(tmp_path):
     assert "Synthetic paper text: `true`" in markdown
     assert "Synthetic preview paper text" in markdown
     assert "Synthetic preview evidence" in markdown
+    assert "synthetic preview value" not in markdown
+    assert "Synthetic preview only." not in markdown
     assert "A9_native_table_types" in markdown
     assert "Prompt version:" in markdown
     assert "### System message" in markdown

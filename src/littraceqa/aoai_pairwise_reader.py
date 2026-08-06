@@ -6,34 +6,51 @@ labels.  It performs exactly two semantic stages:
 
 1. Pair one observable query with one candidate paper hydrated from the MinerU
    corpus and ask an LLM whether that paper is useful, citing exact chunk IDs.
-2. Give only the accepted original chunks (plus their immediate neighbours)
-   back to the LLM and construct the answer.
+2. Give the accepted original chunks back to the LLM and construct the answer.
+   A named target owner that Stage 1 conservatively marked unreadable or
+   irrelevant may be rechecked only when identity is established, no hard
+   mismatch exists, and direct original evidence was cited.
 
-Stage 1 sends exactly one selected paper context for each query-paper pair.
-Long papers and image-heavy papers are compacted deterministically before that
-single request; they are never partitioned into additional semantic calls.  A
-failed API call, invalid JSON, or invented chunk ID raises an error; it is never
-converted into an ``irrelevant`` decision.
+Stage 1 first applies a narrow, candidate-set-unique canonical-owner gate for
+paper-local objects. A decisive wrong owner is checkpointed without AOAI; every
+other query-paper pair sends exactly one selected paper context. Long papers and
+image-heavy papers are compacted deterministically before that single request;
+they are never partitioned into additional semantic calls. A failed API call,
+invalid JSON, or invented chunk ID raises an error; it is never converted into
+an ``irrelevant`` decision.
 """
 
 from __future__ import annotations
 
 import hashlib
+import html
+import inspect
 import json
 import math
 import re
 import time
-from collections.abc import Iterable
+import unicodedata
+import uuid
+from collections.abc import Callable, Iterable
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Required, TypedDict, cast
 
 from littraceqa.answer_derivation import (
     DerivationValidationError,
+    citation_author_filter,
+    citation_identity_key,
+    is_aggregate_citation_count_query,
     validate_answer_semantics,
+    validate_citation_count_items,
 )
 from littraceqa.candidate_handoff import (
     CandidatePaper,
     require_production_query,
+)
+from littraceqa.citation_locator import (
+    CITATION_LOCATOR_VERSION,
+    infer_citation_locator_overrides,
 )
 from littraceqa.chunk_store import ChunkStore, Record
 from littraceqa.corpus_preflight import requires_visual_image
@@ -57,7 +74,9 @@ from littraceqa.pairwise_prompts import (
     render_judgment_prompt,
 )
 
-PAPER_CONTEXT_SELECTOR_VERSION = "query-lexical-v1"
+PAPER_CONTEXT_SELECTOR_VERSION = "query-lexical-v3-exact-object-multipanel"
+NAMED_OWNER_RESOLVER_VERSION = "named-owner-v2-grammatical-local-object-only"
+MAX_ANSWER_REPAIR_ATTEMPTS = 3
 
 JUDGMENT_LABELS = (
     "direct_answer",
@@ -75,6 +94,37 @@ _OBJECT_REFERENCE_RE = re.compile(
     r"(?i)\b(figure|fig\.?|table|equation|eq\.?|algorithm|reference|ref\.?|citation)"
     r"\s*(?:no\.?\s*)?([A-Za-z]?\d+[A-Za-z]?)\b"
 )
+_LOCAL_NUMBERED_OBJECT_RE = re.compile(
+    r"(?i)\b(?:figure|fig\.?|table|equation|eq\.?|reference|ref\.?)\s*"
+    r"(?:no\.?\s*)?\d+[A-Za-z]?(?:\s*\([A-Za-z0-9]+\))?\b"
+)
+_LOCAL_ORDINAL_REFERENCE_RE = re.compile(
+    r"(?i)\b(?:\d+(?:st|nd|rd|th)\s+reference|last\s+reference)\b"
+)
+_LOCAL_REFERENCE_INVENTORY_RE = re.compile(
+    r"(?i)\b(?:how\s+many\s+references|how\s+many\s+papers\s+"
+    r"(?:were\s+)?cited)\b"
+)
+_EXPLICIT_MULTI_SOURCE_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:compare|comparison|versus|vs\.?|also|while|whereas)\b"
+    r"|\b(?:baseline|other|another|second)\s+paper\b"
+    r"|[,;]\s*and\s+(?:what|which|how|where|when|who|does|do|is|are|"
+    r"report|give|the)\b"
+    r")"
+)
+_LOCAL_OBJECT_GRAMMAR = (
+    r"(?:"
+    r"(?:figure|fig\.?|table|equation|eq\.?|reference|ref\.?)\s*"
+    r"(?:no\.?\s*)?\d+[A-Za-z]?(?:\s*\([A-Za-z0-9]+\))?"
+    r"|\d+(?:st|nd|rd|th)\s+reference"
+    r"|last\s+reference"
+    r"|how\s+many\s+references"
+    r"|how\s+many\s+papers\s+(?:were\s+)?cited"
+    r")"
+)
+_PAPER_AFTER_RE = re.compile(r"(?i)\bpaper\s+([^?]+?)\s*\??$")
+_OWNER_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _QUERY_STOPWORDS = frozenset(
     {
         "a",
@@ -106,6 +156,277 @@ _QUERY_STOPWORDS = frozenset(
         "with",
     }
 )
+
+
+class NamedOwnerResolution(TypedDict):
+    """Candidate-set-level resolution of one explicit named paper owner."""
+
+    version: str
+    status: str
+    owner_phrase: str
+    paper_id: str
+    title: str
+    match_kind: str
+    hard_gate: bool
+    reason: str
+
+
+def _normalize_owner_text(value: str) -> str:
+    """Normalize title text without inventing acronym expansions."""
+
+    decoded = html.unescape(unicodedata.normalize("NFKC", str(value or "")))
+    return " ".join(_OWNER_TOKEN_RE.findall(decoded.lower()))
+
+
+def _candidate_title_aliases(title: str) -> tuple[str, ...]:
+    """Return only literal, distinctive aliases supplied by canonical metadata."""
+
+    raw_title = html.unescape(unicodedata.normalize("NFKC", str(title or "")))
+    raw_aliases: list[tuple[str, bool]] = [(raw_title, False)]
+    if ":" in raw_title:
+        raw_aliases.append((raw_title.split(":", 1)[0], True))
+    aliases: list[str] = []
+    for raw_alias, is_prefix in raw_aliases:
+        alias = _normalize_owner_text(raw_alias)
+        compact = alias.replace(" ", "")
+        if len(compact) < 5 or alias in aliases:
+            continue
+        if is_prefix and len(alias.split()) == 1:
+            letters = "".join(
+                character for character in raw_alias if character.isalpha()
+            )
+            distinctive_single_token = (
+                any(character.isdigit() for character in raw_alias)
+                or (len(letters) >= 3 and letters.isupper())
+                or bool(re.search(r"[a-z0-9][A-Z]", raw_alias))
+            )
+            if not distinctive_single_token:
+                continue
+        aliases.append(alias)
+    return tuple(sorted(aliases, key=lambda value: (-len(value), value)))
+
+
+def _literal_alias_pattern(alias: str) -> str:
+    """Render a normalized canonical alias as a punctuation-tolerant regex."""
+
+    tokens = alias.split()
+    return r"(?<![A-Za-z0-9])" + r"[^A-Za-z0-9]+".join(
+        re.escape(token) for token in tokens
+    ) + r"(?![A-Za-z0-9])"
+
+
+def _alias_grammatically_owns_local_object(question: str, alias: str) -> bool:
+    """Check explicit grammatical ownership, not mere title co-occurrence.
+
+    The destructive gate is limited to constructions such as ``Figure 4 of
+    DynaPipe``, ``references in the SecEmb paper``, ``in DynaPipe, Figure 4``,
+    or ``DynaPipe's Figure 4``.  A title that is merely cited or compared in the
+    same question must remain an AOAI judgment.
+    """
+
+    raw_question = html.unescape(unicodedata.normalize("NFKC", question or ""))
+    alias_pattern = _literal_alias_pattern(alias)
+    paper_owner = (
+        rf"(?:the\s+)?(?:paper\s+)?{alias_pattern}(?:\s+paper)?"
+    )
+    object_then_owner = re.compile(
+        rf"\b{_LOCAL_OBJECT_GRAMMAR}(?![A-Za-z0-9])[^?.;:]{{0,100}}?"
+        rf"\b(?:of|in)\b\s+{paper_owner}",
+        re.IGNORECASE,
+    )
+    scoped_owner_then_object = re.compile(
+        rf"\b(?:in|according\s+to)\s+{paper_owner}\s*[,;:]"
+        rf"[^?.;:]{{0,120}}?\b{_LOCAL_OBJECT_GRAMMAR}(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    possessive_or_compound_owner = re.compile(
+        rf"{alias_pattern}(?:\s+paper)?(?:['’]s|\s+)"
+        rf"(?:the\s+)?\b{_LOCAL_OBJECT_GRAMMAR}(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    return any(
+        pattern.search(raw_question)
+        for pattern in (
+            object_then_owner,
+            scoped_owner_then_object,
+            possessive_or_compound_owner,
+        )
+    )
+
+
+def _identity_only_blocking_mismatch(value: str) -> bool:
+    """Recognize only explicit paper/title identity denials.
+
+    A resolved canonical owner makes these denials false.  Broader scientific
+    mismatches (dataset, setting, metric, population, and so on) are deliberately
+    retained so Stage 2 cannot rescue a genuinely incompatible source.
+    """
+
+    normalized = " ".join(str(value or "").lower().split())
+    return any(
+        re.search(pattern, normalized)
+        for pattern in (
+            (
+                r"\b(?:wrong|different|mismatched|unrelated)\s+"
+                r"(?:candidate\s+)?(?:paper|title|owner)\b"
+            ),
+            (
+                r"\b(?:candidate\s+)?(?:paper|title|owner)"
+                r"(?:\s+identity)?\s+(?:does not match|doesn't match|is wrong|"
+                r"is not\s+(?:the\s+)?(?:requested|target|named)"
+                r"(?:\s+paper)?)\b"
+            ),
+            (
+                r"\bnot\s+(?:the\s+)?(?:requested|target|named)\s+"
+                r"(?:paper|title|owner)\b"
+            ),
+        )
+    )
+
+
+def _query_is_explicit_multi_source(question: str) -> bool:
+    """Keep comparisons and multiple paper-local objects out of hard gating."""
+
+    local_objects = re.findall(_LOCAL_OBJECT_GRAMMAR, question, re.IGNORECASE)
+    return bool(_EXPLICIT_MULTI_SOURCE_RE.search(question)) or len(local_objects) > 1
+
+
+def _single_full_title_typo_match(
+    question: str,
+    candidates: Iterable[CandidatePaper],
+) -> tuple[CandidatePaper, str] | None:
+    """Resolve one long post-``paper`` title with exactly one benign word typo.
+
+    This deliberately does not fuzz short aliases or acronyms.  It exists for
+    query-authored full-title slips such as ``Leaner`` versus ``Linear`` and is
+    candidate-set unique before it can influence any metadata or cache key.
+    """
+
+    match = _PAPER_AFTER_RE.search(question)
+    if match is None:
+        return None
+    owner_phrase = _normalize_owner_text(match.group(1))
+    phrase_tokens = owner_phrase.split()
+    if len(phrase_tokens) < 4 or len(owner_phrase.replace(" ", "")) < 20:
+        return None
+
+    matches: list[CandidatePaper] = []
+    for candidate in candidates:
+        title = _normalize_owner_text(candidate.title)
+        title_tokens = title.split()
+        if len(title_tokens) != len(phrase_tokens):
+            continue
+        differing = [
+            (left, right)
+            for left, right in zip(phrase_tokens, title_tokens, strict=True)
+            if left != right
+        ]
+        if len(differing) != 1:
+            continue
+        left, right = differing[0]
+        if SequenceMatcher(None, left, right).ratio() < (2 / 3):
+            continue
+        if SequenceMatcher(None, owner_phrase, title).ratio() < 0.90:
+            continue
+        matches.append(candidate)
+    if len(matches) != 1:
+        return None
+    return matches[0], owner_phrase
+
+
+def resolve_named_owner(
+    query: Query,
+    candidates: Iterable[CandidatePaper],
+) -> NamedOwnerResolution:
+    """Resolve one high-confidence literal named owner across the whole ranking.
+
+    The hard gate is intentionally narrower than resolution: it activates only
+    for a numbered figure/table/equation, a numbered/last reference, or an
+    explicit section/bibliography citation inventory.  General single-paper and
+    all multi-source questions remain LLM judgments so comparison/option papers
+    are not lost merely because another title is named in the question.
+    """
+
+    ordered_candidates = tuple(candidates)
+    normalized_question = f" {_normalize_owner_text(query.question)} "
+    exact_matches: list[tuple[CandidatePaper, tuple[str, ...]]] = []
+    for candidate in ordered_candidates:
+        matched_aliases = [
+            alias
+            for alias in _candidate_title_aliases(candidate.title)
+            if f" {alias} " in normalized_question
+        ]
+        if matched_aliases:
+            exact_matches.append((candidate, tuple(matched_aliases)))
+
+    match_kind = ""
+    owner_phrase = ""
+    literal_aliases: tuple[str, ...] = ()
+    resolved: CandidatePaper | None = None
+    if len(exact_matches) == 1:
+        resolved, literal_aliases = exact_matches[0]
+        owner_phrase = literal_aliases[0]
+        match_kind = "literal_title_or_prefix"
+    elif not exact_matches:
+        typo_match = _single_full_title_typo_match(
+            query.question, ordered_candidates
+        )
+        if typo_match is not None:
+            resolved, owner_phrase = typo_match
+            match_kind = "single_word_full_title_typo"
+
+    if resolved is None:
+        status = "ambiguous" if len(exact_matches) > 1 else "unresolved"
+        reason = (
+            "multiple candidate titles are literally named in the query"
+            if exact_matches
+            else "no unique high-confidence canonical-title match"
+        )
+        return {
+            "version": NAMED_OWNER_RESOLVER_VERSION,
+            "status": status,
+            "owner_phrase": "",
+            "paper_id": "",
+            "title": "",
+            "match_kind": "",
+            "hard_gate": False,
+            "reason": reason,
+        }
+
+    grammatical_owner = (
+        match_kind == "literal_title_or_prefix"
+        and not _query_is_explicit_multi_source(query.question)
+        and any(
+            _alias_grammatically_owns_local_object(query.question, alias)
+            for alias in literal_aliases
+        )
+    )
+    return {
+        "version": NAMED_OWNER_RESOLVER_VERSION,
+        "status": "resolved",
+        "owner_phrase": owner_phrase,
+        "paper_id": resolved.paper_id,
+        "title": resolved.title,
+        "match_kind": match_kind,
+        "hard_gate": grammatical_owner,
+        "reason": (
+            "unique literal title grammatically owns the paper-local object"
+            if grammatical_owner
+            else (
+                "unique fuzzy title resolved for metadata only; fuzzy matches never gate"
+                if match_kind == "single_word_full_title_typo"
+                else (
+                    "unique named title resolved; comparison or multi-source "
+                    "questions never hard gate"
+                    if _query_is_explicit_multi_source(query.question)
+                    else (
+                        "unique named title resolved without explicit "
+                        "local-object ownership"
+                    )
+                )
+            )
+        ),
+    }
 
 
 class PaperContext(TypedDict):
@@ -144,10 +465,79 @@ class CompletionResult(TypedDict, total=False):
     deployment: str
     usage: Any
     latency_seconds: float
+    max_completion_tokens: int
+    finish_reason: str
+    rate_limit: dict[str, str]
     requested_image_count: int
     attached_image_count: int
     image_fallback_reason: str
     provider_invocation_count: int
+    provider_attempt_id: str
+    provider_semantic_phase: str
+    provider_invocation_index: int
+    prompt_content_filter_fallback_reason: str
+    prompt_content_filter_blocked_categories: list[str]
+    prompt_content_filter_blocked_attempts: list[dict[str, Any]]
+    blocked_prompt_sha256: str
+    blocked_prompt_characters: int
+    blocked_context_chunk_ids: list[str]
+
+
+ProviderAttemptCallback = Callable[[dict[str, Any]], None]
+
+
+def _finalize_provider_response_attempt(
+    completion: CompletionResult,
+    *,
+    callback: ProviderAttemptCallback | None,
+    semantic_phase: str,
+    logical_attempt_index: int,
+    parse_error: str | None,
+) -> None:
+    """Finalize one prepared response without storing its response body."""
+
+    if callback is None:
+        return
+    attempt_id = str(completion.get("provider_attempt_id") or "")
+    if not attempt_id:
+        raise RuntimeError("provider response is missing its prepared attempt_id")
+    safe_metadata_keys = (
+        "request_id",
+        "model",
+        "deployment",
+        "usage",
+        "latency_seconds",
+        "max_completion_tokens",
+        "finish_reason",
+        "rate_limit",
+        "estimated_reserved_tokens",
+        "launch_interval_seconds",
+        "target_tpm",
+        "requested_image_count",
+        "attached_image_count",
+        "image_fallback_reason",
+        "prompt_sha256",
+        "prompt_characters",
+    )
+    callback(
+        {
+            "attempt_id": attempt_id,
+            "event_kind": "finalize",
+            "outcome": "response",
+            "semantic_phase": semantic_phase,
+            "logical_attempt_index": logical_attempt_index,
+            "provider_invocation_index": int(
+                completion.get("provider_invocation_index") or 1
+            ),
+            "provider_invocation_count": 1,
+            "parse_error": parse_error,
+            **{
+                key: completion.get(key)
+                for key in safe_metadata_keys
+                if key in completion
+            },
+        }
+    )
 
 
 class ReadingResponseError(RuntimeError):
@@ -158,12 +548,407 @@ class JudgmentEvidenceChunkError(ReadingResponseError):
     """Stage 1 cited a chunk outside its selected candidate-paper context."""
 
 
+class JudgmentResponseExhaustedError(ReadingResponseError):
+    """Both the initial Stage-1 response and its repair failed validation.
+
+    This narrow exception lets the global coordinator isolate one malformed
+    model response without mistaking authentication, rate-limit, corpus, or
+    adapter failures for a harmless candidate-level problem.  The paid calls
+    remain attached for durable error auditing.
+    """
+
+    def __init__(self, message: str, *, calls: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.calls = calls
+
+
 class AnswerEvidenceLocatorError(ReadingResponseError):
     """Stage 2 cited evidence that cannot be serialized with an official locator."""
 
 
 class NoRelevantCandidatesError(RuntimeError):
     """No candidate was accepted, so an evidence-grounded answer is impossible."""
+
+
+_NUMBERED_CITATION_MARKER_RE = re.compile(
+    r"(?<!\w)(?:\[\s*(?P<bracket>\d+)\s*\]|"
+    r"(?:reference|ref\.?)\s*:?\s*(?P<label>\d+)\b)",
+    re.IGNORECASE,
+)
+
+
+def _numbered_citation_entries(text: str) -> list[tuple[int, str]]:
+    """Split numbered bibliography text at each explicit citation marker.
+
+    MinerU can place several bibliography entries in one chunk (and sometimes
+    even on one physical line).  Returning the text only up to the next marker
+    prevents an author in ``[2]`` from being used to validate ``[1]``.
+    """
+
+    matches = list(_NUMBERED_CITATION_MARKER_RE.finditer(text))
+    entries: list[tuple[int, str]] = []
+    for index, match in enumerate(matches):
+        raw_number = match.group("bracket") or match.group("label")
+        if raw_number is None:
+            continue
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+        entries.append((int(raw_number), text[match.start() : end]))
+    return entries
+
+
+def _metadata_citation_number(value: Any) -> int | None:
+    """Read a citation locator only when its complete value names one number."""
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    numbers = re.findall(r"\d+", str(value))
+    return int(numbers[0]) if len(numbers) == 1 else None
+
+
+def _citation_identity_supported_by_records(
+    item: str,
+    records: Iterable[Record],
+    *,
+    required_author: str | None = None,
+) -> bool:
+    """Check one normalized identity against the cited answer-chunk text."""
+
+    identity_key = citation_identity_key(item)
+    if identity_key is None:
+        return False
+    if identity_key.startswith("number:"):
+        number = int(identity_key.removeprefix("number:"))
+        required_author_pattern = (
+            re.compile(
+                rf"(?<!\w){re.escape(required_author)}(?!\w)", re.IGNORECASE
+            )
+            if required_author
+            else None
+        )
+        for record in records:
+            metadata = record.get("metadata") or {}
+            text = str(record.get("text") or "")
+            numbered_entries = _numbered_citation_entries(text)
+            for entry_number, entry_text in numbered_entries:
+                if entry_number != number:
+                    continue
+                if (
+                    required_author_pattern is None
+                    or required_author_pattern.search(entry_text)
+                ):
+                    return True
+
+            # A matching citation_id is an entry-level locator when the text has
+            # no explicit numbered boundaries.  If boundaries are present, do
+            # not widen the author check back to the whole multi-entry chunk.
+            if (
+                _metadata_citation_number(metadata.get("citation_id")) == number
+                and not numbered_entries
+                and (
+                    required_author_pattern is None
+                    or required_author_pattern.search(text)
+                )
+            ):
+                return True
+        return False
+
+    _, author, year = identity_key.split(":", maxsplit=2)
+    inline_pattern = re.compile(
+        rf"(?<!\w){re.escape(author)}(?!\w)"
+        rf"(?:\s+et\s+al\.?)?\s*,?\s*\(?\s*{re.escape(year)}\s*\)?"
+    )
+    bibliography_start = re.compile(
+        r"^[A-ZÀ-ÖØ-Þ][^,\n]{0,60},\s+"
+        r"(?:[A-ZÀ-ÖØ-Þ]\.?(?:\s|,)|[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]+)",
+    )
+    target_entry_start = re.compile(
+        rf"^{re.escape(author)},\s+", re.IGNORECASE
+    )
+    required_author_pattern = (
+        re.compile(rf"(?<!\w){re.escape(required_author)}(?!\w)")
+        if required_author
+        else None
+    )
+    for record in records:
+        raw_text = str(record.get("text") or "")
+        if inline_pattern.search(raw_text.casefold()) and (
+            required_author is None or required_author == author
+        ):
+            return True
+
+        # Bibliography entries in MinerU text start on their own line.  Include
+        # wrapped continuation lines, but stop before the next surname/initial
+        # entry so an adjacent paper's year can never support this identity.
+        lines = raw_text.splitlines()
+        for index, line in enumerate(lines):
+            if not target_entry_start.search(line.strip()):
+                continue
+            entry_lines = [line]
+            for following in lines[index + 1 :]:
+                if bibliography_start.search(following.strip()):
+                    break
+                entry_lines.append(following)
+            entry = " ".join(entry_lines).casefold()
+            if re.search(
+                rf"(?<!\d){re.escape(year)}(?!\w)", entry
+            ) and (
+                required_author_pattern is None
+                or required_author_pattern.search(entry)
+            ):
+                return True
+    return False
+
+
+def _validate_stage1_citation_count(
+    *,
+    query: Query,
+    candidate_answer: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    allowed_records: dict[str, Record],
+) -> None:
+    """Validate the explicit Stage-1 inventory for a scalar citation count."""
+
+    units = candidate_answer.get("units")
+    if not isinstance(units, list) or len(units) != 1 or not isinstance(units[0], dict):
+        raise ReadingResponseError(
+            "aggregate citation count requires exactly one candidate_answer unit "
+            "with integer value and counted_items"
+        )
+    unit = units[0]
+    value = unit.get("value")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ReadingResponseError(
+            "aggregate citation count candidate_answer unit.value must be an integer"
+        )
+    try:
+        counted_items = validate_citation_count_items(
+            unit.get("counted_items"),
+            path="candidate_answer.units[0].counted_items",
+        )
+    except DerivationValidationError as exc:
+        raise ReadingResponseError(str(exc)) from exc
+    if value != len(counted_items):
+        raise ReadingResponseError(
+            f"aggregate citation count unit.value={value} but counted_items "
+            f"contain {len(counted_items)} identities"
+        )
+
+    answer_records = [
+        allowed_records[str(item["chunk_id"])]
+        for item in evidence
+        if item.get("purpose") == "answer"
+    ]
+    unsupported = [
+        item
+        for item in counted_items
+        if not _citation_identity_supported_by_records(
+            item,
+            answer_records,
+            required_author=citation_author_filter(query),
+        )
+    ]
+    if unsupported:
+        raise ReadingResponseError(
+            "aggregate citation count identities are not supported by the cited "
+            f"answer chunks: {unsupported}"
+        )
+
+    raw_labels = unit.get("matched_option_labels") or []
+    if "multiple_choice" in query.answer_types and raw_labels:
+        for raw_label in raw_labels:
+            option_text = (query.options or {}).get(str(raw_label))
+            if (
+                not isinstance(option_text, str)
+                or not re.fullmatch(r"\s*\d+\s*", option_text)
+                or int(option_text) != value
+            ):
+                raise ReadingResponseError(
+                    "aggregate citation count matched option text must be a bare "
+                    f"integer equal to validated count {value}"
+                )
+    unit["counted_items"] = counted_items
+
+
+def _validate_stage2_citation_count_support(
+    *,
+    query: Query,
+    derivation: dict[str, Any],
+    context_records: dict[str, Record],
+) -> None:
+    """Ground every counted identity in the count facts' submitted chunks."""
+
+    facts_by_id = {
+        str(fact["id"]): fact
+        for fact in derivation.get("facts") or []
+        if isinstance(fact, dict) and fact.get("id")
+    }
+    for operation in derivation.get("operations") or []:
+        if not isinstance(operation, dict) or operation.get("kind") != "count":
+            continue
+        records: list[Record] = []
+        seen_chunk_ids: set[str] = set()
+        for fact_id in operation.get("fact_ids") or []:
+            fact = facts_by_id.get(str(fact_id))
+            if fact is None:
+                continue
+            for raw_chunk_id in fact.get("chunk_ids") or []:
+                chunk_id = str(raw_chunk_id)
+                if chunk_id in seen_chunk_ids:
+                    continue
+                record = context_records.get(chunk_id)
+                if record is not None:
+                    seen_chunk_ids.add(chunk_id)
+                    records.append(record)
+        unsupported = [
+            str(item)
+            for item in operation.get("items") or []
+            if not _citation_identity_supported_by_records(
+                str(item),
+                records,
+                required_author=citation_author_filter(query),
+            )
+        ]
+        if unsupported:
+            raise ReadingResponseError(
+                "aggregate citation count identities are not supported by the "
+                f"referenced fact chunks: {unsupported}"
+            )
+
+
+_VISUAL_SUBFIGURE_COUNT_RE = re.compile(
+    r"(?i)\bhow\s+many\s+(?:subfigures?|subplots?)\b"
+)
+_SPATIAL_AXES_ID_RE = re.compile(
+    r"(?i)(?:\b(?:top|bottom|upper|lower|left|right|middle|center|centre)\b|"
+    r"\b(?:row|col(?:umn)?)\s*[-:#]?\s*\d+\b)"
+)
+
+
+def _integer_count(value: Any, *, path: str) -> int:
+    if isinstance(value, bool):
+        raise ReadingResponseError(f"visual subfigure count {path} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\s*\d+\s*", value):
+        return int(value)
+    raise ReadingResponseError(f"visual subfigure count {path} must be an integer")
+
+
+def _validate_stage1_visual_subfigure_count(
+    *,
+    query: Query,
+    candidate_answer: dict[str, Any],
+) -> None:
+    """Require an auditable spatial inventory for an image panel count."""
+
+    if _VISUAL_SUBFIGURE_COUNT_RE.search(query.question) is None:
+        return
+    units = candidate_answer.get("units")
+    if (
+        not isinstance(units, list)
+        or len(units) != 1
+        or not isinstance(units[0], dict)
+    ):
+        raise ReadingResponseError(
+            "visual subfigure count requires exactly one candidate_answer unit"
+        )
+    unit = units[0]
+    value = _integer_count(unit.get("value"), path="unit.value")
+    items = unit.get("counted_items")
+    if not isinstance(items, list) or not items:
+        raise ReadingResponseError(
+            "visual subfigure count requires non-empty counted_items with one "
+            "distinct spatial identifier per independently bounded axes region"
+        )
+    normalized_items: list[str] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, str) or not item.strip():
+            raise ReadingResponseError(
+                f"visual subfigure count counted_items[{index}] must be non-empty text"
+            )
+        normalized = _normalize_owner_text(item)
+        if not normalized or _SPATIAL_AXES_ID_RE.search(item) is None:
+            raise ReadingResponseError(
+                "visual subfigure count counted_items must use a distinct spatial "
+                "identifier for each axes region; a bare group label, row name, "
+                "or model family is not a subfigure"
+            )
+        normalized_items.append(normalized)
+    if len(normalized_items) != len(set(normalized_items)):
+        raise ReadingResponseError(
+            "visual subfigure count counted_items must be distinct"
+        )
+    if value != len(items):
+        raise ReadingResponseError(
+            f"visual subfigure count unit.value={value} but counted_items contain "
+            f"{len(items)} spatial axes"
+        )
+    raw_labels = unit.get("matched_option_labels") or []
+    if not isinstance(raw_labels, list):
+        raise ReadingResponseError(
+            "visual subfigure count matched_option_labels must be a list"
+        )
+    for label in raw_labels:
+        option_value = _integer_count(
+            (query.options or {}).get(str(label)),
+            path=f"matched option {label!r}",
+        )
+        if option_value != value:
+            raise ReadingResponseError(
+                f"visual subfigure count value={value} does not equal matched "
+                f"option {label!r} value={option_value}"
+            )
+    unit["value"] = value
+    unit["counted_items"] = list(items)
+
+
+def _answer_review_pool(
+    judgments: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return recall-oriented Stage-2 inputs without rescuing true mismatches.
+
+    Stage 1 is deliberately conservative.  A correctly identified target owner
+    can still be labelled ``unreadable`` (for example when MinerU split a
+    multi-panel figure) or even ``irrelevant`` after a faulty option match.  The
+    final reader is allowed to recheck that owner, but only when Stage 1 cited
+    original evidence and recorded neither an identity conflict nor a blocking
+    scientific mismatch.
+    """
+
+    ordered = sorted(judgments, key=lambda value: int(value.get("rank") or 0))
+    selected: list[dict[str, Any]] = []
+    seen_papers: set[str] = set()
+    for item in ordered:
+        paper_id = str(item.get("paper_id") or "")
+        accepted = (
+            item.get("relevant") is True
+            and item.get("label") in RELEVANT_LABELS
+        )
+        owner_recheck = (
+            not accepted
+            and item.get("paper_role") == "target_owner"
+            and item.get("identity_conflict") is not True
+            and not (item.get("blocking_mismatches") or [])
+            and bool(item.get("evidence") or [])
+        )
+        if not paper_id or paper_id in seen_papers or not (accepted or owner_recheck):
+            continue
+        seen_papers.add(paper_id)
+        if accepted:
+            selected.append(item)
+            continue
+        rescued = dict(item)
+        rescued["stage1_label"] = str(item.get("label") or "")
+        rescued["label"] = "supporting_only"
+        rescued["answer_pool_reason"] = "target_owner_recheck"
+        selected.append(rescued)
+    return selected
 
 
 def _is_image_content_policy_violation(exc: Exception) -> bool:
@@ -177,6 +962,69 @@ def _is_image_content_policy_violation(exc: Exception) -> bool:
         getattr(exc, "status_code", None) in (None, 400)
         and "content_policy_violation" in str(exc).lower()
     )
+
+
+def _prompt_content_filter_categories(exc: Exception) -> tuple[str, ...]:
+    """Return categories Azure structurally reports as filtering the prompt."""
+
+    if getattr(exc, "status_code", None) != 400:
+        return ()
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return ()
+    error = body.get("error", body)
+    if not isinstance(error, dict):
+        return ()
+    if error.get("code") != "content_filter" or error.get("param") != "prompt":
+        return ()
+    inner_error = error.get("innererror")
+    if not isinstance(inner_error, dict):
+        return ()
+    filter_result = inner_error.get("content_filter_result", inner_error)
+    if not isinstance(filter_result, dict):
+        return ()
+
+    filtered_categories: list[str] = []
+    for category, raw_result in filter_result.items():
+        if not isinstance(category, str) or not isinstance(raw_result, dict):
+            continue
+        if category == "jailbreak":
+            is_filtered = (
+                raw_result.get("detected") is True
+                and raw_result.get("filtered") is True
+            )
+        else:
+            is_filtered = raw_result.get("filtered") is True
+        if is_filtered:
+            filtered_categories.append(category)
+    return tuple(sorted(set(filtered_categories)))
+
+
+def _prompt_filter_provider_invocation_count(exc: Exception) -> int:
+    """Read the application-level provider calls made before a prompt rejection."""
+
+    raw_count = getattr(exc, "_littraceqa_provider_invocation_count", 1)
+    return raw_count if isinstance(raw_count, int) and raw_count > 0 else 1
+
+
+def _record_prompt_filter_provider_invocation_count(
+    exc: Exception, count: int, prompt: str
+) -> None:
+    """Attach private audit metadata without changing the raised exception type."""
+
+    try:
+        setattr(exc, "_littraceqa_provider_invocation_count", count)
+        setattr(
+            exc,
+            "_littraceqa_prompt_sha256",
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        )
+        setattr(exc, "_littraceqa_prompt_characters", len(prompt))
+    except Exception:
+        # Some third-party exception implementations may prohibit attributes.
+        # The known Azure/OpenAI errors support them; retain the conservative
+        # one-call default for an incompatible exception object.
+        pass
 
 
 def _judgment_call_record(
@@ -203,6 +1051,9 @@ def _judgment_call_record(
 class PairwiseAOAIReader:
     """Judge fixed candidate papers one by one, then answer from accepted chunks."""
 
+    supports_named_owner_resolution = True
+    supports_provider_attempt_ledger = True
+
     def __init__(
         self,
         chunk_store: ChunkStore,
@@ -213,8 +1064,11 @@ class PairwiseAOAIReader:
         answer_context_chars: int = 220_000,
         answer_neighbor_chunks: int = 1,
         max_answer_images: int = MAX_AOAI_IMAGES_PER_REQUEST,
+        max_answer_papers: int = 50,
         max_evidence: int = 32,
         max_evidence_per_paper: int | None = None,
+        judgment_max_completion_tokens: int | None = None,
+        answer_max_completion_tokens: int | None = None,
     ) -> None:
         if max_paper_context_chars < 8_000:
             raise ValueError("max_paper_context_chars must be at least 8000")
@@ -235,6 +1089,14 @@ class PairwiseAOAIReader:
             )
         if answer_context_chars < 8_000:
             raise ValueError("answer_context_chars must be at least 8000")
+        for name, value in (
+            ("judgment_max_completion_tokens", judgment_max_completion_tokens),
+            ("answer_max_completion_tokens", answer_max_completion_tokens),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ValueError(f"{name} must be a positive integer or null")
         resolved_per_paper = (
             min(4, max_evidence)
             if max_evidence_per_paper is None
@@ -242,6 +1104,7 @@ class PairwiseAOAIReader:
         )
         if (
             answer_neighbor_chunks < 0
+            or max_answer_papers < 1
             or max_evidence < 1
             or resolved_per_paper < 1
             or resolved_per_paper > max_evidence
@@ -255,17 +1118,31 @@ class PairwiseAOAIReader:
         self.answer_context_chars = answer_context_chars
         self.answer_neighbor_chunks = answer_neighbor_chunks
         self.max_answer_images = max_answer_images
+        self.max_answer_papers = max_answer_papers
         self.max_evidence = max_evidence
         self.max_evidence_per_paper = resolved_per_paper
+        self.judgment_max_completion_tokens = judgment_max_completion_tokens
+        self.answer_max_completion_tokens = answer_max_completion_tokens
 
     # ---- Stage 1: one query x one candidate paper -------------------------
 
     def judgment_cache_key(
-        self, query: Query, candidate: CandidatePaper, records: list[Record]
+        self,
+        query: Query,
+        candidate: CandidatePaper,
+        records: list[Record],
+        *,
+        owner_resolution: NamedOwnerResolution | None = None,
     ) -> str:
         require_production_query(query)
         payload = {
             "prompt_version": JUDGMENT_PROMPT_VERSION,
+            "named_owner_resolution": owner_resolution
+            or {
+                "version": NAMED_OWNER_RESOLVER_VERSION,
+                "status": "not_computed",
+                "hard_gate": False,
+            },
             "few_shot_examples": example_manifest(query)["judgment"],
             "query": _production_query_payload(query),
             "candidate": _candidate_payload(candidate),
@@ -276,12 +1153,20 @@ class PairwiseAOAIReader:
                 "max_paper_context_chars": self.max_paper_context_chars,
                 "max_judgment_prompt_chars": self.max_judgment_prompt_chars,
                 "max_paper_images": self.max_paper_images,
+                "judgment_max_completion_tokens": (
+                    self.judgment_max_completion_tokens
+                ),
             },
         }
         return _json_sha256(payload)
 
     def judge_candidate(
-        self, query: Query, candidate: CandidatePaper
+        self,
+        query: Query,
+        candidate: CandidatePaper,
+        *,
+        owner_resolution: NamedOwnerResolution | None = None,
+        provider_attempt_callback: ProviderAttemptCallback | None = None,
     ) -> dict[str, Any]:
         """Run an independent relevance/evidence judgment for one candidate paper."""
 
@@ -292,6 +1177,24 @@ class PairwiseAOAIReader:
                 f"{query.query_id}: candidate paper is absent from MinerU corpus: "
                 f"{candidate.paper_id}"
             )
+        if (
+            owner_resolution is not None
+            and owner_resolution["status"] == "resolved"
+            and owner_resolution["hard_gate"]
+            and owner_resolution["paper_id"] != candidate.paper_id
+        ):
+            return self._deterministic_wrong_owner_judgment(
+                query=query,
+                candidate=candidate,
+                records=records,
+                owner_resolution=owner_resolution,
+            )
+        resolved_target_owner = bool(
+            owner_resolution is not None
+            and owner_resolution["status"] == "resolved"
+            and owner_resolution["hard_gate"]
+            and owner_resolution["paper_id"] == candidate.paper_id
+        )
         context = self._paper_context(query, candidate, records)
         prompt = self._judgment_prompt(
             query=query,
@@ -319,7 +1222,177 @@ class PairwiseAOAIReader:
                 f"has {len(prompt)} characters, exceeding "
                 f"max_judgment_prompt_chars={self.max_judgment_prompt_chars}"
             )
-        completion = self._complete(prompt, context["image_paths"])
+        blocked_filter_attempts: list[dict[str, Any]] = []
+
+        def record_blocked_filter_attempt(
+            *,
+            blocked_prompt: str,
+            blocked_context: PaperContext,
+            phase: str,
+            categories: tuple[str, ...],
+            error: Exception,
+        ) -> None:
+            blocked_filter_attempts.append(
+                {
+                    "phase": phase,
+                    "categories": list(categories),
+                    "prompt_sha256": getattr(
+                        error,
+                        "_littraceqa_prompt_sha256",
+                        hashlib.sha256(
+                            blocked_prompt.encode("utf-8")
+                        ).hexdigest(),
+                    ),
+                    "prompt_characters": getattr(
+                        error,
+                        "_littraceqa_prompt_characters",
+                        len(blocked_prompt),
+                    ),
+                    "context_chunk_ids": list(
+                        blocked_context["selected_chunk_ids"]
+                    ),
+                    "provider_invocation_count": (
+                        _prompt_filter_provider_invocation_count(error)
+                    ),
+                }
+            )
+
+        try:
+            completion = self._complete(
+                prompt,
+                context["image_paths"],
+                max_completion_tokens=self.judgment_max_completion_tokens,
+                provider_attempt_callback=provider_attempt_callback,
+                semantic_phase="judgment_initial_full_context",
+            )
+        except Exception as exc:
+            categories = _prompt_content_filter_categories(exc)
+            if not categories:
+                raise
+            record_blocked_filter_attempt(
+                blocked_prompt=prompt,
+                blocked_context=context,
+                phase="full_context",
+                categories=categories,
+                error=exc,
+            )
+
+            fallback_context = self._prompt_content_filter_fallback_context(
+                query=query,
+                records=records,
+                original_context=context,
+            )
+            fallback_phase = (
+                "title_abstract"
+                if fallback_context["selected_chunk_ids"]
+                else "metadata_only"
+            )
+            fallback_prompt = self._judgment_prompt(
+                query=query,
+                candidate=candidate,
+                context=fallback_context,
+            )
+            if len(fallback_prompt) > self.max_judgment_prompt_chars:
+                fallback_context = self._prompt_content_filter_fallback_context(
+                    query=query,
+                    records=records,
+                    original_context=context,
+                    include_title_abstract=False,
+                )
+                fallback_phase = "metadata_only"
+                fallback_prompt = self._judgment_prompt(
+                    query=query,
+                    candidate=candidate,
+                    context=fallback_context,
+                )
+            if len(fallback_prompt) > self.max_judgment_prompt_chars:
+                raise ValueError(
+                    f"{query.query_id}/{candidate.paper_id}: metadata-only "
+                    "judgment fallback exceeds max_judgment_prompt_chars="
+                    f"{self.max_judgment_prompt_chars}"
+                )
+
+            # Build a fresh request instead of appending instructions to the
+            # rejected prompt. This guarantees that body-level attack examples
+            # from the blocked context cannot survive into the retry.
+            try:
+                completion = self._complete(
+                    fallback_prompt,
+                    fallback_context["image_paths"],
+                    max_completion_tokens=self.judgment_max_completion_tokens,
+                    provider_attempt_callback=provider_attempt_callback,
+                    semantic_phase=f"judgment_initial_{fallback_phase}",
+                )
+            except Exception as fallback_exc:
+                fallback_categories = _prompt_content_filter_categories(
+                    fallback_exc
+                )
+                if not fallback_categories or fallback_phase == "metadata_only":
+                    raise
+                record_blocked_filter_attempt(
+                    blocked_prompt=fallback_prompt,
+                    blocked_context=fallback_context,
+                    phase=fallback_phase,
+                    categories=fallback_categories,
+                    error=fallback_exc,
+                )
+                fallback_context = self._prompt_content_filter_fallback_context(
+                    query=query,
+                    records=records,
+                    original_context=context,
+                    include_title_abstract=False,
+                )
+                fallback_phase = "metadata_only"
+                fallback_prompt = self._judgment_prompt(
+                    query=query,
+                    candidate=candidate,
+                    context=fallback_context,
+                )
+                if len(fallback_prompt) > self.max_judgment_prompt_chars:
+                    raise ValueError(
+                        f"{query.query_id}/{candidate.paper_id}: metadata-only "
+                        "judgment fallback exceeds max_judgment_prompt_chars="
+                        f"{self.max_judgment_prompt_chars}"
+                    )
+                completion = self._complete(
+                    fallback_prompt,
+                    fallback_context["image_paths"],
+                    max_completion_tokens=self.judgment_max_completion_tokens,
+                    provider_attempt_callback=provider_attempt_callback,
+                    semantic_phase=f"judgment_initial_{fallback_phase}",
+                )
+
+            first_blocked = blocked_filter_attempts[0]
+            completion["prompt_content_filter_fallback_reason"] = (
+                f"azure_prompt_content_filter_{fallback_phase}"
+            )
+            completion["prompt_content_filter_blocked_categories"] = sorted(
+                {
+                    category
+                    for attempt in blocked_filter_attempts
+                    for category in attempt["categories"]
+                }
+            )
+            completion["prompt_content_filter_blocked_attempts"] = (
+                blocked_filter_attempts
+            )
+            # Retain the original single-block fields for checkpoint consumers
+            # written before multi-step fallback was introduced.
+            completion["blocked_prompt_sha256"] = first_blocked["prompt_sha256"]
+            completion["blocked_prompt_characters"] = first_blocked[
+                "prompt_characters"
+            ]
+            completion["blocked_context_chunk_ids"] = first_blocked[
+                "context_chunk_ids"
+            ]
+            completion["provider_invocation_count"] = int(
+                completion.get("provider_invocation_count") or 1
+            ) + sum(
+                int(attempt["provider_invocation_count"])
+                for attempt in blocked_filter_attempts
+            )
+            context = fallback_context
+            prompt = fallback_prompt
         calls: list[dict[str, Any]] = []
         try:
             parsed = self._parse_judgment(
@@ -330,8 +1403,19 @@ class PairwiseAOAIReader:
                 attached_image_paths=_completion_attached_paths(
                     completion, context["image_paths"]
                 ),
+                resolved_target_owner=resolved_target_owner,
             )
         except ReadingResponseError as exc:
+            _finalize_provider_response_attempt(
+                completion,
+                callback=provider_attempt_callback,
+                semantic_phase=str(
+                    completion.get("provider_semantic_phase")
+                    or "judgment_initial"
+                ),
+                logical_attempt_index=1,
+                parse_error=str(exc),
+            )
             calls.append(
                 _judgment_call_record(
                     completion,
@@ -346,29 +1430,81 @@ class PairwiseAOAIReader:
                 rejected_response=completion["text"],
                 error=exc,
                 allowed_chunk_ids=list(context["records_by_id"]),
+                eligible_chunk_ids=[
+                    chunk_id
+                    for chunk_id, record in context["records_by_id"].items()
+                    if submission_evidence_eligible(record)
+                ],
             )
             repair_completion = self._complete(
-                repair_prompt, context["image_paths"]
+                repair_prompt,
+                context["image_paths"],
+                max_completion_tokens=self.judgment_max_completion_tokens,
+                provider_attempt_callback=provider_attempt_callback,
+                semantic_phase="judgment_evidence_repair",
             )
-            parsed = self._parse_judgment(
-                query=query,
-                candidate=candidate,
-                payload_text=repair_completion["text"],
-                allowed_records=context["records_by_id"],
-                attached_image_paths=_completion_attached_paths(
-                    repair_completion, context["image_paths"]
-                ),
-            )
-            calls.append(
-                _judgment_call_record(
-                    repair_completion,
-                    phase="single_context",
-                    attempt="evidence_repair",
-                    parse_error=None,
-                    context=context,
+            try:
+                parsed = self._parse_judgment(
+                    query=query,
+                    candidate=candidate,
+                    payload_text=repair_completion["text"],
+                    allowed_records=context["records_by_id"],
+                    attached_image_paths=_completion_attached_paths(
+                        repair_completion, context["image_paths"]
+                    ),
+                    resolved_target_owner=resolved_target_owner,
                 )
-            )
+            except ReadingResponseError as repair_exc:
+                _finalize_provider_response_attempt(
+                    repair_completion,
+                    callback=provider_attempt_callback,
+                    semantic_phase="judgment_evidence_repair",
+                    logical_attempt_index=2,
+                    parse_error=str(repair_exc),
+                )
+                calls.append(
+                    _judgment_call_record(
+                        repair_completion,
+                        phase="single_context",
+                        attempt="evidence_repair",
+                        parse_error=str(repair_exc),
+                        context=context,
+                    )
+                )
+                raise JudgmentResponseExhaustedError(
+                    f"{query.query_id}/{candidate.paper_id}: stage-1 response "
+                    "remained invalid after one evidence repair: "
+                    f"{repair_exc}",
+                    calls=calls,
+                ) from repair_exc
+            else:
+                _finalize_provider_response_attempt(
+                    repair_completion,
+                    callback=provider_attempt_callback,
+                    semantic_phase="judgment_evidence_repair",
+                    logical_attempt_index=2,
+                    parse_error=None,
+                )
+                calls.append(
+                    _judgment_call_record(
+                        repair_completion,
+                        phase="single_context",
+                        attempt="evidence_repair",
+                        parse_error=None,
+                        context=context,
+                    )
+                )
         else:
+            _finalize_provider_response_attempt(
+                completion,
+                callback=provider_attempt_callback,
+                semantic_phase=str(
+                    completion.get("provider_semantic_phase")
+                    or "judgment_initial"
+                ),
+                logical_attempt_index=1,
+                parse_error=None,
+            )
             calls.append(
                 _judgment_call_record(
                     completion,
@@ -389,7 +1525,13 @@ class PairwiseAOAIReader:
             "status": "complete",
             "prompt_version": JUDGMENT_PROMPT_VERSION,
             "few_shot_example_ids": example_manifest(query)["judgment"],
-            "cache_key": self.judgment_cache_key(query, candidate, records),
+            "cache_key": self.judgment_cache_key(
+                query,
+                candidate,
+                records,
+                owner_resolution=owner_resolution,
+            ),
+            "named_owner_resolution": owner_resolution,
             "paper_content_sha256": _records_sha256(records),
             "paper_image_content_sha256": _image_content_sha256(records),
             "paper_chunk_count": len(records),
@@ -423,6 +1565,97 @@ class PairwiseAOAIReader:
             "calls": calls,
         }
         return result
+
+    def _deterministic_wrong_owner_judgment(
+        self,
+        *,
+        query: Query,
+        candidate: CandidatePaper,
+        records: list[Record],
+        owner_resolution: NamedOwnerResolution,
+    ) -> dict[str, Any]:
+        """Checkpoint a decisive canonical-title mismatch without an AOAI call."""
+
+        resolved_title = owner_resolution["title"]
+        mismatch = (
+            f"candidate canonical title {candidate.title!r} is not the uniquely "
+            f"resolved owner {resolved_title!r}"
+        )
+        parsed = {
+            "paper_role": "distractor",
+            "label": "irrelevant",
+            "answerable_from_this_paper": False,
+            "satisfied_constraints": [],
+            "missing_constraints": [
+                f"paper-local object owned by {resolved_title}"
+            ],
+            "blocking_mismatches": [mismatch],
+            "visual": {"required": False, "status": "not_needed"},
+            "evidence": [],
+            "evidence_chunk_ids": [],
+            "candidate_answer": {"units": [], "rows": []},
+            "confidence": 1.0,
+            "reason": (
+                "Authoritative candidate metadata conflicts with the uniquely "
+                "resolved owner of the requested paper-local object."
+            ),
+            "relevant": False,
+            "identity_conflict": True,
+            "visual_conflict": False,
+        }
+        readable_image_chunk_ids = [
+            str(record.get("chunk_id") or "")
+            for record in records
+            if readable_image_path(record)
+        ]
+        selected_ids: list[str] = []
+        omitted_ids = [str(record.get("chunk_id") or "") for record in records]
+        return {
+            "query_id": query.query_id,
+            **_candidate_payload(candidate),
+            "status": "complete",
+            "prompt_version": JUDGMENT_PROMPT_VERSION,
+            "few_shot_example_ids": example_manifest(query)["judgment"],
+            "cache_key": self.judgment_cache_key(
+                query,
+                candidate,
+                records,
+                owner_resolution=owner_resolution,
+            ),
+            "named_owner_resolution": owner_resolution,
+            "deterministic_filter": NAMED_OWNER_RESOLVER_VERSION,
+            "paper_content_sha256": _records_sha256(records),
+            "paper_image_content_sha256": _image_content_sha256(records),
+            "paper_chunk_count": len(records),
+            "paper_context_selector_version": PAPER_CONTEXT_SELECTOR_VERSION,
+            "paper_context_compacted": bool(records),
+            "context_chunk_count": 0,
+            "omitted_chunk_count": len(omitted_ids),
+            "context_chunk_ids": selected_ids,
+            "omitted_chunk_ids": omitted_ids,
+            "paper_full_text_characters": sum(
+                len(str(record.get("text") or "")) for record in records
+            ),
+            "paper_context_characters": 0,
+            "paper_context_character_limit": self.max_paper_context_chars,
+            "paper_image_compacted": bool(readable_image_chunk_ids),
+            "paper_readable_image_count": len(readable_image_chunk_ids),
+            "attached_image_count": 0,
+            "attached_image_chunk_ids": [],
+            "omitted_image_chunk_ids": readable_image_chunk_ids,
+            "paper_context_selection": [],
+            "base_judgment_call_count": 0,
+            "logical_judgment_attempt_count": 0,
+            "judgment_call_count": 0,
+            "provider_invocation_count": 0,
+            **parsed,
+            "judgment": {
+                key: value
+                for key, value in parsed.items()
+                if key not in {"relevant", "identity_conflict", "visual_conflict"}
+            },
+            "calls": [],
+        }
 
     def _paper_context(
         self,
@@ -620,6 +1853,111 @@ class PairwiseAOAIReader:
             "selection": selection,
         }
 
+    def _prompt_content_filter_fallback_context(
+        self,
+        *,
+        query: Query,
+        records: list[Record],
+        original_context: PaperContext,
+        include_title_abstract: bool = True,
+    ) -> PaperContext:
+        """Build a fresh title/abstract-only context after a prompt rejection."""
+
+        chunk_ids = [str(record["chunk_id"]) for record in records]
+        title_indices = (
+            [
+                index
+                for index, record in enumerate(records)
+                if str(record.get("chunk_type") or "") == "title_abstract"
+            ]
+            if include_title_abstract
+            else []
+        )
+        selected_indices: list[int] = []
+        rendered_by_index: dict[int, str] = {}
+        used_characters = 0
+        for position, index in enumerate(title_indices):
+            separator_characters = 2 if selected_indices else 0
+            remaining_characters = (
+                self.max_paper_context_chars
+                - used_characters
+                - separator_characters
+            )
+            remaining_records = len(title_indices) - position
+            if remaining_characters <= 0:
+                break
+            fair_share = remaining_characters // max(1, remaining_records)
+            full_rendered = self._format_record(
+                records[index], text=str(records[index].get("text") or "")
+            )
+            rendered = (
+                full_rendered
+                if len(full_rendered) <= fair_share
+                else _bounded_formatted_record(
+                    self,
+                    records[index],
+                    focus=query.question,
+                    max_chars=fair_share,
+                )
+            )
+            if not rendered:
+                continue
+            selected_indices.append(index)
+            rendered_by_index[index] = rendered
+            used_characters += separator_characters + len(rendered)
+
+        if selected_indices:
+            text = "\n\n".join(
+                rendered_by_index[index] for index in selected_indices
+            )
+        else:
+            text = (
+                "[No title_abstract chunk is available. Judge only from the "
+                "candidate metadata above and cite no paper chunk.]"
+            )
+        selected_set = set(selected_indices)
+        records_by_id = {
+            chunk_ids[index]: records[index] for index in selected_indices
+        }
+        omitted_ids = [
+            chunk_id
+            for index, chunk_id in enumerate(chunk_ids)
+            if index not in selected_set
+        ]
+        omitted_image_chunk_ids = [
+            chunk_ids[index]
+            for index, record in enumerate(records)
+            if readable_image_path(record)
+        ]
+        selection = [
+            {
+                "chunk_id": chunk_ids[index],
+                "score": 0.0,
+                "reasons": ["prompt_content_filter_title_abstract_fallback"],
+                "text_characters": len(rendered_by_index[index]),
+                "image_attached": False,
+            }
+            for index in selected_indices
+        ]
+        return {
+            "text": text,
+            "records_by_id": records_by_id,
+            "image_paths": [],
+            "compacted": True,
+            "total_chunk_count": len(records),
+            "selected_chunk_ids": list(records_by_id),
+            "omitted_chunk_ids": omitted_ids,
+            "full_text_characters": original_context["full_text_characters"],
+            "selected_text_characters": len(text),
+            "character_limit": self.max_paper_context_chars,
+            "total_readable_image_count": original_context[
+                "total_readable_image_count"
+            ],
+            "selected_image_chunk_ids": [],
+            "omitted_image_chunk_ids": omitted_image_chunk_ids,
+            "selection": selection,
+        }
+
     def _judgment_prompt(
         self,
         *,
@@ -630,10 +1968,23 @@ class PairwiseAOAIReader:
         image_legend = self._image_legend(
             context["records_by_id"], context["image_paths"]
         )
+        selected_chunk_count = len(context["selected_chunk_ids"])
+        omitted_chunk_count = len(context["omitted_chunk_ids"])
+        context_coverage = {
+            "paper_context_complete": (
+                not context["compacted"]
+                and selected_chunk_count == context["total_chunk_count"]
+                and omitted_chunk_count == 0
+            ),
+            "selected_chunk_count": selected_chunk_count,
+            "total_chunk_count": context["total_chunk_count"],
+            "omitted_chunk_count": omitted_chunk_count,
+        }
         return render_judgment_prompt(
             query=query,
             query_payload=_production_query_payload(query),
             candidate_payload=_candidate_payload(candidate),
+            context_coverage=context_coverage,
             paper_text=context["text"],
             image_legend=image_legend,
         )
@@ -646,6 +1997,7 @@ class PairwiseAOAIReader:
         payload_text: str,
         allowed_records: dict[str, Record],
         attached_image_paths: Iterable[str] | None = None,
+        resolved_target_owner: bool = False,
     ) -> dict[str, Any]:
         payload = parse_json_object(payload_text)
         if not isinstance(payload, dict):
@@ -665,7 +2017,8 @@ class PairwiseAOAIReader:
                 f"{query.query_id}/{candidate.paper_id}: "
                 "answerable_from_this_paper must be boolean"
             )
-        paper_role = str(payload.get("paper_role") or "uncertain")
+        reported_paper_role = str(payload.get("paper_role") or "uncertain")
+        paper_role = reported_paper_role
         if paper_role not in {
             "target_owner",
             "answer_source",
@@ -677,7 +2030,18 @@ class PairwiseAOAIReader:
             "uncertain",
         }:
             raise ReadingResponseError(f"invalid paper_role {paper_role!r}")
+        if resolved_target_owner:
+            # Candidate metadata is authoritative for identity.  Preserve the
+            # model's relevance/evidence decision, but do not let a mistaken
+            # role label suppress the safe Stage-2 target-owner recheck.
+            paper_role = "target_owner"
         blocking_mismatches = _string_list(payload.get("blocking_mismatches") or [])
+        if resolved_target_owner:
+            blocking_mismatches = [
+                mismatch
+                for mismatch in blocking_mismatches
+                if not _identity_only_blocking_mismatch(mismatch)
+            ]
         if paper_role in {"distractor", "topic_only"} and label in RELEVANT_LABELS:
             raise ReadingResponseError(
                 f"paper_role={paper_role} is incompatible with relevant label={label}"
@@ -696,11 +2060,25 @@ class PairwiseAOAIReader:
         visual_status = str(visual.get("status") or "")
         if visual_status not in {"not_needed", "inspected", "missing", "unreadable"}:
             raise ReadingResponseError("judgment visual.status is invalid")
-        if visual["required"] and visual_status == "not_needed":
+        visual_required = visual["required"]
+        if (
+            paper_role == "distractor"
+            and label == "irrelevant"
+            and answerable is False
+            and blocking_mismatches
+            and visual_status == "not_needed"
+        ):
+            # ``status=not_needed`` already says that this decision did not use
+            # a visual.  For an authoritative wrong-owner rejection only, make
+            # the redundant boolean agree with that candidate-local status.
+            # Never apply this to a possible owner or an answer-bearing label:
+            # doing so could silently waive genuinely required visual evidence.
+            visual_required = False
+        if visual_required and visual_status == "not_needed":
             raise ReadingResponseError(
                 "visual.required=true is incompatible with status=not_needed"
             )
-        if not visual["required"] and visual_status != "not_needed":
+        if not visual_required and visual_status != "not_needed":
             raise ReadingResponseError(
                 "visual.required=false requires status=not_needed"
             )
@@ -715,6 +2093,11 @@ class PairwiseAOAIReader:
             raise ReadingResponseError(
                 "direct_answer requires answerable_from_this_paper=true"
             )
+        if label == "partial_answer" and not answerable:
+            raise ReadingResponseError(
+                "partial_answer requires answerable_from_this_paper=true because "
+                "it contributes at least one requested answer unit"
+            )
         if label == "direct_answer" and payload.get("missing_constraints"):
             raise ReadingResponseError(
                 "direct_answer is incompatible with missing_constraints"
@@ -725,14 +2108,14 @@ class PairwiseAOAIReader:
             )
         if (
             label in {"direct_answer", "partial_answer"}
-            and visual["required"]
+            and visual_required
             and visual_status in {"missing", "unreadable"}
         ):
             raise ReadingResponseError(
                 f"{label} is incompatible with unavailable required visual evidence"
             )
         evidence: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        evidence_by_chunk_id: dict[str, dict[str, Any]] = {}
         raw_evidence = payload.get("evidence") or []
         if not isinstance(raw_evidence, list):
             raise ReadingResponseError("judgment evidence must be a list")
@@ -750,21 +2133,46 @@ class PairwiseAOAIReader:
                 raise JudgmentEvidenceChunkError(
                     f"{query.query_id}: chunk {chunk_id!r} belongs to another paper"
                 )
-            if chunk_id in seen:
-                continue
-            seen.add(chunk_id)
-            evidence.append(
-                {
-                    "chunk_id": chunk_id,
-                    "source_type": record_source_type(record),
-                    "locator": coarse_locator(record),
-                    "purpose": str(item.get("purpose") or "answer"),
-                    "quote_or_value": str(item.get("quote_or_value") or "").strip(),
-                }
-            )
+            normalized_evidence = {
+                "chunk_id": chunk_id,
+                "source_type": record_source_type(record),
+                "locator": coarse_locator(record),
+                "purpose": str(item.get("purpose") or "answer"),
+                "quote_or_value": str(item.get("quote_or_value") or "").strip(),
+            }
+            previous = evidence_by_chunk_id.get(chunk_id)
+            if previous is not None:
+                if previous == normalized_evidence:
+                    continue
+                raise ReadingResponseError(
+                    f"{query.query_id}/{candidate.paper_id}: duplicate evidence "
+                    f"chunk_id {chunk_id!r} has conflicting purpose or quote; "
+                    "emit each chunk_id once and use purpose=answer when one "
+                    "chunk supports both a constraint and the answer"
+                )
+            evidence_by_chunk_id[chunk_id] = normalized_evidence
+            evidence.append(normalized_evidence)
         if label in RELEVANT_LABELS and not evidence:
             raise ReadingResponseError(
                 f"{query.query_id}/{candidate.paper_id}: {label} requires evidence"
+            )
+        if label == "mention_only" and any(
+            item["purpose"] == "answer" for item in evidence
+        ):
+            raise ReadingResponseError(
+                "mention_only cannot cite answer-purpose evidence; when the "
+                "candidate directly reports a requested operand, preserve it as "
+                "partial_answer with answerable_from_this_paper=true and a "
+                "candidate_answer unit"
+            )
+        if label in {"direct_answer", "partial_answer"} and not any(
+            item["purpose"] == "answer"
+            and submission_evidence_eligible(allowed_records[item["chunk_id"]])
+            for item in evidence
+        ):
+            raise ReadingResponseError(
+                f"{query.query_id}/{candidate.paper_id}: {label} requires at least "
+                "one submission-eligible answer evidence chunk"
             )
         if visual_status == "inspected":
             cited_images = {
@@ -787,6 +2195,108 @@ class PairwiseAOAIReader:
         candidate_answer = payload.get("candidate_answer") or {}
         if not isinstance(candidate_answer, dict):
             raise ReadingResponseError("candidate_answer must be an object")
+        if label in {"direct_answer", "partial_answer"}:
+            _validate_stage1_visual_subfigure_count(
+                query=query,
+                candidate_answer=candidate_answer,
+            )
+        if (
+            label in {"direct_answer", "partial_answer"}
+            and is_aggregate_citation_count_query(query)
+        ):
+            _validate_stage1_citation_count(
+                query=query,
+                candidate_answer=candidate_answer,
+                evidence=evidence,
+                allowed_records=allowed_records,
+            )
+        if (
+            label in {"direct_answer", "partial_answer"}
+            and "multiple_choice" in query.answer_types
+        ):
+            units = candidate_answer.get("units")
+            if not isinstance(units, list) or not units:
+                raise ReadingResponseError(
+                    f"{label} for a multiple-choice query requires "
+                    "candidate_answer.units with matched_option_labels"
+                )
+            matched_labels: list[str] = []
+            for unit_index, unit in enumerate(units):
+                if not isinstance(unit, dict):
+                    raise ReadingResponseError(
+                        f"candidate_answer.units[{unit_index}] must be an object"
+                    )
+                if not str(unit.get("name") or "").strip():
+                    raise ReadingResponseError(
+                        f"candidate_answer.units[{unit_index}] requires a name"
+                    )
+                unit_value = unit.get("value")
+                if unit_value is None or (
+                    isinstance(unit_value, str) and not unit_value.strip()
+                ):
+                    raise ReadingResponseError(
+                        f"candidate_answer.units[{unit_index}] requires a value"
+                    )
+                raw_labels = unit.get("matched_option_labels") or []
+                if not isinstance(raw_labels, list) or any(
+                    not isinstance(value, str) or not value
+                    for value in raw_labels
+                ):
+                    raise ReadingResponseError(
+                        "candidate_answer matched_option_labels must be a list "
+                        "of non-empty released labels"
+                    )
+                matched_labels.extend(raw_labels)
+            distinct_labels = set(matched_labels)
+            unknown_labels = sorted(distinct_labels - set(query.option_labels))
+            if unknown_labels:
+                raise ReadingResponseError(
+                    "candidate_answer matched_option_labels contains labels absent "
+                    f"from the released options: {unknown_labels}"
+                )
+            if label == "direct_answer" and len(distinct_labels) != 1:
+                raise ReadingResponseError(
+                    "direct_answer for a multiple-choice query requires exactly "
+                    "one released label across candidate_answer matched_option_labels; "
+                    "if the owning paper still supplies requested components but no "
+                    "complete option is uniquely identified, return partial_answer "
+                    "and preserve those units with matched_option_labels=[]"
+                )
+            if label == "partial_answer" and len(distinct_labels) > 1:
+                raise ReadingResponseError(
+                    "partial_answer candidate units cannot claim multiple released "
+                    "labels; use matched_option_labels=[] when an operand or set of "
+                    "components does not identify one complete option"
+                )
+        if label in {"direct_answer", "partial_answer"} and "table" in query.answer_types:
+            rows = candidate_answer.get("rows")
+            if not isinstance(rows, list) or not rows:
+                raise ReadingResponseError(
+                    f"{label} for a table query requires at least one complete "
+                    "candidate_answer row"
+                )
+            required_columns = [
+                str(column.get("name") or "")
+                for column in query.table_schema or []
+                if isinstance(column, dict) and column.get("name")
+            ]
+            for row_index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    raise ReadingResponseError(
+                        f"candidate_answer.rows[{row_index}] must be an object"
+                    )
+                missing_or_blank = [
+                    column
+                    for column in required_columns
+                    if column not in row
+                    or row[column] is None
+                    or (isinstance(row[column], str) and not row[column].strip())
+                ]
+                if missing_or_blank:
+                    raise ReadingResponseError(
+                        f"candidate_answer.rows[{row_index}] has missing or blank "
+                        f"required cells: {missing_or_blank}"
+                    )
         return {
             "paper_role": paper_role,
             "label": label,
@@ -794,7 +2304,7 @@ class PairwiseAOAIReader:
             "satisfied_constraints": _string_list(payload.get("satisfied_constraints")),
             "missing_constraints": _string_list(payload.get("missing_constraints")),
             "blocking_mismatches": blocking_mismatches,
-            "visual": {"required": visual["required"], "status": visual_status},
+            "visual": {"required": visual_required, "status": visual_status},
             "evidence": evidence,
             "evidence_chunk_ids": [item["chunk_id"] for item in evidence],
             "candidate_answer": candidate_answer,
@@ -809,6 +2319,7 @@ class PairwiseAOAIReader:
         rejected_response: str,
         error: ReadingResponseError,
         allowed_chunk_ids: list[str],
+        eligible_chunk_ids: list[str],
     ) -> str:
         return (
             original_prompt
@@ -817,10 +2328,60 @@ class PairwiseAOAIReader:
             "it is consistent with the validation error and allowed evidence. Every "
             "evidence chunk_id must be "
             "copied exactly from the allowed list below; never invent or approximate an ID. "
+            "A direct_answer or partial_answer must cite at least one answer-purpose "
+            "chunk from the submission-eligible list. Prefer an eligible attached "
+            "figure over an uncaptioned OCR table from the same owner. Emit each "
+            "chunk_id exactly once: if one chunk supports both a constraint and "
+            "the answer, keep only one entry with purpose=answer and the short "
+            "answer-bearing quote. For multiple choice, direct_answer requires "
+            "candidate_answer units whose matched_option_labels identify exactly "
+            "one released option label. Do not erase valid direct evidence merely "
+            "because a compound option cannot yet be identified: when this is the "
+            "correct owning/answer-source paper and it directly supplies at least "
+            "one requested component, downgrade to partial_answer, set "
+            "answerable_from_this_paper=true, retain answer-purpose evidence and "
+            "non-empty candidate_answer units, and use matched_option_labels=[] "
+            "when the supplied components do not identify exactly one complete "
+            "option. In a multi-paper or multi-operand query, one directly reported "
+            "requested operand is partial_answer even if another paper's operand is "
+            "missing; mention_only is only for a name/topic mention with no requested "
+            "operand. Keep an authoritative wrong-owner candidate irrelevant rather "
+            "than applying this partial-answer fallback. Parse coordinated clauses "
+            "independently: a dataset modifier inside the first clause does not "
+            "automatically constrain the next clause, and an unqualified best FID "
+            "uses the minimum across all otherwise eligible visible rows. "
+            "For an aggregate citation count, return exactly one candidate_answer "
+            "unit with an integer value and counted_items. Each counted item must be "
+            "a distinct, answer-chunk-supported '[N]', 'FirstAuthor et al. (YYYY)', "
+            "or single-author 'FirstAuthor (YYYY)' identity; never count a method acronym, "
+            "the current paper/method name, section name, concept, bare year, DOI, "
+            "or URL. Set value=len(counted_items), and a matched bare-numeric option "
+            "must equal that value. If the query filters by author, verify that "
+            "author inside every counted bibliography entry, even when its compact "
+            "identity uses another first-author surname. Do not apply counted_items to a last-reference "
+            "index lookup. "
+            "For an explicit visual subfigure/subplot count, discard the previous "
+            "count and enumerate every independently bounded coordinate-axes region "
+            "in counted_items. Give each one a distinct spatial identifier such as "
+            "'top-row col-1 axes' or '(a)-left axes'; a row, model family, group "
+            "heading, or bare '(a)' label is not itself a subfigure. Set the unit "
+            "value to len(counted_items), and match only a bare-numeric option with "
+            "that same value. Re-read the actually attached image before repairing. "
+            "Preserve the visual invariant exactly: required=false means "
+            "status=not_needed; required=true means status is inspected, missing, "
+            "or unreadable and can never be not_needed. status=inspected must cite "
+            "an actually attached image chunk as evidence. If required visual "
+            "evidence is missing or unreadable, do not return direct_answer or "
+            "partial_answer. visual.required is candidate-local, not query-level: "
+            "a figure mentioned in the query does not require visual inspection of "
+            "an authoritative wrong-owner distractor. For distractor/irrelevant "
+            "with an owner blocking mismatch and empty evidence, return "
+            "required=false and status=not_needed. "
             "If no allowed chunk supports a relevant label, return the appropriate "
             "non-relevant label with empty evidence instead.\n"
             f"Validation error: {error}\n"
             f"Allowed selected-context chunk_ids: {_json_dumps(allowed_chunk_ids)}\n"
+            f"Submission-eligible chunk_ids: {_json_dumps(eligible_chunk_ids)}\n"
             "<rejected_response>\n"
             + rejected_response
             + "\n</rejected_response>\nReturn one corrected JSON object only."
@@ -866,8 +2427,12 @@ class PairwiseAOAIReader:
                     "answer_context_chars": self.answer_context_chars,
                     "answer_neighbor_chunks": self.answer_neighbor_chunks,
                     "max_answer_images": self.max_answer_images,
+                    "max_answer_papers": self.max_answer_papers,
                     "max_evidence": self.max_evidence,
                     "max_evidence_per_paper": self.max_evidence_per_paper,
+                    "answer_max_completion_tokens": (
+                        self.answer_max_completion_tokens
+                    ),
                 },
             }
         )
@@ -877,22 +2442,19 @@ class PairwiseAOAIReader:
         query: Query,
         candidates: Iterable[CandidatePaper],
         judgments: list[dict[str, Any]],
+        *,
+        attempt_callback: Callable[[dict[str, Any]], None] | None = None,
+        provider_attempt_callback: ProviderAttemptCallback | None = None,
     ) -> tuple[Prediction, dict[str, Any]]:
         """Answer one query from stage-1 accepted original chunks only."""
 
         require_production_query(query)
         candidate_by_id = {item.paper_id: item for item in candidates}
-        relevant = [
-            item
-            for item in sorted(
-                judgments, key=lambda value: int(value.get("rank") or 0)
-            )
-            if item.get("relevant") is True
-            and item.get("label") in RELEVANT_LABELS
-        ]
+        relevant = _answer_review_pool(judgments)
         if not relevant:
             raise NoRelevantCandidatesError(
-                f"{query.query_id}: stage 1 accepted no candidate paper"
+                f"{query.query_id}: stage 1 accepted no candidate paper and "
+                "identified no safe target-owner recheck"
             )
         if any(str(item.get("paper_id") or "") not in candidate_by_id for item in relevant):
             raise ValueError(f"{query.query_id}: judgment references a non-candidate paper")
@@ -906,55 +2468,97 @@ class PairwiseAOAIReader:
             if isinstance(item.get("visual"), dict)
             and item["visual"].get("required") is True
         }
-        completion = self._complete(prompt, context["image_paths"])
+        completion = self._complete(
+            prompt,
+            context["image_paths"],
+            max_completion_tokens=self.answer_max_completion_tokens,
+            provider_attempt_callback=provider_attempt_callback,
+            semantic_phase="answer_initial",
+        )
         attempts: list[dict[str, Any]] = []
-        try:
-            payload = self._parse_answer(
-                query=query,
-                payload_text=completion["text"],
-                relevant_paper_ids=relevant_paper_ids,
-                context_records=context["records_by_id"],
-                attached_image_paths=_completion_attached_paths(
-                    completion, context["image_paths"]
-                ),
-                required_visual_paper_ids=required_visual_paper_ids,
-            )
-        except ReadingResponseError as exc:
-            attempts.append(
-                {
+        payload: dict[str, Any] | None = None
+        for repair_attempt in range(MAX_ANSWER_REPAIR_ATTEMPTS + 1):
+            try:
+                payload = self._parse_answer(
+                    query=query,
+                    payload_text=completion["text"],
+                    relevant_paper_ids=relevant_paper_ids,
+                    context_records=context["records_by_id"],
+                    attached_image_paths=_completion_attached_paths(
+                        completion, context["image_paths"]
+                    ),
+                    required_visual_paper_ids=required_visual_paper_ids,
+                )
+            except ReadingResponseError as exc:
+                _finalize_provider_response_attempt(
+                    completion,
+                    callback=provider_attempt_callback,
+                    semantic_phase=str(
+                        completion.get("provider_semantic_phase")
+                        or "answer_initial"
+                    ),
+                    logical_attempt_index=repair_attempt + 1,
+                    parse_error=str(exc),
+                )
+                attempt_record = {
                     "raw_response": completion["text"],
                     "parse_error": str(exc),
                     "call": {
-                        key: value for key, value in completion.items() if key != "text"
+                        key: value
+                        for key, value in completion.items()
+                        if key != "text"
                     },
                 }
-            )
-            repair_prompt = self._answer_locator_repair_prompt(
-                original_prompt=prompt,
-                rejected_response=completion["text"],
-                error=exc,
-                context_records=context["records_by_id"],
-            )
-            completion = self._complete(repair_prompt, context["image_paths"])
-            payload = self._parse_answer(
-                query=query,
-                payload_text=completion["text"],
-                relevant_paper_ids=relevant_paper_ids,
-                context_records=context["records_by_id"],
-                attached_image_paths=_completion_attached_paths(
-                    completion, context["image_paths"]
+                attempts.append(attempt_record)
+                if attempt_callback is not None:
+                    attempt_callback(attempt_record)
+                if repair_attempt >= MAX_ANSWER_REPAIR_ATTEMPTS:
+                    raise
+                repair_prompt = self._answer_locator_repair_prompt(
+                    original_prompt=prompt,
+                    rejected_response=completion["text"],
+                    error=exc,
+                    context_records=context["records_by_id"],
+                    repair_attempt=repair_attempt + 1,
+                    prior_errors=[
+                        str(attempt["parse_error"])
+                        for attempt in attempts
+                        if attempt.get("parse_error")
+                    ],
+                )
+                completion = self._complete(
+                    repair_prompt,
+                    context["image_paths"],
+                    max_completion_tokens=self.answer_max_completion_tokens,
+                    provider_attempt_callback=provider_attempt_callback,
+                    semantic_phase=f"answer_repair_{repair_attempt + 1}",
+                )
+                continue
+
+            _finalize_provider_response_attempt(
+                completion,
+                callback=provider_attempt_callback,
+                semantic_phase=str(
+                    completion.get("provider_semantic_phase") or "answer_initial"
                 ),
-                required_visual_paper_ids=required_visual_paper_ids,
+                logical_attempt_index=repair_attempt + 1,
+                parse_error=None,
             )
-        attempts.append(
-            {
+            attempt_record = {
                 "raw_response": completion["text"],
                 "parse_error": None,
                 "call": {
-                    key: value for key, value in completion.items() if key != "text"
+                    key: value
+                    for key, value in completion.items()
+                    if key != "text"
                 },
             }
-        )
+            attempts.append(attempt_record)
+            if attempt_callback is not None:
+                attempt_callback(attempt_record)
+            break
+        if payload is None:
+            raise AssertionError("validated answer payload was not produced")
         prediction = self._build_prediction(
             query=query,
             payload=payload,
@@ -1005,11 +2609,22 @@ class PairwiseAOAIReader:
         seen_neighbours: set[str] = set()
         evidence_quotes: dict[str, list[str]] = {}
 
+        def add_neighbour(record: Record) -> None:
+            chunk_id = str(record.get("chunk_id") or "")
+            if (
+                chunk_id
+                and chunk_id not in seen_primary
+                and chunk_id not in seen_neighbours
+            ):
+                seen_neighbours.add(chunk_id)
+                neighbours.append((record, ""))
+
         for judgment in relevant:
             paper_id = str(judgment["paper_id"])
             records = self.chunk_store.load_paper(paper_id)
             by_id = {str(item.get("chunk_id") or ""): item for item in records}
             positions = {str(item.get("chunk_id") or ""): i for i, item in enumerate(records)}
+            cited_records: list[Record] = []
             for evidence in judgment.get("evidence") or []:
                 chunk_id = str(evidence.get("chunk_id") or "")
                 record = by_id.get(chunk_id)
@@ -1019,6 +2634,7 @@ class PairwiseAOAIReader:
                         f"chunk {chunk_id!r}"
                     )
                 quote = str(evidence.get("quote_or_value") or "")
+                cited_records.append(record)
                 evidence_quotes.setdefault(chunk_id, []).append(quote)
                 if chunk_id not in seen_primary:
                     seen_primary.add(chunk_id)
@@ -1029,14 +2645,79 @@ class PairwiseAOAIReader:
                     if offset == 0 or not 0 <= neighbour_position < len(records):
                         continue
                     neighbour = records[neighbour_position]
-                    neighbour_id = str(neighbour.get("chunk_id") or "")
-                    if (
-                        neighbour_id
-                        and neighbour_id not in seen_primary
-                        and neighbour_id not in seen_neighbours
+                    add_neighbour(neighbour)
+
+            visual_recheck = requires_visual_image(query.question) or (
+                isinstance(judgment.get("visual"), dict)
+                and judgment["visual"].get("required") is True
+            )
+            if visual_recheck:
+                for record in cited_records:
+                    if not readable_image_path(record):
+                        continue
+                    position = positions[str(record["chunk_id"])]
+                    metadata = record.get("metadata") or {}
+                    page = metadata.get("page")
+                    source_type = record_source_type(record)
+                    for sibling_index in range(
+                        max(0, position - 3), min(len(records), position + 4)
                     ):
-                        seen_neighbours.add(neighbour_id)
-                        neighbours.append((neighbour, ""))
+                        sibling = records[sibling_index]
+                        sibling_metadata = sibling.get("metadata") or {}
+                        if (
+                            sibling_metadata.get("page") == page
+                            and record_source_type(sibling) == source_type
+                            and readable_image_path(sibling)
+                        ):
+                            add_neighbour(sibling)
+
+            # Stage 1 can correctly read an uncaptioned OCR table while that
+            # chunk is unusable in the official submission.  Preserve the read
+            # context, but also expose a small deterministic set of eligible
+            # same-paper records and query-relevant images so Stage 2 can ground
+            # the answer without inventing a table/figure ID.
+            if cited_records and not any(
+                submission_evidence_eligible(record) for record in cited_records
+            ):
+                rescue_focus = " ".join(
+                    (
+                        _query_selection_focus(query),
+                        str(judgment.get("reason") or ""),
+                        _json_dumps(judgment.get("candidate_answer") or {}),
+                        " ".join(
+                            str(item.get("quote_or_value") or "")
+                            for item in judgment.get("evidence") or []
+                        ),
+                    )
+                )
+                scores, reasons = _paper_record_scores(
+                    records, rescue_focus, source_question=query.question
+                )
+                eligible_indices = [
+                    index
+                    for index, record in enumerate(records)
+                    if submission_evidence_eligible(record)
+                ]
+                eligible_index_set = set(eligible_indices)
+                ranked_eligible = sorted(
+                    eligible_indices, key=lambda index: (-scores[index], index)
+                )
+                image_indices = [
+                    index
+                    for index in _ranked_image_record_indices(
+                        records,
+                        scores=scores,
+                        reasons=reasons,
+                        limit=self.max_answer_images,
+                        question=query.question,
+                    )
+                    if index in eligible_index_set
+                ]
+                rescue_indices = _ordered_unique_ints(
+                    [*image_indices, *ranked_eligible[:4]]
+                )
+                for index in rescue_indices:
+                    add_neighbour(records[index])
 
         # Round-robin by paper. A rank-1 paper with many citations must not
         # consume the cap before rank-44 receives even one evidence chunk.
@@ -1050,6 +2731,17 @@ class PairwiseAOAIReader:
             )
             for item in relevant
         }
+        explicit_visual_query = requires_visual_image(query.question)
+        visual_required_paper_ids = {
+            str(item.get("paper_id") or "")
+            for item in relevant
+            if explicit_visual_query
+            or item.get("visual") is None
+            or (
+                isinstance(item.get("visual"), dict)
+                and item["visual"].get("required") is True
+            )
+        }
         image_records_by_paper = {
             paper_id: [
                 record
@@ -1057,13 +2749,14 @@ class PairwiseAOAIReader:
                 if readable_image_path(record)
             ]
             for paper_id, paper_records in by_paper.items()
+            if paper_id in visual_required_paper_ids
         }
         primary_image_records: list[Record] = []
         for label in ("direct_answer", "partial_answer", "supporting_only"):
             label_papers = sorted(
                 (
                     paper_id
-                    for paper_id in by_paper
+                    for paper_id in image_records_by_paper
                     if image_records_by_paper[paper_id]
                     and paper_image_priority.get(paper_id, ("", 0))[0] == label
                 ),
@@ -1086,20 +2779,22 @@ class PairwiseAOAIReader:
                 if not added:
                     break
                 image_position += 1
-        if len(by_paper) > self.max_evidence:
+        if len(by_paper) > self.max_answer_papers:
             raise ReadingResponseError(
                 f"{query.query_id}: {len(by_paper)} accepted papers exceed "
-                f"max_evidence={self.max_evidence}; do not silently drop papers"
+                f"max_answer_papers={self.max_answer_papers}; do not silently "
+                "drop papers"
             )
+        context_evidence_limit = max(self.max_evidence, len(by_paper))
         round_robin: list[tuple[Record, str]] = []
         position = 0
-        while len(round_robin) < self.max_evidence:
+        while len(round_robin) < context_evidence_limit:
             added = False
             for items in by_paper.values():
                 if position < len(items):
                     round_robin.append(items[position])
                     added = True
-                    if len(round_robin) >= self.max_evidence:
+                    if len(round_robin) >= context_evidence_limit:
                         break
             if not added:
                 break
@@ -1112,43 +2807,60 @@ class PairwiseAOAIReader:
         records_by_id: dict[str, Record] = {}
         parts: list[str] = []
         used_chars = 0
-        # Give every cited chunk a fair share before adding neighbours.  This is
+        # Give every cited chunk a fair share before adding neighbours. This is
         # essential for multi-paper tables where a rank-1 paper must not consume
-        # the context before rank-44 is represented.
-        per_primary = max(
-            3_000,
-            min(40_000, self.answer_context_chars // max(1, len(primary))),
-        )
+        # the context before rank-44 is represented. The allocation includes
+        # record headers and separators so the configured hard limit is real.
         focus = query.question + " " + " ".join(
             quote for _, quote in primary if quote
         )
-        for record, quote in primary:
+        for primary_index, (record, quote) in enumerate(primary):
             chunk_id = str(record["chunk_id"])
-            excerpt = _focused_excerpt(
-                str(record.get("text") or ""),
-                focus + " " + quote,
-                per_primary,
+            separator_chars = 2 if parts else 0
+            remaining_items = len(primary) - primary_index
+            remaining_chars = (
+                self.answer_context_chars - used_chars - separator_chars
             )
-            formatted = self._format_record(record, text=excerpt, selected=True)
+            if remaining_chars < remaining_items:
+                raise ReadingResponseError(
+                    f"{query.query_id}: answer_context_chars="
+                    f"{self.answer_context_chars} cannot represent "
+                    f"{len(primary)} accepted evidence chunks"
+                )
+            fair_share = min(40_000, remaining_chars // remaining_items)
+            formatted = _bounded_formatted_record(
+                self,
+                record,
+                focus=focus + " " + quote,
+                max_chars=fair_share,
+                selected=True,
+            )
             parts.append(formatted)
-            used_chars += len(formatted)
+            used_chars += separator_chars + len(formatted)
             records_by_id[chunk_id] = record
         for record, _ in neighbours:
             chunk_id = str(record.get("chunk_id") or "")
             if not chunk_id or chunk_id in records_by_id:
                 continue
-            remaining = self.answer_context_chars - used_chars
+            separator_chars = 2 if parts else 0
+            remaining = self.answer_context_chars - used_chars - separator_chars
             if remaining < 1_000:
                 break
             excerpt = _focused_excerpt(
                 str(record.get("text") or ""), query.question, min(20_000, remaining)
             )
             formatted = self._format_record(record, text=excerpt, selected=False)
-            if used_chars + len(formatted) > self.answer_context_chars:
+            if (
+                used_chars + separator_chars + len(formatted)
+                > self.answer_context_chars
+            ):
                 continue
             parts.append(formatted)
-            used_chars += len(formatted)
+            used_chars += separator_chars + len(formatted)
             records_by_id[chunk_id] = record
+
+        if len("\n\n".join(parts)) > self.answer_context_chars:
+            raise AssertionError("answer context exceeds configured character limit")
 
         image_paths: list[str] = []
 
@@ -1182,28 +2894,13 @@ class PairwiseAOAIReader:
         relevant: list[dict[str, Any]],
         context: AnswerContext,
     ) -> str:
-        relevant_summary: list[dict[str, Any]] = []
-        for item in relevant:
-            summary_item = {
-                "paper_id": item["paper_id"],
-                "title": str(item.get("title") or ""),
-                "rank": item["rank"],
-                "label": item["label"],
-                "paper_role": str(item.get("paper_role") or "uncertain"),
-                "satisfied_constraints": item.get("satisfied_constraints") or [],
-                "missing_constraints": item.get("missing_constraints") or [],
-                "blocking_mismatches": item.get("blocking_mismatches") or [],
-                "candidate_answer": item.get("candidate_answer") or {},
-                "reason": str(item.get("reason") or ""),
-            }
-            relevant_summary.append(summary_item)
         image_legend = self._image_legend(
             context["records_by_id"], context["image_paths"]
         )
         return render_answer_prompt(
             query=query,
             query_payload=_production_query_payload(query),
-            accepted_summary=relevant_summary,
+            accepted_summary=relevant,
             evidence_text=context["text"],
             image_legend=image_legend,
             answer_shape=answer_response_shape(query),
@@ -1218,12 +2915,158 @@ class PairwiseAOAIReader:
         rejected_response: str,
         error: ReadingResponseError,
         context_records: dict[str, Record],
+        repair_attempt: int,
+        prior_errors: list[str] | None = None,
     ) -> str:
         eligible_chunk_ids = [
             chunk_id
             for chunk_id, record in context_records.items()
             if submission_evidence_eligible(record)
         ]
+        error_text = str(error)
+        error_corpus = "\n".join(dict.fromkeys(prior_errors or [error_text]))
+        comparison_repair = ""
+        if (
+            "candidate labels must be distinct" in error_corpus
+            or "value must contain label and value" in error_corpus
+            or "candidates do not match label/value pairs" in error_corpus
+            or "does not express expected result" in error_corpus
+            or "does not equal computed result" in error_corpus
+        ):
+            comparison_repair = (
+                " This is an argmax/argmin comparison-contract error. For every "
+                "referenced comparison fact, replace fact.value with an actual JSON "
+                "object of exactly {\"label\":\"unique answer-aligned row identity\","
+                "\"value\":numeric operand}; do not use a bare number, a source "
+                "mean±deviation string, or a JSON-encoded string. Copy those same "
+                "objects exactly into operation.candidates. Every label must be "
+                "unique: distinguish only repeated family names with their source "
+                "setting such as '(m = 9)' and '(m = 40)'. Keep labels that are "
+                "already unique equal to the canonical query or option text whenever "
+                "possible; for example keep a lone 'KS' as 'KS', not 'KS (m = 128)', "
+                "so the computed winner is an exact substring of the final answer. "
+                "Preserve this labeling scheme in all later corrections, then recompute "
+                "result and bindings from the corrected candidates."
+            )
+        table_binding_repair = ""
+        if (
+            "answer.table.rows[" in error_corpus
+            and "does not exactly equal sourced value" in error_corpus
+        ):
+            table_binding_repair = (
+                " This is a table-binding shape error. A path such as "
+                "answer.table.rows[0] resolves to the entire JSON row object. "
+                "Use that whole-row path only when the referenced fact.value is "
+                "exactly the same row object. When fact.value is a scalar cell, "
+                "bind it to the exact leaf path, for example "
+                "answer.table.rows[0].Paper Title. Keep row-level support allowed; "
+                "derivation bindings and support paths have different purposes."
+            )
+        object_fact_repair = ""
+        if "does not express sourced fact value {" in error_corpus:
+            object_fact_repair = (
+                " This is an object-valued fact versus text-fragment error. Never "
+                "bind a whole JSON row-object fact directly to a freeform string "
+                "fragment. Replace that row object with separate scalar facts for "
+                "each answer-bearing cell, using unique fact ids and unique "
+                "descriptive names. Bind each scalar fact independently to its "
+                "exact freeform substring and to its exact table cell path, for "
+                "example answer.table.rows[0].Method and "
+                "answer.table.rows[0].Base Model. Alternatively, keep an object "
+                "fact only for a whole-row table binding and add separate scalar "
+                "facts for freeform; do not bind the object itself to text."
+            )
+        scalar_fact_repair = ""
+        if (
+            "does not express sourced fact value" in error_corpus
+            or "answer_fragment is not an exact substring" in error_corpus
+        ):
+            scalar_fact_repair = (
+                " This is a scalar fact/fragment error. Do not alternate between "
+                "a long source sentence and the whole shorter option. Use the "
+                "smallest source-grounded answer identifier that is also an exact "
+                "substring of the emitted answer, preferably a JSON number for a "
+                "numeric value. Split genuinely compound answers into separate "
+                "atomic facts and bindings. Never copy option-only wording into a "
+                "reported fact; every fact value must remain supported by its chunk."
+            )
+        visual_fact_repair = ""
+        if (
+            "visual fact" in error_corpus
+            or "actually attached source image" in error_corpus
+        ):
+            visual_fact_repair = (
+                " This is a visual-grounding error. Preserve the already derived "
+                "scientific value and selected option. Create an atomic fact with "
+                "value_kind='visual' and an actually attached figure/table chunk. "
+                "Use a JSON number for a printed scalar when possible, or the "
+                "smallest visible trend phrase. Keep that visual fact in every "
+                "later correction."
+            )
+        evidence_set_repair = ""
+        if "papers and support evidence disagree" in error_corpus:
+            evidence_set_repair = (
+                " This is a duplicated evidence-set error. The union of every "
+                "fact's paper/chunk pair, papers/evidence_chunk_ids, and support "
+                "paper/chunk pairs must be identical. Remove an unused duplicate "
+                "text fact when one visual fact is sufficient, or add the retained "
+                "fact's chunk to support for each answer path it supports."
+            )
+        non_ready_repair = ""
+        if (
+            "answer is not ready" in error_corpus
+            or "omitted evidence papers" in error_corpus
+        ):
+            non_ready_repair = (
+                " Re-read every supplied eligible chunk before returning a non-ready "
+                "status. A query-relevant eligible rescue figure from the established "
+                "owner may replace an ineligible OCR table, but it must be actually "
+                "read and directly support the answer. Do not guess when none does."
+            )
+        citation_count_repair = ""
+        if (
+            "aggregate citation count" in error_corpus
+            or "stable citation identity" in error_corpus
+            or "citation identities" in error_corpus
+        ):
+            citation_count_repair = (
+                " This is an aggregate citation-count inventory error. Rebuild one "
+                "explicit list containing only distinct cited-paper identities in "
+                "the form '[N]', 'FirstAuthor et al. (YYYY)', or single-author "
+                "'FirstAuthor (YYYY)'. Remove method acronyms, the owning paper or "
+                "method name, section/concept names, bare years, DOI, and URLs. "
+                "Every item must be visible in the chunks cited by the referenced "
+                "count facts. For an author-filtered query, the required author "
+                "must be visible inside each counted bibliography entry. Copy "
+                "exactly that same list into fact.value and "
+                "operation.items, set result to its length, bind every final answer "
+                "to that count operation, and select only a bare-numeric option "
+                "equal to result. Do not use this inventory for a last-reference "
+                "index lookup."
+            )
+        minimal_freeform_repair = ""
+        if "minimal atomic freeform" in error_corpus:
+            minimal_freeform_repair = (
+                " This is a minimal-freeform surface error. Keep the supported "
+                "fact or operation and its evidence, but replace freeform.text "
+                "and final_semantic_answer with only the canonical atomic value "
+                "or short phrase. Do not add a lead-in, explanation, redundant "
+                "unit, or final period. Make answer_fragment the same minimal "
+                "surface when it binds the whole answer."
+            )
+        visual_count_repair = ""
+        if "visual subfigure count" in error_corpus:
+            visual_count_repair = (
+                " This is a visual subfigure-inventory error. Re-read the actual "
+                "attached full figure and discard the previous count, count result, "
+                "and selected option. Enumerate every independently bounded "
+                "coordinate-axes region with a distinct spatial identifier such as "
+                "'top-row col-1 axes' or '(a)-left axes', then recompute the count "
+                "and option from that inventory. A row, model family, group heading, "
+                "or bare label such as '(a)' is not itself a subfigure. Do not invent "
+                "panel letters that are not visible in the pixels."
+            )
+        error_history = _json_dumps(list(dict.fromkeys(prior_errors or [error_text])))
         return (
             original_prompt
             + "\n\nYour previous JSON response was rejected by deterministic validation. "
@@ -1232,8 +3075,28 @@ class PairwiseAOAIReader:
             "evidence is inconsistent. Evidence used only while comparing may be omitted "
             "from papers/support. Every submitted chunk must come from the eligible list. "
             "If a paper has no eligible direct evidence, omit that paper rather than "
-            "inventing a locator.\n"
+            "inventing a locator. For a fact binding, fact.value must be the smallest "
+            "answer-bearing typed value copied from evidence and expressed by the exact "
+            "answer_fragment; never keep a surrounding evidence sentence as fact.value "
+            "when the answer uses only its concise value. While shortening, preserve every "
+            "negation, quantifier, comparator, number, unit, and model identifier needed "
+            "for the scientific claim; a generic noun such as GPU is not an adequate "
+            "replacement for a specific hardware value. Do not repeat the rejected structure.\n"
+            + comparison_repair
+            + table_binding_repair
+            + object_fact_repair
+            + scalar_fact_repair
+            + visual_fact_repair
+            + evidence_set_repair
+            + non_ready_repair
+            + citation_count_repair
+            + minimal_freeform_repair
+            + visual_count_repair
+            + "\n"
+            f"Correction attempt: {repair_attempt}/{MAX_ANSWER_REPAIR_ATTEMPTS}\n"
             f"Validation error: {error}\n"
+            f"All validation errors seen so far: {error_history}\n"
+            "Do not reintroduce any earlier error while fixing the latest one.\n"
             f"Eligible evidence chunk_ids: {_json_dumps(eligible_chunk_ids)}\n"
             "<rejected_response>\n"
             + rejected_response
@@ -1459,6 +3322,12 @@ class PairwiseAOAIReader:
             )
         except DerivationValidationError as exc:
             raise ReadingResponseError(f"{query.query_id}: {exc}") from exc
+        if is_aggregate_citation_count_query(query):
+            _validate_stage2_citation_count_support(
+                query=query,
+                derivation=validated_derivation,
+                context_records=context_records,
+            )
         fact_pairs = {
             (str(fact["paper_id"]), str(chunk_id))
             for fact in validated_derivation["facts"]
@@ -1543,8 +3412,8 @@ class PairwiseAOAIReader:
         relevant: list[dict[str, Any]],
         image_count: int,
     ) -> Prediction:
-        evidence = []
         support_paper_ids: list[str] = []
+        support_items: list[tuple[str, str, Record]] = []
         for paper in payload["papers"]:
             paper_id = str(paper["paper_id"])
             support_paper_ids.append(paper_id)
@@ -1554,13 +3423,37 @@ class PairwiseAOAIReader:
                     raise ReadingResponseError(
                         f"{query.query_id}: validated answer contains an invalid locator"
                     )
+                support_items.append((paper_id, chunk_id, record))
+
+        paper_records = [
+            record
+            for paper_id in _ordered_unique(support_paper_ids)
+            for record in self.chunk_store.load_paper(paper_id)
+        ]
+        citation_overrides = infer_citation_locator_overrides(
+            query,
+            derivation=payload["derivation"],
+            answer=payload["answer"],
+            support_records=[record for _, _, record in support_items],
+            paper_records=paper_records,
+        )
+
+        evidence = []
+        for paper_id, chunk_id, record in support_items:
+            citation_ids: tuple[str | None, ...] = citation_overrides.get(
+                chunk_id, (None,)
+            )
+            for citation_id in citation_ids:
+                metadata = dict(record.get("metadata") or {})
+                if citation_id is not None:
+                    metadata["citation_id"] = citation_id
                 result = RetrievalResult(
                     chunk_id=chunk_id,
                     paper_id=paper_id,
                     score=0.0,
                     text=str(record.get("text") or ""),
                     chunk_type=record_source_type(record),
-                    metadata=dict(record.get("metadata") or {}),
+                    metadata=metadata,
                     source="aoai_pairwise_reader",
                 )
                 evidence.append(evidence_from_result(result))
@@ -1604,6 +3497,13 @@ class PairwiseAOAIReader:
                     "paper_relevance": payload["paper_relevance"],
                     "support_paper_ids": support_paper_ids,
                     "image_count": image_count,
+                    "citation_locator": {
+                        "version": CITATION_LOCATOR_VERSION,
+                        "overrides": {
+                            chunk_id: list(citation_ids)
+                            for chunk_id, citation_ids in citation_overrides.items()
+                        },
+                    },
                     "derivation": payload.get("derivation"),
                     "semantic_multiple_choice": raw_answer.get("multiple_choice"),
                     "completeness": payload.get("completeness"),
@@ -1615,7 +3515,13 @@ class PairwiseAOAIReader:
     # ---- Shared helpers ---------------------------------------------------
 
     def _complete(
-        self, prompt: str, image_paths: list[str] | None = None
+        self,
+        prompt: str,
+        image_paths: list[str] | None = None,
+        *,
+        max_completion_tokens: int | None = None,
+        provider_attempt_callback: ProviderAttemptCallback | None = None,
+        semantic_phase: str = "unspecified",
     ) -> CompletionResult:
         started = time.monotonic()
         provider_invocation_count = 0
@@ -1624,36 +3530,94 @@ class PairwiseAOAIReader:
             effective_prompt: str, paths: list[str] | None
         ) -> CompletionResult:
             nonlocal provider_invocation_count
-            provider_invocation_count += 1
-            complete_with_metadata = getattr(
-                self.llm, "complete_with_metadata", None
-            )
-            if callable(complete_with_metadata):
-                response = complete_with_metadata(
-                    effective_prompt, image_paths=paths or None
+            attempt_id = str(uuid.uuid4())
+            invocation_index = provider_invocation_count + 1
+            prompt_sha256 = hashlib.sha256(
+                effective_prompt.encode("utf-8")
+            ).hexdigest()
+            if provider_attempt_callback is not None:
+                # The runner callback blocks until the coordinator has fsynced
+                # this PREPARE row. A crash thereafter is reported as uncertain
+                # rather than silently losing a potentially billable request.
+                provider_attempt_callback(
+                    {
+                        "attempt_id": attempt_id,
+                        "event_kind": "prepare",
+                        "semantic_phase": semantic_phase,
+                        "provider_invocation_index": invocation_index,
+                        "provider_invocation_count": 1,
+                        "prompt_sha256": prompt_sha256,
+                        "prompt_characters": len(effective_prompt),
+                        "requested_image_count": len(paths or []),
+                        "max_completion_tokens": max_completion_tokens,
+                    }
                 )
-                if not isinstance(response, dict) or not isinstance(
-                    response.get("text"), str
-                ):
-                    raise ReadingResponseError(
-                        "LLM metadata response must contain text"
+            provider_invocation_count += 1
+            try:
+                complete_with_metadata = getattr(
+                    self.llm, "complete_with_metadata", None
+                )
+                if callable(complete_with_metadata):
+                    kwargs: dict[str, Any] = {"image_paths": paths or None}
+                    if max_completion_tokens is not None and _accepts_keyword(
+                        complete_with_metadata, "max_completion_tokens"
+                    ):
+                        kwargs["max_completion_tokens"] = max_completion_tokens
+                    response = complete_with_metadata(effective_prompt, **kwargs)
+                    if not isinstance(response, dict) or not isinstance(
+                        response.get("text"), str
+                    ):
+                        raise ReadingResponseError(
+                            "LLM metadata response must contain text"
+                        )
+                    result = cast(CompletionResult, dict(response))
+                else:
+                    complete = getattr(self.llm, "complete", None)
+                    if callable(complete):
+                        kwargs = {"image_paths": paths or None}
+                        if max_completion_tokens is not None and _accepts_keyword(
+                            complete, "max_completion_tokens"
+                        ):
+                            kwargs["max_completion_tokens"] = max_completion_tokens
+                        raw = complete(effective_prompt, **kwargs)
+                    else:
+                        raw = self.llm(effective_prompt)
+                    if not isinstance(raw, str):
+                        raise ReadingResponseError("LLM response must be text")
+                    result = {"text": raw}
+            except Exception as exc:
+                exc._littraceqa_provider_attempt_id = attempt_id  # type: ignore[attr-defined]
+                if provider_attempt_callback is not None:
+                    provider_attempt_callback(
+                        {
+                            "attempt_id": attempt_id,
+                            "event_kind": "finalize",
+                            "outcome": "provider_error",
+                            "semantic_phase": semantic_phase,
+                            "provider_invocation_index": invocation_index,
+                            "provider_invocation_count": 1,
+                            "prompt_sha256": prompt_sha256,
+                            "prompt_characters": len(effective_prompt),
+                            "requested_image_count": len(paths or []),
+                            "max_completion_tokens": max_completion_tokens,
+                            "_exception": exc,
+                        }
                     )
-                return cast(CompletionResult, dict(response))
-
-            complete = getattr(self.llm, "complete", None)
-            if callable(complete):
-                raw = complete(effective_prompt, image_paths=paths or None)
-            else:
-                raw = self.llm(effective_prompt)
-            if not isinstance(raw, str):
-                raise ReadingResponseError("LLM response must be text")
-            return {"text": raw}
+                raise
+            result["provider_attempt_id"] = attempt_id
+            result["provider_semantic_phase"] = semantic_phase
+            result["provider_invocation_index"] = invocation_index
+            return result
 
         sent_prompt = prompt
         try:
             result = invoke(sent_prompt, image_paths)
         except Exception as exc:
             if not image_paths or not _is_image_content_policy_violation(exc):
+                if _prompt_content_filter_categories(exc):
+                    _record_prompt_filter_provider_invocation_count(
+                        exc, provider_invocation_count, sent_prompt
+                    )
                 raise
             # Do not retry or transform rejected image content.  Preserve the
             # paper-level run by judging the same selected context from text alone, and
@@ -1666,7 +3630,14 @@ class PairwiseAOAIReader:
                 "an image."
             )
             sent_prompt = fallback_prompt
-            result = invoke(sent_prompt, None)
+            try:
+                result = invoke(sent_prompt, None)
+            except Exception as fallback_exc:
+                if _prompt_content_filter_categories(fallback_exc):
+                    _record_prompt_filter_provider_invocation_count(
+                        fallback_exc, provider_invocation_count, sent_prompt
+                    )
+                raise
             result["image_fallback_reason"] = "content_policy_violation"
             result["requested_image_count"] = len(image_paths)
             result["attached_image_count"] = 0
@@ -1683,7 +3654,6 @@ class PairwiseAOAIReader:
         ).hexdigest()
         result["prompt_characters"] = len(sent_prompt)
         return result
-
     def _format_record(
         self,
         record: Record,
@@ -1710,10 +3680,10 @@ class PairwiseAOAIReader:
             "chunk_id": record.get("chunk_id"),
             "source_type": record_source_type(record),
             "locator": locator,
+            "submission_eligible": submission_evidence_eligible(record),
         }
         if selected is not None:
             header["stage1_selected"] = selected
-            header["submission_eligible"] = submission_evidence_eligible(record)
         return "[chunk " + _json_dumps(header) + "]\n" + text
 
     def _image_legend(
@@ -1730,6 +3700,20 @@ class PairwiseAOAIReader:
                 f"Image {index}: chunk_ids={','.join(chunk_ids)} file={Path(path).name}"
             )
         return "\n".join(lines)
+
+
+def _accepts_keyword(function: Callable[..., Any], name: str) -> bool:
+    """Whether a bound adapter method explicitly accepts a safe override."""
+
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _production_query_payload(query: Query) -> dict[str, Any]:
@@ -1945,6 +3929,48 @@ def _ranked_image_record_indices(
         if "explicit_object_reference" in item_reasons
         and readable_image_path(records[index])
     }
+    # MinerU commonly emits the panels of one official figure as consecutive
+    # images, while only the last panel carries the shared ``figure_id`` and
+    # caption.  Keep readable, same-page, same-type siblings around an explicit
+    # anchor so a Figure 4(b) panel is not dropped merely because Figure 4's ID
+    # was attached to panel (c).
+    explicit_group_indices = set(explicit_indices)
+    requested_object_keys = _explicit_object_keys(question)
+    for anchor in explicit_indices:
+        anchor_metadata = records[anchor].get("metadata") or {}
+        anchor_page = anchor_metadata.get("page")
+        anchor_source_type = record_source_type(records[anchor])
+        for index in range(max(0, anchor - 3), min(len(records), anchor + 4)):
+            metadata = records[index].get("metadata") or {}
+            sibling_object_keys = _record_object_keys(records[index])
+            if (
+                metadata.get("page") == anchor_page
+                and record_source_type(records[index]) == anchor_source_type
+                and readable_image_path(records[index])
+                and (
+                    not sibling_object_keys
+                    or bool(sibling_object_keys.intersection(requested_object_keys))
+                )
+            ):
+                explicit_group_indices.add(index)
+    if explicit_indices:
+        # When the requested object exists, attach only that exact object and
+        # the nearby same-page panels that MinerU may have split from it. A
+        # second high-scoring figure from another page can contain tempting
+        # answer-like text and be incorrectly attributed to the requested
+        # object. Broader visual fallback is reserved for papers where no exact
+        # readable object survived preprocessing.
+        selected: list[int] = []
+        seen_paths: set[str] = set()
+        for index in sorted(explicit_group_indices):
+            path = readable_image_path(records[index])
+            if not path or path in seen_paths:
+                continue
+            selected.append(index)
+            seen_paths.add(path)
+            if len(selected) >= limit:
+                break
+        return selected
     explicit_visual = requires_visual_image(question)
     explicit_image_source = bool(
         _requested_source_types(question).intersection({"figure", "table"})
@@ -1961,9 +3987,7 @@ def _ranked_image_record_indices(
             question,
         )
     )
-    if explicit_indices:
-        selection_limit = min(limit, max(len(explicit_indices), 2))
-    elif explicit_visual or explicit_image_source:
+    if explicit_visual or explicit_image_source:
         # An unnumbered "main figure/table" can appear late in a long paper;
         # retain the configured safety cap while still ranking query-relevant
         # visuals first.
@@ -1991,11 +4015,15 @@ def _ranked_image_record_indices(
             if readable_image_path(record)
         ),
         key=lambda index: (
-            "explicit_object_reference" not in reasons[index],
+            index not in explicit_group_indices,
             -contextual_scores[index],
             index,
         ),
     )
+    if explicit_group_indices:
+        candidates = _ordered_unique_ints(
+            [*sorted(explicit_group_indices), *candidates]
+        )
     structural_fallback_indices: set[int] = set()
     if not explicit_indices:
         requested_sources = _requested_source_types(question)
@@ -2040,7 +4068,7 @@ def _ranked_image_record_indices(
     seen_paths: set[str] = set()
     for index in candidates:
         if (
-            index not in explicit_indices
+            index not in explicit_group_indices
             and index not in structural_fallback_indices
             and contextual_scores[index] <= 0.0
         ):
@@ -2071,14 +4099,15 @@ def _bounded_formatted_record(
     *,
     focus: str,
     max_chars: int,
+    selected: bool | None = None,
 ) -> str:
-    empty = reader._format_record(record, text="")
+    empty = reader._format_record(record, text="", selected=selected)
     if len(empty) >= max_chars:
         return empty[:max_chars]
     excerpt = _focused_excerpt(
         str(record.get("text") or ""), focus, max_chars - len(empty)
     )
-    return reader._format_record(record, text=excerpt)[:max_chars]
+    return reader._format_record(record, text=excerpt, selected=selected)[:max_chars]
 
 
 def _validate_support_coverage(

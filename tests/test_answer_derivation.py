@@ -6,6 +6,7 @@ import pytest
 
 from littraceqa.answer_derivation import (
     DerivationValidationError,
+    is_aggregate_citation_count_query,
     validate_answer_semantics,
     validate_table_rows,
 )
@@ -198,7 +199,7 @@ def test_count_flattens_list_fact_values() -> None:
         "fact_ids": ["row1", "row2"],
         "items": ["(a)", "(b)", "(c)", "(d)"],
         "result": 4,
-        "answer_binding": _binding("answer.freeform.text", 4, "four"),
+        "answer_binding": _binding("answer.freeform.text", 4, "4"),
     }
     validated = validate_answer_semantics(
         query,
@@ -208,11 +209,280 @@ def test_count_flattens_list_fact_values() -> None:
                 _fact("row2", ["(c)", "(d)"], value_kind="visual"),
             ],
             [operation],
-            "four",
+            "4",
         ),
-        answer={"freeform": {"text": "four"}},
+        answer={"freeform": {"text": "4"}},
     )
     assert validated["operations"][0]["result"] == 4
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        ["(a)", "(b)"],
+        ["Figure 4(a)", "Figure 4(b)"],
+        ["subfigure (a)", "subfigure (b)"],
+        ["Qwen row (a)", "Qwen row (b)"],
+    ],
+)
+def test_visual_subfigure_count_rejects_bare_group_labels(
+    items: list[str],
+) -> None:
+    query = Query(
+        "q004",
+        "How many subfigures are shown in Figure 4?",
+        ["freeform"],
+    )
+    facts = [_fact("axes", items, value_kind="visual")]
+    operation = {
+        "id": "subfigure_count",
+        "kind": "count",
+        "fact_ids": ["axes"],
+        "items": items,
+        "result": 2,
+        "answer_binding": _binding("answer.freeform.text", 2, "2"),
+    }
+
+    with pytest.raises(
+        DerivationValidationError, match="visual subfigure count"
+    ):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "2"),
+            answer={"freeform": {"text": "2"}},
+        )
+
+
+def test_visual_subfigure_count_accepts_spatial_axes_inventory() -> None:
+    query = Query(
+        "q_two_panels",
+        "How many subfigures are shown in Figure 2?",
+        ["freeform"],
+    )
+    items = ["(a)-left axes", "(b)-right axes"]
+    facts = [_fact("axes", items, value_kind="visual")]
+    operation = {
+        "id": "subfigure_count",
+        "kind": "count",
+        "fact_ids": ["axes"],
+        "items": items,
+        "result": 2,
+        "answer_binding": _binding("answer.freeform.text", 2, "2"),
+    }
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(facts, [operation], "2"),
+        answer={"freeform": {"text": "2"}},
+    )
+
+    assert validated["operations"][0]["items"] == items
+
+
+def test_visual_subfigure_count_rejects_text_inventory_with_unused_visual_fact() -> None:
+    query = Query(
+        "q_visual_bypass",
+        "How many subfigures are shown in Figure 4?",
+        ["freeform"],
+    )
+    items = ["left axes", "right axes"]
+    facts = [
+        _fact("text_labels", items, value_kind="text"),
+        _fact("unused_visual", "attached Figure 4", value_kind="visual"),
+    ]
+    operation = {
+        "id": "subfigure_count",
+        "kind": "count",
+        "fact_ids": ["text_labels"],
+        "items": items,
+        "result": 2,
+        "answer_binding": _binding("answer.freeform.text", 2, "2"),
+    }
+
+    with pytest.raises(
+        DerivationValidationError,
+        match="operation must reference at least one visual fact",
+    ):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "2"),
+            answer={"freeform": {"text": "2"}},
+        )
+
+
+def _citation_count_case(
+    *,
+    question: str,
+    items: list[str],
+    result: int,
+    label: str,
+    options: dict[str, str],
+) -> tuple[Query, dict[str, Any], dict[str, Any]]:
+    query = Query(
+        "q_citation_count",
+        question,
+        ["freeform", "multiple_choice"],
+        options=options,
+    )
+    operation = {
+        "id": "citation_count",
+        "kind": "count",
+        "fact_ids": ["citations"],
+        "items": items,
+        "result": result,
+        "answer_binding": _binding(
+            "answer.multiple_choice.selected_option_text",
+            result,
+            str(result),
+        ),
+    }
+    derivation = _derivation(
+        [_fact("citations", items, value_kind="text")],
+        [operation],
+        str(result),
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "operation",
+                "source_id": "citation_count",
+                "answer_fragment": str(result),
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "operation",
+                "source_id": "citation_count",
+                "answer_fragment": str(result),
+            },
+        ],
+    )
+    answer = {
+        "freeform": {"text": str(result)},
+        "multiple_choice": {
+            "label": label,
+            "selected_option_text": options[label],
+        },
+    }
+    return query, derivation, answer
+
+
+def test_aggregate_citation_count_rejects_method_names_and_url_in_thirteen_items():
+    valid_items = [
+        "Alder et al. (2009)",
+        "Birch et al. (2017)",
+        "Cedar (2010)",
+        "Dove et al. (2017)",
+        "Elm et al. (2017)",
+        "Finch et al. (2019)",
+        "Grove et al. (2022)",
+        "Hazel et al. (2023)",
+        "Iris et al. (2023)",
+    ]
+    query, derivation, answer = _citation_count_case(
+        question="How many papers were cited in the Introduction?",
+        items=[*valid_items, "FedRec", "SecAgg", "SecEmb", "https://example.test"],
+        result=13,
+        label="C",
+        options={"A": "5", "B": "9", "C": "13", "D": "15"},
+    )
+
+    with pytest.raises(
+        DerivationValidationError, match="not a stable citation identity"
+    ):
+        validate_answer_semantics(query, derivation=derivation, answer=answer)
+
+
+def test_aggregate_citation_count_accepts_nine_identities_and_option_b():
+    items = [
+        "Alder et al. (2009)",
+        "Birch et al. (2017)",
+        "Cedar (2010)",
+        "Dove et al. (2017)",
+        "Elm et al. (2017)",
+        "Finch et al. (2019)",
+        "Grove et al. (2022)",
+        "Hazel et al. (2023)",
+        "Iris et al. (2023)",
+    ]
+    query, derivation, answer = _citation_count_case(
+        question="How many papers were cited in the Introduction?",
+        items=items,
+        result=9,
+        label="B",
+        options={"A": "5", "B": "9", "C": "13", "D": "15"},
+    )
+
+    validated = validate_answer_semantics(
+        query, derivation=derivation, answer=answer
+    )
+
+    assert is_aggregate_citation_count_query(query) is True
+    assert validated["operations"][0]["items"] == items
+    assert validated["operations"][0]["result"] == 9
+
+
+def test_author_filtered_reference_count_accepts_three_author_year_identities():
+    items = [
+        "Bell et al. (2020)",
+        "Bonawitz et al. (2017)",
+        "Bonawitz et al. (2019)",
+    ]
+    query, derivation, answer = _citation_count_case(
+        question="How many references include Bonawitz as an author?",
+        items=items,
+        result=3,
+        label="B",
+        options={"A": "2", "B": "3", "C": "4", "D": "8"},
+    )
+
+    validated = validate_answer_semantics(
+        query, derivation=derivation, answer=answer
+    )
+
+    assert is_aggregate_citation_count_query(query) is True
+    assert validated["operations"][0]["result"] == 3
+
+
+def test_last_reference_index_is_not_an_aggregate_citation_count():
+    lookup = Query(
+        "q_last_reference",
+        "What is the index of the last reference in JuniperMesh?",
+        ["freeform"],
+    )
+    explicit_number_lookup = Query(
+        "q_last_reference_number",
+        "What is the number of the last reference in JuniperMesh?",
+        ["freeform"],
+    )
+    present_tense_count = Query(
+        "q_present_tense_count",
+        "How many papers are cited in the Introduction?",
+        ["freeform"],
+    )
+    unrelated_questions = [
+        Query(
+            "q_reference_parameters",
+            "How many parameters does reference [5] have?",
+            ["freeform"],
+        ),
+        Query(
+            "q_reference_free",
+            "How many methods are reference-free?",
+            ["freeform"],
+        ),
+        Query(
+            "q_cited_paper_parameters",
+            "What is the number of parameters in the cited paper?",
+            ["freeform"],
+        ),
+    ]
+
+    assert is_aggregate_citation_count_query(lookup) is False
+    assert is_aggregate_citation_count_query(explicit_number_lookup) is False
+    assert is_aggregate_citation_count_query(present_tense_count) is True
+    assert all(
+        is_aggregate_citation_count_query(query) is False
+        for query in unrelated_questions
+    )
 
 
 def test_count_rejects_eight_vs_seven_word_answer() -> None:
@@ -568,6 +838,387 @@ def test_lookup_binding_rejects_fact_final_answer_contradiction() -> None:
         )
 
 
+def test_lookup_binding_accepts_atomic_string_fact_phrase() -> None:
+    query = Query("q", "What hardware was used?", ["freeform"])
+    value = "single NVIDIA RTX 4090 GPU"
+    answer_text = value
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [_fact("hardware", value)],
+            [],
+            answer_text,
+            answer_bindings=[
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "hardware",
+                    "answer_fragment": value,
+                }
+            ],
+        ),
+        answer={"freeform": {"text": answer_text}},
+    )
+
+    assert validated["facts"][0]["value"] == value
+
+
+def test_atomic_freeform_rejects_verbose_q005_style_lookup() -> None:
+    query = Query(
+        "q005",
+        "What is the index of the last reference in the paper?",
+        ["freeform"],
+    )
+    fact = _fact("last_reference_index", "67")
+    answer_text = "The last reference index is 67."
+
+    with pytest.raises(
+        DerivationValidationError, match="minimal atomic freeform"
+    ):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(
+                [fact],
+                [],
+                answer_text,
+                answer_bindings=[
+                    {
+                        "answer_path": "answer.freeform.text",
+                        "source_type": "fact",
+                        "source_id": "last_reference_index",
+                        "answer_fragment": "67",
+                    }
+                ],
+            ),
+            answer={"freeform": {"text": answer_text}},
+        )
+
+
+def test_atomic_freeform_accepts_minimal_q005_style_lookup() -> None:
+    query = Query(
+        "q005",
+        "What is the index of the last reference in the paper?",
+        ["freeform"],
+    )
+    fact = _fact("last_reference_index", "67")
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [fact],
+            [],
+            "67",
+            answer_bindings=[
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "last_reference_index",
+                    "answer_fragment": "67",
+                }
+            ],
+        ),
+        answer={"freeform": {"text": "67"}},
+    )
+
+    assert validated["final_semantic_answer"] == "67"
+
+
+@pytest.mark.parametrize(
+    "answer_text",
+    ["67.0", "sixty-seven", "sixty seven", "67."],
+)
+def test_atomic_integer_freeform_rejects_noncanonical_numeric_surfaces(
+    answer_text: str,
+) -> None:
+    query = Query(
+        "q005",
+        "What is the index of the last reference in the paper?",
+        ["freeform"],
+    )
+    fact = _fact("last_reference_index", 67)
+
+    with pytest.raises(DerivationValidationError):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(
+                [fact],
+                [],
+                answer_text,
+                answer_bindings=[
+                    {
+                        "answer_path": "answer.freeform.text",
+                        "source_type": "fact",
+                        "source_id": "last_reference_index",
+                        "answer_fragment": answer_text,
+                    }
+                ],
+            ),
+            answer={"freeform": {"text": answer_text}},
+        )
+
+
+def test_atomic_integer_freeform_rejects_comma_form_but_accepts_outer_quotes() -> None:
+    query = Query("q", "What is the reported index?", ["freeform"])
+
+    with pytest.raises(
+        DerivationValidationError, match="minimal atomic freeform"
+    ):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(
+                [_fact("index", 1000)],
+                [],
+                "1,000",
+                answer_bindings=[
+                    {
+                        "answer_path": "answer.freeform.text",
+                        "source_type": "fact",
+                        "source_id": "index",
+                        "answer_fragment": "1,000",
+                    }
+                ],
+            ),
+            answer={"freeform": {"text": "1,000"}},
+        )
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [_fact("index", 67)],
+            [],
+            '"67"',
+            answer_bindings=[
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "index",
+                    "answer_fragment": '"67"',
+                }
+            ],
+        ),
+        answer={"freeform": {"text": '"67"'}},
+    )
+
+    assert validated["final_semantic_answer"] == '"67"'
+
+
+def test_atomic_boolean_freeform_rejects_true_when_canonical_surface_is_yes() -> None:
+    query = Query("q", "Does A exceed B?", ["freeform"])
+    facts = [_fact("left", 2), _fact("right", 1)]
+    operation = {
+        "id": "comparison",
+        "kind": "compare",
+        "fact_ids": ["left", "right"],
+        "left": 2,
+        "operator": ">",
+        "right": 1,
+        "result": True,
+        "answer_binding": _binding("answer.freeform.text", True, "true"),
+    }
+
+    with pytest.raises(
+        DerivationValidationError, match="minimal atomic freeform"
+    ):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "true"),
+            answer={"freeform": {"text": "true"}},
+        )
+
+
+def test_duplicate_answer_binding_cannot_bypass_minimal_freeform_check() -> None:
+    query = Query(
+        "q005",
+        "What is the index of the last reference in the paper?",
+        ["freeform"],
+    )
+    binding = {
+        "answer_path": "answer.freeform.text",
+        "source_type": "fact",
+        "source_id": "last_reference_index",
+        "answer_fragment": "67",
+    }
+
+    with pytest.raises(
+        DerivationValidationError, match="duplicates an earlier"
+    ):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(
+                [_fact("last_reference_index", "67")],
+                [],
+                "The last reference index is 67.",
+                answer_bindings=[binding, dict(binding)],
+            ),
+            answer={
+                "freeform": {"text": "The last reference index is 67."}
+            },
+        )
+
+
+def test_distinct_sources_allow_a_genuinely_compound_freeform_answer() -> None:
+    query = Query(
+        "q_compound",
+        "What hardware and runtime were used?",
+        ["freeform"],
+    )
+    answer_text = "Helios X90; CUDA 14"
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [
+                _fact("hardware", "Helios X90"),
+                _fact("runtime", "CUDA 14"),
+            ],
+            [],
+            answer_text,
+            answer_bindings=[
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "hardware",
+                    "answer_fragment": "Helios X90",
+                },
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "runtime",
+                    "answer_fragment": "CUDA 14",
+                },
+            ],
+        ),
+        answer={"freeform": {"text": answer_text}},
+    )
+
+    assert len(validated["answer_bindings"]) == 2
+
+
+def test_atomic_freeform_allows_prose_when_question_requests_explanation() -> None:
+    query = Query(
+        "q_explain",
+        "Explain what the last reference index is.",
+        ["freeform"],
+    )
+    fact = _fact("last_reference_index", "67")
+    answer_text = "The last reference index is 67."
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [fact],
+            [],
+            answer_text,
+            answer_bindings=[
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "last_reference_index",
+                    "answer_fragment": "67",
+                }
+            ],
+        ),
+        answer={"freeform": {"text": answer_text}},
+    )
+
+    assert validated["final_semantic_answer"] == answer_text
+
+
+@pytest.mark.parametrize(
+    "answer_text",
+    [
+        "The experiments did not use a single NVIDIA RTX 4090 GPU.",
+        "A single NVIDIA RTX 4090 GPU was not used.",
+        "A single NVIDIA RTX 4090 GPU could not be used.",
+        "A single NVIDIA RTX 4090 GPU should not be used.",
+        "The experiments used an A100 instead of a single NVIDIA RTX 4090 GPU.",
+        "The experiments ran without a single NVIDIA RTX 4090 GPU.",
+    ],
+)
+def test_lookup_binding_rejects_locally_negated_atomic_fact(
+    answer_text: str,
+) -> None:
+    query = Query("q", "What hardware was used?", ["freeform"])
+    value = "single NVIDIA RTX 4090 GPU"
+
+    with pytest.raises(DerivationValidationError, match="locally negated"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(
+                [_fact("hardware", value)],
+                [],
+                answer_text,
+                answer_bindings=[
+                    {
+                        "answer_path": "answer.freeform.text",
+                        "source_type": "fact",
+                        "source_id": "hardware",
+                        "answer_fragment": value,
+                    }
+                ],
+            ),
+            answer={"freeform": {"text": answer_text}},
+        )
+
+
+@pytest.mark.parametrize(
+    "answer_text",
+    [
+        "The experiments used a single NVIDIA RTX 4090 GPU, not multiple GPUs.",
+        "Without modification, all experiments used a single NVIDIA RTX 4090 GPU.",
+        "The method ran without fine-tuning on a single NVIDIA RTX 4090 GPU.",
+    ],
+)
+def test_lookup_binding_does_not_overreject_unrelated_negation(
+    answer_text: str,
+) -> None:
+    query = Query("q", "Explain what hardware was used.", ["freeform"])
+    value = "single NVIDIA RTX 4090 GPU"
+
+    assert validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [_fact("hardware", value)],
+            [],
+            answer_text,
+            answer_bindings=[
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "hardware",
+                    "answer_fragment": value,
+                }
+            ],
+        ),
+        answer={"freeform": {"text": answer_text}},
+    )
+
+
+def test_lookup_binding_accepts_explicit_negative_source_fact() -> None:
+    query = Query("q", "Explain whether an A100 was used.", ["freeform"])
+    value = "did not use an A100 GPU"
+    answer_text = f"The experiments {value}."
+
+    assert validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [_fact("hardware", value)],
+            [],
+            answer_text,
+            answer_bindings=[
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "hardware",
+                    "answer_fragment": value,
+                }
+            ],
+        ),
+        answer={"freeform": {"text": answer_text}},
+    )
+
+
 def test_lookup_binding_rejects_string_fact_embedded_inside_another_number() -> None:
     query = Query("q", "What is reported?", ["freeform"])
     derivation = _derivation(
@@ -648,13 +1299,13 @@ def test_argmax_result_must_match_candidate_values_and_answer() -> None:
     operation.update(
         {
             "result": "B",
-            "answer_binding": _binding("answer.freeform.text", "B", "Backbone-B"),
+            "answer_binding": _binding("answer.freeform.text", "B", "B"),
         }
     )
     validated = validate_answer_semantics(
         query,
-        derivation=_derivation(facts, [operation], "Backbone-B"),
-        answer={"freeform": {"text": "Backbone-B"}},
+        derivation=_derivation(facts, [operation], "B"),
+        answer={"freeform": {"text": "B"}},
     )
     assert validated["operations"][0]["result"] == "B"
 

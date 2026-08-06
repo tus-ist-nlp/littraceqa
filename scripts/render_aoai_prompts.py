@@ -118,10 +118,20 @@ def build_preview(args: argparse.Namespace) -> dict[str, Any]:
             if args.paper_text_file
             else _sample_paper_text(candidate.paper_id)
         )
+        # An arbitrary preview file cannot prove corpus-level completeness.  Keep
+        # the preview conservative even when every visible chunk header is counted;
+        # the production reader supplies authoritative selection metadata instead.
+        preview_chunk_count = max(1, len(re.findall(r"(?m)^\[chunk ", paper_text)))
         prompt = render_judgment_prompt(
             query=query,
             query_payload=query_payload,
             candidate_payload=candidate_payload,
+            context_coverage={
+                "paper_context_complete": False,
+                "selected_chunk_count": preview_chunk_count,
+                "total_chunk_count": preview_chunk_count,
+                "omitted_chunk_count": 0,
+            },
             paper_text=paper_text,
             image_legend=image_legend,
         )
@@ -327,18 +337,20 @@ def _sample_accepted_summary(candidate: CandidatePaper) -> dict[str, Any]:
         "title": candidate.title,
         "rank": candidate.rank,
         "label": "direct_answer",
-        "candidate_answer": {
-            "units": [
-                {
-                    "name": "preview answer unit",
-                    "value": "synthetic preview value",
-                    "value_kind": "text",
-                    "matched_option_labels": [],
-                }
-            ],
-            "rows": [],
-        },
-        "reason": "Synthetic preview only.",
+        "stage1_label": "direct_answer",
+        "answer_pool_reason": "synthetic_preview",
+        "paper_role": "target_owner",
+        "missing_constraints": [],
+        "blocking_mismatches": [],
+        "evidence": [
+            {
+                "chunk_id": f"{candidate.paper_id}#preview",
+                "source_type": "text_span",
+                "locator": {"page": 1, "section": "Preview"},
+                "purpose": "answer",
+            }
+        ],
+        "visual": {"required": False, "status": "not_needed"},
     }
 
 

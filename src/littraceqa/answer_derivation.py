@@ -70,6 +70,154 @@ _NUMBER_WORDS = {
 _NUMBER_WORD_RE = re.compile(
     r"\b(?:" + "|".join(_NUMBER_WORDS) + r")\b", re.IGNORECASE
 )
+_AGGREGATE_CITATION_COUNT_RES = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bhow\s+many\s+(?:(?:distinct|unique|total)\s+)*"
+        r"(?:citations?|references?)\b",
+        r"\bhow\s+many\s+(?:(?:distinct|unique|total)\s+)*"
+        r"(?:papers?\s+(?:(?:were|are|was|is|have\s+been|has\s+been)\s+)?"
+        r"cited|cited\s+papers?)\b",
+        r"\b(?:number|count)\s+of\s+(?:(?:distinct|unique|total)\s+)*"
+        r"(?:citations?|references?|papers?\s+cited|cited\s+papers?)\b",
+        r"\bcount(?:ing)?\s+(?:the\s+)?(?:(?:distinct|unique|total)\s+)*"
+        r"(?:citations?|references?|cited\s+papers?)\b",
+    )
+)
+_REFERENCE_INDEX_QUESTION_RE = re.compile(
+    r"\b(?:index|number)\s+of\s+(?:the\s+)?(?:last|final|first|\d+(?:st|nd|rd|th))"
+    r"\s+reference\b|\b(?:last|final|first)\s+reference(?:'s)?\s+(?:index|number)\b",
+    re.IGNORECASE,
+)
+_NUMBERED_CITATION_ID_RE = re.compile(
+    r"^\s*(?:\[\s*(\d+)\s*\]|(?:reference|ref\.?)\s*:?\s*"
+    r"\[?\s*(\d+)\s*\]?)\s*$",
+    re.IGNORECASE,
+)
+_AUTHOR_YEAR_CITATION_ID_RE = re.compile(
+    r"^\s*(?P<author>[^\W\d_][\w'’.-]*)"
+    r"(?:\s+et\s+al\.?)?\s*(?:,\s*|\(\s*)"
+    r"(?P<year>(?:17|18|19|20)\d{2}[a-z]?)\s*\)?\s*$",
+    re.IGNORECASE,
+)
+_CITATION_AUTHOR_FILTER_RE = re.compile(
+    r"\breferences?\b[^?\n]{0,180}?\b"
+    r"(?:include|including|contain|containing|have|with)\s+"
+    r"(?P<author>[^\W\d_][\w'’.-]*)\s+as\s+an?\s+author\b|"
+    r"\breferences?\b[^?\n]{0,180}?\b(?:co-?authored|authored)\s+by\s+"
+    r"(?P<by_author>[^\W\d_][\w'’.-]*)\b",
+    re.IGNORECASE,
+)
+_EXPANDED_FREEFORM_REQUEST_RE = re.compile(
+    r"\b(?:explain|why|describe|discuss|summari[sz]e|justify|list|enumerate)\b|"
+    r"\b(?:provide|write|return)\s+(?:an?\s+|the\s+)?"
+    r"(?:explanation|description|sentence|summary|list)\b",
+    re.IGNORECASE,
+)
+_VISUAL_SUBFIGURE_COUNT_RE = re.compile(
+    r"(?=.*\b(?:how\s+many|number\s+of|count)\b)"
+    r"(?=.*\b(?:subfigures?|subplots?)\b)",
+    re.IGNORECASE,
+)
+_BARE_VISUAL_GROUP_LABEL_RE = re.compile(
+    r"\s*(?:"
+    r"(?:figure\s*\d+[a-z]?\s*)?"
+    r"(?:(?:subfigure|panel|group)\s*[-:]?\s*)?\(?[a-z0-9]+\)?|"
+    r"(?:.*\s+)?row\s*[-:]?\s*\(?[a-z0-9]+\)?|"
+    r"(?:top|bottom|upper|lower)\s+row"
+    r")\s*",
+    re.IGNORECASE,
+)
+
+
+def is_aggregate_citation_count_query(query: Query) -> bool:
+    """Return whether the observable query asks for a citation-set cardinality.
+
+    A last-reference index such as "What is the index of the last reference?"
+    is deliberately outside this contract: it is a scalar bibliography lookup,
+    not a request to enumerate and count cited-paper identities.
+    """
+
+    question = query.question
+    return bool(
+        not _REFERENCE_INDEX_QUESTION_RE.search(question)
+        and not re.search(r"\breference[- ]free\b", question, re.IGNORECASE)
+        and any(pattern.search(question) for pattern in _AGGREGATE_CITATION_COUNT_RES)
+    )
+
+
+def citation_identity_key(value: Any) -> str | None:
+    """Normalize one stable numbered or first-author/year citation identity."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if re.search(r"(?:https?://|www\.|\bdoi\b|[/@])", text, re.IGNORECASE):
+        return None
+    numbered = _NUMBERED_CITATION_ID_RE.fullmatch(text)
+    if numbered:
+        return f"number:{int(numbered.group(1) or numbered.group(2))}"
+    author_year = _AUTHOR_YEAR_CITATION_ID_RE.fullmatch(text)
+    if not author_year:
+        return None
+    author = _normalize_item(author_year.group("author")).strip(".'’-")
+    year = author_year.group("year").casefold()
+    if not author:
+        return None
+    return f"author-year:{author}:{year}"
+
+
+def citation_author_filter(query: Query) -> str | None:
+    """Extract an explicit bibliography-author inclusion constraint, if any."""
+
+    match = _CITATION_AUTHOR_FILTER_RE.search(query.question)
+    if not match:
+        return None
+    author = match.group("author") or match.group("by_author")
+    return _normalize_item(author) if author else None
+
+
+def validate_citation_count_items(
+    raw_items: Any,
+    *,
+    path: str,
+) -> list[str]:
+    """Validate an aggregate citation count's explicit identity inventory."""
+
+    if not isinstance(raw_items, list) or not raw_items:
+        raise DerivationValidationError(
+            f"{path} must be a non-empty list for an aggregate citation count"
+        )
+    items: list[str] = []
+    normalized_strings: set[str] = set()
+    identity_keys: set[str] = set()
+    for index, raw_item in enumerate(raw_items):
+        item_path = f"{path}[{index}]"
+        if not isinstance(raw_item, str) or not raw_item.strip():
+            raise DerivationValidationError(
+                f"{item_path} must be a non-empty citation identity string"
+            )
+        item = raw_item.strip()
+        normalized = _normalize_item(item)
+        if normalized in normalized_strings:
+            raise DerivationValidationError(
+                f"{path} must contain strings unique after normalization"
+            )
+        identity_key = citation_identity_key(item)
+        if identity_key is None:
+            raise DerivationValidationError(
+                f"{item_path}={item!r} is not a stable citation identity; use "
+                "'[N]' or 'FirstAuthor et al. (YYYY)', never a method acronym, "
+                "paper name, or URL"
+            )
+        if identity_key in identity_keys:
+            raise DerivationValidationError(
+                f"{path} repeats the same normalized citation identity: {item!r}"
+            )
+        normalized_strings.add(normalized)
+        identity_keys.add(identity_key)
+        items.append(item)
+    return items
 
 
 def validate_answer_semantics(
@@ -145,6 +293,25 @@ def validate_answer_semantics(
         final_answer,
         require_final_match="freeform" not in query.answer_types,
     )
+    if is_aggregate_citation_count_query(query):
+        _validate_aggregate_citation_count_semantics(
+            query,
+            operations=operations,
+            answer=answer,
+            answer_bindings=answer_bindings,
+        )
+    _validate_visual_subfigure_count_inventory(
+        query,
+        facts_by_id=facts_by_id,
+        operations=operations,
+    )
+    _validate_minimal_atomic_freeform(
+        query,
+        facts_by_id=facts_by_id,
+        operation_results=operation_results,
+        answer=answer,
+        answer_bindings=answer_bindings,
+    )
 
     return {
         **derivation,
@@ -153,6 +320,211 @@ def validate_answer_semantics(
         "answer_bindings": answer_bindings,
         "final_semantic_answer": final_answer,
     }
+
+
+def _validate_visual_subfigure_count_inventory(
+    query: Query,
+    *,
+    facts_by_id: dict[str, dict[str, Any]],
+    operations: list[dict[str, Any]],
+) -> None:
+    """Reject a visual count whose inventory contains only group labels.
+
+    Labels such as ``(a)`` and ``(b)`` can name rows or model groups containing
+    several independent axes.  They therefore cannot, by themselves, audit a
+    question that specifically asks for the number of subfigures/subplots.
+    """
+
+    if not _VISUAL_SUBFIGURE_COUNT_RE.search(query.question):
+        return
+    count_operations = [
+        operation for operation in operations if operation.get("kind") == "count"
+    ]
+    if not count_operations:
+        raise DerivationValidationError(
+            "visual subfigure count requires a count operation grounded in "
+            "visual facts"
+        )
+    for operation in count_operations:
+        referenced_facts = [
+            facts_by_id.get(str(fact_id))
+            for fact_id in operation.get("fact_ids") or []
+        ]
+        if not any(
+            isinstance(fact, dict) and fact.get("value_kind") == "visual"
+            for fact in referenced_facts
+        ):
+            raise DerivationValidationError(
+                "visual subfigure count operation must reference at least one "
+                "visual fact; an unrelated visual fact cannot ground a text-only "
+                "count inventory"
+            )
+        items = operation.get("items")
+        if isinstance(items, list) and items and all(
+            isinstance(item, str)
+            and _BARE_VISUAL_GROUP_LABEL_RE.fullmatch(item) is not None
+            for item in items
+        ):
+            raise DerivationValidationError(
+                "visual subfigure count cannot use only bare group labels; "
+                "enumerate each independent coordinate-axes region with a "
+                "distinct spatial identifier"
+            )
+
+
+def _validate_minimal_atomic_freeform(
+    query: Query,
+    *,
+    facts_by_id: dict[str, dict[str, Any]],
+    operation_results: dict[str, tuple[Any, str]],
+    answer: dict[str, Any],
+    answer_bindings: list[dict[str, Any]],
+) -> None:
+    """Require an exact minimal surface only in the conservative atomic case."""
+
+    if set(query.answer_types) != {"freeform"}:
+        return
+    if _EXPANDED_FREEFORM_REQUEST_RE.search(query.question):
+        return
+    bindings = [
+        item
+        for item in answer_bindings
+        if item.get("answer_path") == "answer.freeform.text"
+    ]
+    # Multiple bindings can encode a genuinely compound response.  Hard
+    # validation is intentionally limited to one auditable scalar source.
+    if len(bindings) != 1:
+        return
+    binding = bindings[0]
+    source_type = str(binding.get("source_type") or "")
+    source_id = str(binding.get("source_id") or "")
+    if source_type == "fact":
+        fact = facts_by_id.get(source_id)
+        if fact is None:
+            return
+        source_value = fact.get("value")
+        source_kind = "fact"
+    elif source_type == "operation":
+        operation_result = operation_results.get(source_id)
+        if operation_result is None:
+            return
+        source_value, source_kind = operation_result
+    else:
+        return
+    if isinstance(source_value, (dict, list, tuple, set)) or source_value is None:
+        return
+
+    answer_text = str(answer["freeform"]["text"])
+    if _minimal_freeform_surface_matches(
+        answer_text,
+        source_value=source_value,
+        source_kind=source_kind,
+    ):
+        return
+    expected = _canonical_minimal_surface(source_value, source_kind)
+    raise DerivationValidationError(
+        "minimal atomic freeform must be the whole canonical source value "
+        f"{expected!r}, without a lead-in, explanation, or final period"
+    )
+
+
+def _minimal_freeform_surface_matches(
+    text: str,
+    *,
+    source_value: Any,
+    source_kind: str,
+) -> bool:
+    normalized = _normalize_freeform_exact(text)
+    if source_kind == "compare" or isinstance(source_value, bool):
+        expected = "yes" if bool(source_value) else "no"
+        return normalized == expected
+    if source_kind in {"add", "subtract", "multiply", "divide", "count"} or (
+        isinstance(source_value, (int, float, Decimal))
+        and not isinstance(source_value, bool)
+    ):
+        return normalized == _canonical_minimal_numeric_surface(source_value)
+    return normalized == _normalize_freeform_exact(str(source_value))
+
+
+def _canonical_minimal_surface(source_value: Any, source_kind: str) -> str:
+    if source_kind == "compare" or isinstance(source_value, bool):
+        return "Yes" if bool(source_value) else "No"
+    if source_kind in {"add", "subtract", "multiply", "divide", "count"} or (
+        isinstance(source_value, (int, float, Decimal))
+        and not isinstance(source_value, bool)
+    ):
+        return _canonical_minimal_numeric_surface(source_value)
+    return str(source_value).strip()
+
+
+def _canonical_minimal_numeric_surface(value: Any) -> str:
+    try:
+        number = _decimal(value, "minimal source value")
+    except DerivationValidationError:
+        return str(value).strip()
+    if number == number.to_integral_value():
+        return str(int(number))
+    return format(number, "f")
+
+
+def _normalize_freeform_exact(value: str) -> str:
+    text = re.sub(r"\s+", " ", value.strip()).casefold()
+    return text.strip("\"'“”‘’`").strip()
+
+
+def _validate_aggregate_citation_count_semantics(
+    query: Query,
+    *,
+    operations: list[dict[str, Any]],
+    answer: dict[str, Any],
+    answer_bindings: list[dict[str, Any]],
+) -> None:
+    """Require one auditable citation inventory to determine the final count."""
+
+    count_operations = [item for item in operations if item.get("kind") == "count"]
+    if len(count_operations) != 1:
+        raise DerivationValidationError(
+            "aggregate citation count requires exactly one count operation with "
+            "stable citation identity items"
+        )
+    operation = count_operations[0]
+    operation_id = str(operation["id"])
+    items = validate_citation_count_items(
+        operation.get("items"),
+        path=f"derivation.operations[{operations.index(operation)}].items",
+    )
+    result = operation.get("result")
+    if isinstance(result, bool) or not isinstance(result, int) or result != len(items):
+        raise DerivationValidationError(
+            "aggregate citation count operation.result must equal the number of "
+            "validated citation identities"
+        )
+
+    required_output_paths: list[set[str]] = []
+    if "freeform" in query.answer_types:
+        required_output_paths.append({"answer.freeform.text"})
+    if "multiple_choice" in query.answer_types:
+        required_output_paths.append(
+            {"answer.multiple_choice", "answer.multiple_choice.selected_option_text"}
+        )
+        selected = answer["multiple_choice"]
+        selected_text = str(selected["selected_option_text"])
+        if not re.fullmatch(r"\s*\d+\s*", selected_text) or int(selected_text) != result:
+            raise DerivationValidationError(
+                "aggregate citation count selected option text must be a bare "
+                f"integer equal to the validated count {result}"
+            )
+    for allowed_paths in required_output_paths:
+        if not any(
+            item.get("source_type") == "operation"
+            and item.get("source_id") == operation_id
+            and item.get("answer_path") in allowed_paths
+            for item in answer_bindings
+        ):
+            raise DerivationValidationError(
+                "aggregate citation count final answers must bind to the validated "
+                "count operation"
+            )
 
 
 def validate_table_rows(query: Query, rows: Any) -> list[dict[str, Any]]:
@@ -591,6 +963,7 @@ def _validate_final_answer_bindings(
         )
 
     validated: list[dict[str, Any]] = []
+    seen_binding_signatures: set[tuple[str, str, str, str | None]] = set()
     for index, binding in enumerate(raw_bindings):
         path = f"derivation.answer_bindings[{index}]"
         if not isinstance(binding, dict):
@@ -637,6 +1010,12 @@ def _validate_final_answer_bindings(
         fragment = binding.get("answer_fragment")
         if fragment is not None and not isinstance(fragment, str):
             raise DerivationValidationError(f"{path}.answer_fragment must be a string")
+        signature = (answer_path, source_type, source_id, fragment)
+        if signature in seen_binding_signatures:
+            raise DerivationValidationError(
+                f"{path} duplicates an earlier derivation answer binding"
+            )
+        seen_binding_signatures.add(signature)
         _validate_source_value_in_answer(
             answer_value,
             source_value=source_value,
@@ -682,6 +1061,17 @@ def _validate_source_value_in_answer(
                     f"{path}.answer_fragment={answer_fragment!r} does not express "
                     f"sourced fact value {source_value!r}"
                 )
+            if (
+                isinstance(source_value, str)
+                and not _text_encodes_negation(source_value)
+                and not _has_unnegated_fragment_occurrence(
+                    answer_value, answer_fragment
+                )
+            ):
+                raise DerivationValidationError(
+                    f"{path}.answer_fragment={answer_fragment!r} occurs only in a "
+                    "locally negated answer clause"
+                )
         elif not _fragment_contains_expected(
             answer_fragment, source_value, source_kind
         ):
@@ -712,6 +1102,52 @@ def _fragment_contains_fact(fragment: str, value: Any) -> bool:
         actual = _normalize_item(fragment)
         return _contains_normalized_token(actual, expected)
     return False
+
+
+def _text_encodes_negation(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)\b(?:not|never|without)\b|\b(?:instead of|rather than)\b",
+            text,
+        )
+    )
+
+
+def _has_unnegated_fragment_occurrence(text: str, fragment: str) -> bool:
+    """Require one occurrence not negated in its local answer clause."""
+
+    start = 0
+    while True:
+        position = text.find(fragment, start)
+        if position < 0:
+            return False
+        end = position + len(fragment)
+        prefix = re.split(r"[.;!?]", text[max(0, position - 120) : position])[-1]
+        suffix = re.split(r"[.;!?]", text[end : end + 60])[0]
+        negated_before = bool(
+            re.search(
+                r"(?i)(?:"
+                r"\b(?:do|does|did|is|are|was|were|has|have|had|can|could|"
+                r"would|should)\s+not\b(?:\W+\w+){0,3}\W*$|"
+                r"\bnever\b(?:\W+\w+){0,3}\W*$|"
+                r"\bwithout\s+(?:(?:a|an|the)\s+)?$|"
+                r"\b(?:instead of|rather than)\s+(?:(?:a|an|the)\s+)?$|"
+                r"\bnot\s+(?!only\b)(?:(?:a|an|the)\s+)?$"
+                r")",
+                prefix,
+            )
+        )
+        negated_after = bool(
+            re.match(
+                r"(?i)^\s+(?:do|does|did|is|are|was|were|has|have|had|"
+                r"can|could|would|should)\s+"
+                r"(?:not|never)\b",
+                suffix,
+            )
+        )
+        if not negated_before and not negated_after:
+            return True
+        start = end
 
 
 def _fact_values_equal(left: Any, right: Any) -> bool:

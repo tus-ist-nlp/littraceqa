@@ -10,9 +10,16 @@ llm:
   params:
     json_mode: true
     max_completion_tokens: 12000
-    timeout: 180.0
-    max_retries: 3
+    timeout: 60.0
+    min_request_interval_seconds: 0.075
+    # Shared token-aware budget with margin below the observed 2,531,000 TPM.
+    target_tpm: 2400000
+    # Keep 429 recovery visible to the shared global scheduler.
+    max_retries: 0
 params:
+  # Stage 1 uses compact JSON; Stage 2 retains the adapter's larger default.
+  judgment_max_completion_tokens: 1024
+  answer_max_completion_tokens: 12000
   max_paper_context_chars: 220000
   max_judgment_prompt_chars: 240000
   max_paper_images: 10
@@ -20,5 +27,6 @@ params:
   # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
   answer_neighbor_chunks: 0
   max_answer_images: 10
+  max_answer_papers: 50
   max_evidence: 32
   max_evidence_per_paper: 4

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections import Counter
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,7 @@ def inspect_corpus(
     canonical_paper_ids: set[str] | None = None,
     *,
     allow_missing_figure_images: bool = False,
+    image_workers: int | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Inspect only observable queries plus their candidate papers.
 
@@ -88,7 +91,7 @@ def inspect_corpus(
 
     image_eligible = image_declared = image_existing = image_unreadable = 0
     image_paths_seen: set[str] = set()
-    readable_image_paths: set[str] = set()
+    image_sources_by_path: dict[str, set[tuple[str, str]]] = {}
     missing_image_examples: list[str] = []
     unreadable_image_examples: list[str] = []
     unsafe_image_examples: list[dict[str, str]] = []
@@ -148,37 +151,51 @@ def inspect_corpus(
                 image_declared += 1
                 image_path = Path(str(raw_path))
                 resolved = str(image_path.resolve())
-                if resolved in image_paths_seen:
-                    if resolved in readable_image_paths:
-                        image_types.add(source_type)
-                    continue
                 image_paths_seen.add(resolved)
-                if not image_path.is_file():
+                image_sources_by_path.setdefault(resolved, set()).add(
+                    (paper_id, source_type)
+                )
+        valid_types_by_paper[paper_id] = valid_types
+        image_types_by_paper[paper_id] = image_types
+        if not valid_types:
+            papers_without_valid_evidence.append(paper_id)
+
+    # Image decoding and hashing dominate full-run preflight.  Each file is
+    # independent, so inspect unique paths concurrently and aggregate the
+    # results in sorted path order.  This keeps the report and content digest
+    # deterministic regardless of completion order while avoiding 42k serial
+    # image opens on every run/resume.
+    resolved_workers = image_workers
+    if resolved_workers is None:
+        resolved_workers = min(32, max(1, (os.cpu_count() or 1) * 4))
+    if resolved_workers < 1:
+        raise ValueError("image_workers must be positive")
+    sorted_image_paths = sorted(image_paths_seen)
+    if sorted_image_paths:
+        with ThreadPoolExecutor(
+            max_workers=min(resolved_workers, len(sorted_image_paths)),
+            thread_name_prefix="mineru-image-preflight",
+        ) as executor:
+            inspections = executor.map(_inspect_image_path, sorted_image_paths)
+            for resolved, status, size, file_digest in inspections:
+                if status == "missing":
                     if len(missing_image_examples) < 20:
                         missing_image_examples.append(resolved)
                     continue
-                try:
-                    validate_image_file(image_path)
-                    file_digest = _sha256_image(image_path)
-                    stat = image_path.stat()
-                except (OSError, ValueError):
+                if status == "unreadable":
                     image_unreadable += 1
                     if len(unreadable_image_examples) < 20:
                         unreadable_image_examples.append(resolved)
                     continue
                 image_existing += 1
-                readable_image_paths.add(resolved)
-                image_types.add(source_type)
+                for paper_id, source_type in image_sources_by_path[resolved]:
+                    image_types_by_paper[paper_id].add(source_type)
                 image_digest.update(resolved.encode("utf-8"))
                 image_digest.update(b"\0")
-                image_digest.update(str(stat.st_size).encode("ascii"))
+                image_digest.update(str(size).encode("ascii"))
                 image_digest.update(b"\0")
                 image_digest.update(file_digest.encode("ascii"))
                 image_digest.update(b"\n")
-        valid_types_by_paper[paper_id] = valid_types
-        image_types_by_paper[paper_id] = image_types
-        if not valid_types:
-            papers_without_valid_evidence.append(paper_id)
 
     queries_without_valid_evidence: list[str] = []
     missing_source_hints: list[dict[str, str]] = []
@@ -363,3 +380,18 @@ def _sha256_image(path: Path) -> str:
         while block := handle.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _inspect_image_path(path: str) -> tuple[str, str, int, str]:
+    """Validate and hash one image for deterministic parallel aggregation."""
+
+    image_path = Path(path)
+    if not image_path.is_file():
+        return path, "missing", 0, ""
+    try:
+        validate_image_file(image_path)
+        file_digest = _sha256_image(image_path)
+        stat = image_path.stat()
+    except (OSError, ValueError):
+        return path, "unreadable", 0, ""
+    return path, "readable", stat.st_size, file_digest

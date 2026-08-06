@@ -34,6 +34,7 @@ import os
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 Record = dict[str, Any]
@@ -87,19 +88,24 @@ class ChunkStore:
         )
         self._offsets: dict[str, tuple[int, int]] | None = None
         self._offset_source: dict[str, int] | None = None
+        # Candidate judgments may read different papers concurrently.  Normal
+        # reads use separate file handles, while index initialization and the
+        # exceptional rebuild path must remain single-writer.
+        self._offset_lock = RLock()
 
     # ---- 索引 ---------------------------------------------------------------
 
     @property
     def offsets(self) -> dict[str, tuple[int, int]]:
-        # A long-running reader may outlive a corpus refresh.  Do not keep
-        # seeking with byte ranges that were validated against an older file.
-        if self._offsets is not None and self._offset_source != self._stat():
-            self._offsets = None
-            self._offset_source = None
-        if self._offsets is None:
-            self._offsets = self._load_or_build_index()
-        return self._offsets
+        with self._offset_lock:
+            # A long-running reader may outlive a corpus refresh.  Do not keep
+            # seeking with byte ranges that were validated against an older file.
+            if self._offsets is not None and self._offset_source != self._stat():
+                self._offsets = None
+                self._offset_source = None
+            if self._offsets is None:
+                self._offsets = self._load_or_build_index()
+            return self._offsets
 
     def _stat(self) -> dict[str, int]:
         info = self.chunks_path.stat()
@@ -249,10 +255,11 @@ class ChunkStore:
     def _rebuild_cached_index(self) -> None:
         """Rebuild after a structurally valid index points at the wrong paper."""
 
-        offsets, source = self._build_index()
-        self._write_index(offsets, source)
-        self._offsets = offsets
-        self._offset_source = source
+        with self._offset_lock:
+            offsets, source = self._build_index()
+            self._write_index(offsets, source)
+            self._offsets = offsets
+            self._offset_source = source
 
     def load_papers(self, paper_ids: list[str]) -> dict[str, list[Record]]:
         return {paper_id: self.load_paper(paper_id) for paper_id in paper_ids}

@@ -125,9 +125,12 @@ git show a020604:data/validation_with_candidates.jsonl \
 
 For every question, the reader:
 
-1. hydrates each candidate paper from MinerU and makes one base AOAI call to ask
-   whether that query-paper pair supplies an answer, a required partial
-   row/operand, a constraint, or only a distractor/mention;
+1. resolves only a unique, literal canonical title that grammatically owns a
+   named paper-local figure/table/equation/reference; mismatching candidates are
+   checkpointed as deterministic zero-call distractors, while every other pair
+   is hydrated from MinerU and receives one base AOAI relevance call; fuzzy
+   title matches and titles that merely co-occur in citations or comparisons
+   never activate this destructive gate;
 2. checks target-paper ownership, hard settings, visual availability, exact
    chunk IDs, and internal consistency before accepting a paper; a claim of visual
    inspection is rejected unless the source image was actually attached;
@@ -143,7 +146,8 @@ For every question, the reader:
 
 Stage 1 never splits a paper into several AOAI requests. A long paper is
 deterministically compacted into one bounded paper context, with at most 10
-selected images, and receives one base judgment call for that query-paper pair.
+selected images, and every pair not eliminated by the narrow named-owner gate
+receives one base judgment call.
 The final rendered Stage-1 prompt, including few-shot instructions and query
 metadata, is guarded at 240,000 characters; the paper context is reduced again
 locally if necessary, without another AOAI request.
@@ -152,6 +156,18 @@ text-only fallback, and provider retry can add requests only on failure; they
 are not normal paper partitions. API errors,
 invalid JSON, invented IDs, absent required images, inconsistent calculations,
 and invalid official locators never become silent guesses.
+
+Every provider adapter invocation also has a durable two-phase audit in
+`<run-dir>/<query_id>/provider_attempts.jsonl`. The coordinator fsyncs a unique
+`PREPARE` event before allowing the worker to enter the adapter, then fsyncs a
+`FINALIZE` response or structured provider-error event before validation or a
+whole-job retry continues. A response followed by a failed repair therefore
+cannot disappear from billing totals. A process crash between the two events is
+retained as an explicitly uncertain, potentially billable attempt instead of
+being counted as zero. `provider_usage_summary.json` and each row of
+`reading_traces.jsonl` materialize unique-attempt totals, request-ID history,
+safe rate-limit metadata, and token usage without prompts, API keys, endpoints,
+or exception bodies.
 
 Configure Azure OpenAI in the repository-root `.env` (never commit real values):
 
@@ -242,6 +258,20 @@ configuration-name compatibility alias. It now uses the same one-call
 text-plus-selected-images judgment as the primary config; it no longer performs
 a text call followed by a second visual-refinement call.
 
+`max_answer_papers` limits how many Stage-1 accepted papers Stage 2 may review;
+`max_evidence` separately limits the distinct evidence chunks in the final
+submission. Keeping these limits separate lets Stage 2 remove false-positive
+candidates without silently truncating its review queue.
+
+The production reader also separates output-token reservations by semantic
+stage. Candidate judgments use `judgment_max_completion_tokens: 1024`; the
+final answer explicitly keeps 12,000 tokens for structured-table repairs. The
+Azure rate limiter includes the requested output ceiling when it estimates TPM,
+even when the actual Stage-1 JSON is much shorter, so one shared 12,000-token
+ceiling creates avoidable throttling. The client timeout is 60 seconds: normal
+validation calls completed within 22 seconds in the measured run, while a dead
+connection otherwise occupied a worker for the former 180-second timeout.
+
 Resume the same question after interruption by adding `--resume`. To inspect or
 re-run one pair without touching other checkpoints:
 
@@ -257,14 +287,51 @@ refuses to start unless `--confirm-full-run` is present:
 
 ```bash
 uv run python scripts/run_aoai_pairwise_reader.py <same arguments> \
-  --resume --confirm-full-run
+  --workers 100 --resume --confirm-full-run
 ```
 
-For a cache-empty run, the exact minimum is one Stage-1 call per candidate pair
-plus one Stage-2 call per question. For example, 71 test questions with 50
-candidates each have a minimum of `71 * 50 + 71 = 3,621` calls, before any JSON
-repair, image-policy fallback, or provider retry. The optional 4,901-question
-test_extra would be vastly
+`--workers 100` is the initial concurrency ceiling, not 100 independent input
+files. The runner keeps the original JSONL intact, round-robins every
+query-paper pair through one global pool, and checkpoints each success before
+submitting more work. All workers share one token-aware launch pacer. The
+production configs set `target_tpm: 2400000`, leaving 131,000 TPM below the
+2,531,000 limit observed in the validation response headers. Before each launch
+the client estimates the system-plus-user text at 3.2 characters/token, adds
+the effective per-call `max_completion_tokens`, and adds 512 tokens per
+high-detail image. These values are calibrated to the complete v18 call sample,
+not presented as a worst-case tokenizer guarantee. The interval is
+`max(0.075, estimated_tokens * 60 / target_tpm)` seconds, so the 0.075-second
+value remains a microburst floor rather than the primary rate control.
+Reservations are ordered across every thread on the shared client and paid
+before launch; therefore a long prompt cannot immediately follow a short
+prompt's smaller slot. Provider calls themselves remain concurrent. Omitting
+`target_tpm` preserves the original fixed-interval behavior; rare estimation
+outliers are handled by the deployment margin plus the outer 429/AIMD scheduler.
+
+If Azure returns HTTP 429, only the rate-limited jobs are requeued; the pool
+drains, cools down, and reduces its effective concurrency until it reaches the
+deployment's real RPM/TPM capacity. A clean success window then raises the cap
+additively toward 100 again, and the learned cap is shared with Stage 2 instead
+of being reset. Provider `retry-after-ms` / `Retry-After` advice takes
+precedence over the 60-second fallback; successful calls retain only a safe
+allowlist of RPM/TPM limit headers for later throughput analysis. The Azure SDK
+retry count is zero in this configuration so a hidden per-thread Retry-After
+cannot fight the global scheduler.
+
+Local startup work is parallel too: unique MinerU images are validated and
+hashed with up to 64 workers, and uncached papers are not hashed once on the
+coordinator and again in their AOAI worker. A Stage-1 response that remains
+structurally invalid after its repair is logged with both raw calls and isolated
+to that pair. Every other pair finishes; rerunning with `--resume` retries only
+the missing checkpoint. Authentication, configuration, corpus, and unexpected
+provider failures remain fatal.
+
+For a cache-empty run, the exact minimum is the candidate-pair count minus
+deterministic named-owner rejections, plus one Stage-2 call per question. With
+71 questions and 50 candidates each, `3,621` is the no-rejection upper baseline;
+the CLI prints both the actual zero-call rejection count and the reduced minimum
+before any JSON repair, image-policy fallback, or provider retry. The optional
+4,901-question test_extra would be vastly
 larger and is not part of the normal leaderboard run. The CLI prints the actual
 pair count from the supplied sidecar before it asks for confirmation.
 Any run selecting more than 71 questions is rejected unless the separate

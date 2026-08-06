@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from collections.abc import Iterable, Iterator
@@ -11,7 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from littraceqa.aoai_pairwise_reader import PairwiseAOAIReader
+from littraceqa.aoai_pairwise_reader import (
+    PairwiseAOAIReader,
+    resolve_named_owner,
+)
 from littraceqa.candidate_handoff import (
     CandidateHandoff,
     CandidatePaper,
@@ -30,6 +34,8 @@ from littraceqa.submission import (
     prediction_to_submission,
 )
 
+PROVIDER_ATTEMPT_LEDGER_VERSION = "provider-attempt-ledger-v1"
+
 
 @dataclass(frozen=True)
 class QueryRunPaths:
@@ -39,6 +45,8 @@ class QueryRunPaths:
     judgments: Path
     answer: Path
     submission: Path
+    answer_attempts: Path
+    provider_attempts: Path
     errors: Path
 
     @classmethod
@@ -49,6 +57,8 @@ class QueryRunPaths:
             judgments=directory / "candidate_judgments.jsonl",
             answer=directory / "answer.json",
             submission=directory / "submission.json",
+            answer_attempts=directory / "answer_attempts.jsonl",
+            provider_attempts=directory / "provider_attempts.jsonl",
             errors=directory / "errors.jsonl",
         )
 
@@ -87,6 +97,52 @@ def ensure_manifest(path: Path, manifest: dict[str, Any], resume: bool) -> None:
 
 
 @contextmanager
+def run_directory_lock(run_dir: Path) -> Iterator[None]:
+    """Prevent two paid runner processes from mutating one run directory.
+
+    The lock file intentionally remains on disk: ``flock`` state belongs to the
+    open file descriptor and is released by the OS even after a crash.  Keeping
+    the inode avoids an unlink/recreate race between competing processes.
+    """
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = run_dir / ".run.lock"
+    handle = lock_path.open("a+", encoding="utf-8")
+    locked = False
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError as exc:
+            handle.seek(0)
+            owner = handle.read().strip() or "owner metadata unavailable"
+            raise RuntimeError(
+                f"run directory is already active: {run_dir} ({owner})"
+            ) from exc
+
+        handle.seek(0)
+        handle.truncate()
+        handle.write(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "acquired_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            + "\n"
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+        yield
+    finally:
+        try:
+            if locked:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+@contextmanager
 def _atomic_text_writer(path: Path) -> Iterator[TextIO]:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -113,13 +169,20 @@ def atomic_write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def invalidate_aggregate_query(run_dir: Path, query_id: str) -> None:
-    """Remove a mutated query from aggregate artifacts immediately.
+def invalidate_aggregate_queries(
+    run_dir: Path,
+    query_ids: Iterable[str],
+) -> None:
+    """Remove pending queries from each root aggregate in one atomic rewrite.
 
     Per-query checkpoints remain durable. This prevents an interrupted force
-    rejudgment from leaving an old answer paired with new judgments in the root
-    trace and submission files.
+    rejudgment or paid call from leaving old answers paired with new checkpoints
+    in the root trace and submission files. Every aggregate is parsed at most
+    once, regardless of the number of pending queries.
     """
+    invalidated = {str(query_id) for query_id in query_ids if str(query_id)}
+    if not invalidated:
+        return
     # Remove the uploadable artifact first. If the process dies between the two
     # independent atomic rewrites, a stale diagnostic trace is safer than a stale
     # submission that still looks ready to upload.
@@ -127,12 +190,20 @@ def invalidate_aggregate_query(run_dir: Path, query_id: str) -> None:
         path = run_dir / filename
         if not path.exists():
             continue
-        records = [
+        records = read_jsonl(path)
+        retained = [
             record
-            for record in read_jsonl(path)
-            if str(record.get("query_id") or "") != query_id
+            for record in records
+            if str(record.get("query_id") or "") not in invalidated
         ]
-        atomic_write_jsonl(path, records)
+        if len(retained) != len(records):
+            atomic_write_jsonl(path, retained)
+
+
+def invalidate_aggregate_query(run_dir: Path, query_id: str) -> None:
+    """Backward-compatible one-query aggregate invalidation wrapper."""
+
+    invalidate_aggregate_queries(run_dir, (query_id,))
 
 
 def load_judgments(path: Path, query_id: str) -> dict[str, dict[str, Any]]:
@@ -176,20 +247,200 @@ def record_error(
     query_id: str,
     error: Exception,
     paper_id: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> None:
     """Append one durable error record without corrupting the existing log."""
+    records = read_jsonl(path) if path.exists() else []
+    record = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "stage": stage,
+        "query_id": query_id,
+        "paper_id": paper_id,
+        "error_type": type(error).__name__,
+        "message": str(error),
+    }
+    if details is not None:
+        record["details"] = details
+    records.append(record)
+    atomic_write_jsonl(path, records)
+
+
+def record_answer_attempt(
+    path: Path,
+    *,
+    query_id: str,
+    attempt: dict[str, Any],
+) -> None:
+    """Durably append paid Stage-2 response metadata before final validation."""
+
     records = read_jsonl(path) if path.exists() else []
     records.append(
         {
             "timestamp": datetime.now(UTC).isoformat(),
-            "stage": stage,
             "query_id": query_id,
-            "paper_id": paper_id,
-            "error_type": type(error).__name__,
-            "message": str(error),
+            "attempt_index": len(records) + 1,
+            **attempt,
         }
     )
     atomic_write_jsonl(path, records)
+
+
+def record_provider_attempt_event(
+    path: Path,
+    *,
+    event: dict[str, Any],
+) -> None:
+    """Idempotently persist one PREPARE or FINALIZE provider event.
+
+    Only the coordinator calls this function.  A PREPARE row is fsynced before
+    the worker may enter the provider adapter; a FINALIZE row records either the
+    received response metadata or a structured exception outcome.  Replaying
+    the same immutable event is a no-op, while conflicting reuse of an event ID
+    is rejected.
+    """
+
+    attempt_id = str(event.get("attempt_id") or "")
+    event_kind = str(event.get("event_kind") or "")
+    if not attempt_id or event_kind not in {"prepare", "finalize"}:
+        raise ValueError("provider attempt event requires attempt_id and event_kind")
+    event_id = f"{attempt_id}:{event_kind}"
+    records = read_jsonl(path) if path.exists() else []
+    existing = next(
+        (record for record in records if record.get("event_id") == event_id),
+        None,
+    )
+    payload = {
+        "ledger_version": PROVIDER_ATTEMPT_LEDGER_VERSION,
+        "event_id": event_id,
+        **event,
+    }
+    if existing is not None:
+        comparable = {
+            key: value for key, value in existing.items() if key != "timestamp"
+        }
+        if comparable != payload:
+            raise ValueError(f"conflicting provider attempt event: {event_id}")
+        return
+    records.append(
+        {
+            "timestamp": datetime.now(UTC).isoformat(),
+            **payload,
+        }
+    )
+    atomic_write_jsonl(path, records)
+
+
+def provider_attempt_summary(
+    path: Path,
+    *,
+    stage: str | None = None,
+    paper_id: str | None = None,
+) -> dict[str, Any]:
+    """Summarize unique provider attempts, including crash-uncertain prepares."""
+
+    records = read_jsonl(path) if path.exists() else []
+    filtered = [
+        record
+        for record in records
+        if (stage is None or record.get("stage") == stage)
+        and (paper_id is None or record.get("paper_id") == paper_id)
+    ]
+    by_attempt: dict[str, dict[str, dict[str, Any]]] = {}
+    for record in filtered:
+        attempt_id = str(record.get("attempt_id") or "")
+        event_kind = str(record.get("event_kind") or "")
+        if not attempt_id or event_kind not in {"prepare", "finalize"}:
+            raise ValueError(f"invalid provider attempt ledger row: {path}")
+        events = by_attempt.setdefault(attempt_id, {})
+        if event_kind in events:
+            raise ValueError(
+                f"duplicate provider attempt {attempt_id}:{event_kind} in {path}"
+            )
+        events[event_kind] = record
+
+    request_ids: list[str] = []
+    usage: dict[str, int] = {}
+    response_count = 0
+    provider_error_count = 0
+    uncertain_count = 0
+    for attempt_id, events in by_attempt.items():
+        final = events.get("finalize")
+        if final is None:
+            uncertain_count += 1
+            continue
+        outcome = final.get("outcome")
+        if outcome == "response":
+            response_count += 1
+        elif outcome == "provider_error":
+            provider_error_count += 1
+        else:
+            raise ValueError(
+                f"invalid provider attempt outcome for {attempt_id}: {outcome!r}"
+            )
+        request_id = str(final.get("request_id") or "")
+        if request_id and request_id not in request_ids:
+            request_ids.append(request_id)
+        raw_usage = final.get("usage")
+        if isinstance(raw_usage, dict):
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "input_tokens",
+                "output_tokens",
+            ):
+                value = raw_usage.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    usage[key] = usage.get(key, 0) + value
+
+    return {
+        "ledger_version": PROVIDER_ATTEMPT_LEDGER_VERSION,
+        # PREPARE is deliberately counted: after a crash it is impossible to
+        # know whether the provider accepted the request. This upper-bound
+        # accounting never silently under-reports a potentially billable call.
+        "provider_invocation_count": len(by_attempt),
+        "finalized_provider_invocation_count": len(by_attempt) - uncertain_count,
+        "uncertain_provider_invocation_count": uncertain_count,
+        "response_count": response_count,
+        "provider_error_count": provider_error_count,
+        "attempt_ids": list(by_attempt),
+        "request_ids": request_ids,
+        "usage": usage,
+    }
+
+
+def _aggregate_provider_summaries(
+    summaries: Iterable[tuple[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Combine per-query summaries into one materialized run accounting row."""
+
+    by_query: dict[str, dict[str, Any]] = {}
+    totals = {
+        "provider_invocation_count": 0,
+        "finalized_provider_invocation_count": 0,
+        "uncertain_provider_invocation_count": 0,
+        "response_count": 0,
+        "provider_error_count": 0,
+    }
+    usage: dict[str, int] = {}
+    request_ids: list[str] = []
+    for query_id, summary in summaries:
+        by_query[query_id] = summary
+        for key in totals:
+            totals[key] += int(summary.get(key) or 0)
+        for key, value in (summary.get("usage") or {}).items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                usage[key] = usage.get(key, 0) + value
+        for request_id in summary.get("request_ids") or []:
+            if request_id not in request_ids:
+                request_ids.append(request_id)
+    return {
+        "ledger_version": PROVIDER_ATTEMPT_LEDGER_VERSION,
+        **totals,
+        "request_ids": request_ids,
+        "usage": usage,
+        "queries": by_query,
+    }
 
 
 def validate_judgment_checkpoint(
@@ -207,12 +458,26 @@ def validate_judgment_checkpoint(
         )
     missing_ids = tuple(sorted(expected_ids - set(judgments)))
     stale_ids: list[str] = []
+    owner_resolution = resolve_named_owner(
+        handoff.query,
+        handoff.candidate_papers,
+    )
     for candidate in handoff.candidate_papers:
         judgment = judgments.get(candidate.paper_id)
         if judgment is None:
             continue
         records = reader.chunk_store.load_paper(candidate.paper_id)
-        expected_key = reader.judgment_cache_key(handoff.query, candidate, records)
+        if getattr(reader, "supports_named_owner_resolution", False):
+            expected_key = reader.judgment_cache_key(
+                handoff.query,
+                candidate,
+                records,
+                owner_resolution=owner_resolution,
+            )
+        else:
+            expected_key = reader.judgment_cache_key(
+                handoff.query, candidate, records
+            )
         if judgment.get("cache_key") != expected_key:
             stale_ids.append(candidate.paper_id)
     return JudgmentCheckpointStatus(
@@ -366,9 +631,25 @@ def materialize_run_outputs(
     """Rebuild aggregate traces/submissions only from valid checkpoints."""
     traces: list[dict[str, Any]] = []
     submissions: list[dict[str, Any]] = []
+    provider_summaries: list[tuple[str, dict[str, Any]]] = []
+    provider_stage_summaries: dict[str, list[tuple[str, dict[str, Any]]]] = {
+        "judge": [],
+        "answer": [],
+    }
     for handoff in handoffs:
         query_id = handoff.query.query_id
         paths = QueryRunPaths.under(run_dir, query_id)
+        provider_summary = provider_attempt_summary(paths.provider_attempts)
+        provider_summaries.append((query_id, provider_summary))
+        for provider_stage, stage_summaries in provider_stage_summaries.items():
+            stage_summaries.append(
+                (
+                    query_id,
+                    provider_attempt_summary(
+                        paths.provider_attempts, stage=provider_stage
+                    ),
+                )
+            )
         if not paths.judgments.exists():
             if paths.answer.exists() or paths.submission.exists():
                 raise ValueError(
@@ -390,6 +671,15 @@ def materialize_run_outputs(
             "judgment_checkpoints_complete": checkpoint.complete,
             "missing_judgment_paper_ids": list(checkpoint.missing_paper_ids),
             "judgment_checkpoints_current": checkpoint.current,
+        }
+        trace["provider_attempts"] = {
+            "all": provider_summary,
+            "judge": provider_attempt_summary(
+                paths.provider_attempts, stage="judge"
+            ),
+            "answer": provider_attempt_summary(
+                paths.provider_attempts, stage="answer"
+            ),
         }
         if (paths.answer.exists() or paths.submission.exists()) and not checkpoint.complete:
             raise ValueError(
@@ -437,4 +727,10 @@ def materialize_run_outputs(
 
     atomic_write_jsonl(run_dir / "reading_traces.jsonl", traces)
     atomic_write_jsonl(run_dir / "submission.jsonl", submissions)
+    run_provider_summary = _aggregate_provider_summaries(provider_summaries)
+    run_provider_summary["stages"] = {
+        stage: _aggregate_provider_summaries(stage_summaries)
+        for stage, stage_summaries in provider_stage_summaries.items()
+    }
+    atomic_write_json(run_dir / "provider_usage_summary.json", run_provider_summary)
     return len(traces), len(submissions)
