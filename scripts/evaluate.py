@@ -105,17 +105,21 @@ def normalize_visible_id(value: Any, prefix: str) -> str:
 def coarse_evidence_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
     paper_id = normalize_id(item.get("paper_id"))
     source_type = normalize_id(item.get("source_type"))
-    if isinstance(item.get("locator"), dict):
-        locator = item.get("locator")
-    else:
-        locator = {}
-    page = str(locator.get("page", "")).strip()
+    locator = item.get("locator") if isinstance(item.get("locator"), dict) else {}
+    location = str(locator.get("page") or locator.get("section") or "").strip()
     object_id = ""
     if source_type == "table":
         object_id = normalize_visible_id(locator.get("table_id"), "table")
     elif source_type == "figure":
         object_id = normalize_visible_id(locator.get("figure_id"), "figure")
-    return (paper_id, source_type, page, object_id)
+    elif source_type == "equation_algorithm":
+        object_id = normalize_visible_id(
+            locator.get("equation_id") or locator.get("algorithm_id"),
+            "equation",
+        )
+    elif source_type == "citation_context":
+        object_id = normalize_visible_id(locator.get("citation_id"), "citation")
+    return (paper_id, source_type, location, object_id)
 
 
 def evidence_set(record: dict[str, Any]) -> set[tuple[str, str, str, str]]:
@@ -126,7 +130,7 @@ def evidence_set(record: dict[str, Any]) -> set[tuple[str, str, str, str]]:
     for item in evidence:
         if isinstance(item, dict):
             key = coarse_evidence_key(item)
-            if key[0] and key[1] and key[2]:
+            if key[0] and key[1] and (key[2] or key[3]):
                 keys.add(key)
     return keys
 
@@ -355,13 +359,17 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
 
     for query_id, gold in gold_by_id.items():
         pred = pred_by_id.get(query_id, {})
+        evaluation_targets = set(
+            gold.get("evaluation_targets") or ["paper", "evidence", "answer"]
+        )
 
-        p, r, f = prf(paper_id_set(gold), paper_id_set(pred))
-        paper_precision.append(p)
-        paper_recall.append(r)
-        paper_f1.append(f)
+        if "paper" in evaluation_targets:
+            p, r, f = prf(paper_id_set(gold), paper_id_set(pred))
+            paper_precision.append(p)
+            paper_recall.append(r)
+            paper_f1.append(f)
 
-        if has_candidate_papers:
+        if "paper" in evaluation_targets and has_candidate_papers:
             # 打ち切り前の候補上位 k 本に gold 論文が入っていたか（＝検索力）。
             gold_paper_ids = paper_id_set(gold)
             ranked = candidate_paper_ids(pred) or []
@@ -378,21 +386,22 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
                 for scenario in scenarios:
                     candidate_recall[scenario][k].append(recall)
 
-        p, r, f = prf(evidence_set(gold), evidence_set(pred))
-        evidence_precision.append(p)
-        evidence_recall.append(r)
-        evidence_f1.append(f)
+        if "evidence" in evaluation_targets:
+            p, r, f = prf(evidence_set(gold), evidence_set(pred))
+            evidence_precision.append(p)
+            evidence_recall.append(r)
+            evidence_f1.append(f)
 
         answer_types = set(gold.get("answer_types") or [])
-        if "multiple_choice" in answer_types:
+        if "answer" in evaluation_targets and "multiple_choice" in answer_types:
             mc_total += 1
             mc_correct += int(multiple_choice_prediction(pred) == multiple_choice_gold(gold))
 
-        if "freeform" in answer_types:
+        if "answer" in evaluation_targets and "freeform" in answer_types:
             freeform_total += 1
             freeform_exact_correct += int(freeform_prediction(pred) == freeform_gold(gold))
 
-        if "table" in answer_types:
+        if "answer" in evaluation_targets and "table" in answer_types:
             metrics = table_metrics(gold, pred)
             table_row_f1.append(float(metrics["row_f1"]))
             table_cell_accuracy.append(float(metrics["cell_accuracy"]))
@@ -414,9 +423,9 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
 
     return {
         "metrics": {
-            "paper_precision_macro": mean(paper_precision),
-            "paper_recall_macro": mean(paper_recall),
-            "paper_f1_macro": mean(paper_f1),
+            "paper_precision_macro": mean(paper_precision) if paper_precision else None,
+            "paper_recall_macro": mean(paper_recall) if paper_recall else None,
+            "paper_f1_macro": mean(paper_f1) if paper_f1 else None,
             # 検索が候補として拾えていたか（LLM の絞り込み前）。gold の task_family 別に
             # k を並べてカーブで出す。シナリオごとに k 昇順で並べて表で読みやすくする。
             **{
@@ -426,9 +435,13 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
                 for scenario in CANDIDATE_RECALL_SCENARIOS
                 for k in CANDIDATE_RECALL_KS
             },
-            "evidence_precision_macro": mean(evidence_precision),
-            "evidence_recall_macro": mean(evidence_recall),
-            "evidence_f1_macro": mean(evidence_f1),
+            "evidence_precision_macro": (
+                mean(evidence_precision) if evidence_precision else None
+            ),
+            "evidence_recall_macro": (
+                mean(evidence_recall) if evidence_recall else None
+            ),
+            "evidence_f1_macro": mean(evidence_f1) if evidence_f1 else None,
             "multiple_choice_accuracy": multiple_choice_accuracy,
             "freeform_exact_match": freeform_exact_match,
             "table_row_f1_macro": mean(table_row_f1),

@@ -63,7 +63,7 @@ uv run python scripts/run_search.py \
   --process configs/process_style/mineru.yaml \
   --search configs/search_style/abstract_specter2_body_qwen3.yaml \
   --agent configs/agent_style/reading.yaml \
-  --queries data/validation_inputs.jsonl \
+  --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \
   --output predictions.jsonl \
   --build
 ```
@@ -111,11 +111,12 @@ configs/
 
 ### 3.1 評価の作法
 
-**評価は `--production-input` を付けて回す。** `data/validation_inputs.jsonl` は55件
-すべてに `task_family` が入っているが、本番入力には無い（`query_id` / `question` /
-`answer_types` / `table_schema` の4つだけ）。与えたまま評価すると「正解を教えてもらった
-状態」の点数になり本番と乖離する（`reading` は `task_family` を提出本数に使わないため
-影響は小さいが、`_decompose()` のサブクエリ分解の文言分岐にはまだ使っている）。
+**評価には `scripts/sync_official_release.py` が取得・検証した
+`artifacts/official_release/<revision>/data/validation_inputs.jsonl` を使う。** 現行入力は
+`query_id` / `benchmark` / `question` / `answer_types` と、回答形式に応じた
+`multiple_choice_options` / `table_schema` から成る。`run_search.py` は既定でこの本番契約へ
+投影するため `--production-input` の明示は不要。`--include-development-fields` は古い実験の
+再現専用で、`task_family` / `primary_evidence_type` を含む結果を本番相当として比較しない。
 
 結果は `results/experiments.jsonl` に自動で追記される（config名 + metrics + timestamp）。
 加えて実行1回につき、設定と指標とLLMコメントをまとめた Markdown が

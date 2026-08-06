@@ -1,0 +1,50 @@
+# PR #7 の固定候補を1論文ずつAOAIで読解判定し、採択根拠だけで回答する。
+# 検索、rerank、DI、再検索は行わない。認証値はリポジトリ直下の .env から読む。
+name: aoai_pairwise_reader
+# MinerU chunk metadata contains absolute paths from the student's machine.
+# Rebase them to the candidate-image bundle checked out beside this repository.
+# `--image-root` overrides this path on another machine.
+image_root: artifacts/student_corpus/mineru_images_candidates
+llm:
+  name: azure_openai
+  params:
+    json_mode: true
+    max_completion_tokens: 12000
+    # Successful validation calls are normally below 22s. Fail a wedged
+    # transport at 60s so one dead socket cannot stall a whole recovery wave.
+    timeout: 60.0
+    # All workers share one launch pacer. This avoids an instantaneous token
+    # burst while still allowing slow provider calls to overlap.
+    min_request_interval_seconds: 0.075
+    # The deployment reports 2,531,000 TPM. Reserve a 131,000-token safety
+    # margin; every worker shares this token-aware launch budget.
+    target_tpm: 2400000
+    # The global scheduler owns 429 recovery and preserves successful jobs.
+    # Disable opaque SDK retries so one worker is not hidden for a minute
+    # while the remaining pool continues overshooting the same quota.
+    max_retries: 0
+params:
+  # Stage 1 responses are compact JSON (observed max: 653 tokens across the
+  # validation checkpoints). Azure reserves prompt + requested output against
+  # TPM, so keeping the shared 12k answer allowance here causes avoidable 429s.
+  judgment_max_completion_tokens: 1024
+  answer_max_completion_tokens: 12000
+  # 1つのquery-paper pairの正常な一次判定は1回だけ。長い論文も分割せず、
+  # 全chunkを候補として保持したまま、この文字数内の単一コンテキストへ決定的に圧縮する。
+  # JSON修復・画像policy fallback・provider retryはあり得るが、論文分割による追加callは行わない。
+  max_paper_context_chars: 220000
+  # few-shot・query・画像mappingを含む最終Stage 1 user promptのhard guard。
+  max_judgment_prompt_chars: 240000
+  # 1回の判定に添付する論文画像の上限。AOAI側の1リクエスト上限と同じ。
+  max_paper_images: 10
+  answer_context_chars: 220000
+  # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
+  answer_neighbor_chunks: 0
+  max_answer_images: 10
+  # Stage 1 may over-accept candidates; Stage 2 must see at least one direct
+  # chunk from every accepted paper so it can apply all constraints itself.
+  # This is separate from the final submitted evidence-chunk limit below.
+  max_answer_papers: 50
+  # 回答部品へ直接対応する最小根拠だけを提出する。関連論文集合は別管理する。
+  max_evidence: 32
+  max_evidence_per_paper: 4

@@ -1,0 +1,21 @@
+{
+  "repository": "LitTraceQA/LitTraceQA",
+  "revision": "bd35dc14cf0483e0ffa51fa2a54d2689c13f9845",
+  "files": {
+    "data/validation.jsonl": "daa5ed246c00a5e4bb571843baa985b6256700da8a7ae5695bd642dfd4298e41",
+    "data/validation_inputs.jsonl": "62195b5ca2b4d0f16b07612bfd8169a753a48e171e196dafe47fb5433b61fc45",
+    "data/sample_submission.jsonl": "d64dbf95b5ddf1e68bb714f77e5a185e3cc3407469160e0c4e0d34041de7e251",
+    "data/test.jsonl": "0fef8024b90360978b14a33f7103c8b5ea926a6572a20acc142d7c78b8f28196",
+    "data/test_extra.jsonl": "604f00c63663f48b00837702b9e22b96255139f6624677c3dbdec97d5f1395af",
+    "data/paper_metadata.jsonl": "b498186449179daf4dfe6cb37d911010888b8d5a14fb3a2b38c1838fd1b62e5c",
+    "data/test_sample_submission.jsonl": "f2b0fcc705c5667f570da4cfb07db9c3f80ad5de693620d7c10dcfc838a17292",
+    "data/test_extra_sample_submission.jsonl": "371e2a91115edfb9cf81b9b88584c8bf3f22174bbc959836683074b011b79b09",
+    "docs/format.md": "bbc57dd8f6ddb6bc6f14e856cc8b77a30149dfab49dfa058768da46f8f829ee3",
+    "docs/evaluation.md": "dfaa7e5af4205405ff9aa34aad9be8707caacffa716007baca6b4c0d184621bc",
+    "schema/input.schema.json": "1c25a47597d6bbc6bb466610ba80bbe4ed5daed703f615ee7634f7a8f35c539b",
+    "schema/littraceqa.schema.json": "adcb3821706f1fbb63188d63d7090d0573ddd3085e80423c4946b429aef64609",
+    "schema/submission.schema.json": "33e084cc2b65f4101cf6160d233c9e29227befb80a4832186868054a14a75f70",
+    "scripts/evaluate.py": "847d0ce78d1016f5b7e1e36e804b9cba28f5a2f7ece6cf300250a0c69a2e5eeb",
+    "scripts/validate_submission.py": "1e2f2ec214d93cf57c05d492d93965d956bc2d9f8a4e5ac4fe6c7e71a7d8a833"
+  }
+}

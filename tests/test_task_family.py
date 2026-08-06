@@ -1,5 +1,4 @@
-"""本番入力（query_id / question / answer_types / table_schema の4つだけ）でも
-task_family を解決して cutoff を効かせられることを確認するテスト。"""
+"""task_family のない本番入力でも推定して cutoff を効かせられることを確認する。"""
 
 from __future__ import annotations
 
@@ -37,7 +36,7 @@ class _StubRetriever:
 
 
 def test_query_from_dict_accepts_production_input():
-    """本番入力の4フィールドだけで Query が作れ、欠けている2つは None になる。"""
+    """本番で欠ける開発用2フィールドは None になる。"""
     query = Query.from_dict(
         {
             "query_id": "q_20",

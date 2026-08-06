@@ -10,10 +10,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Reading-only MinerU + Azure OpenAI environment. This deliberately avoids the
+# heavy indexing/PDF-processing stack and does not run Azure Search or DI.
+pairwise_reader = [
+    "PyYAML>=6.0",
+    "openai>=1.109.1",
+    "pillow>=12.3.0",
+    "python-dotenv>=1.2.2",
+]
 # DIハイブリッド検索パイプライン(src/littraceqa/di_pipeline)本体。
-# `uv sync --extra di_pipeline` でインストールする。azure extra とは
-# 推移依存(marker-pdf -> pdftext -> pypdfium2==4.30.0固定)が衝突するため
-# 同時インストール不可（下の [tool.uv] conflicts 参照）。
+# `uv sync --extra di_pipeline` でインストールする。azure / pairwise_reader
+# extras とは推移依存の版が衝突するため同時インストール不可
+# （下の [tool.uv] conflicts 参照）。
 di_pipeline = [
     "PyYAML>=6.0",
     "marker-pdf>=1.10.2",
@@ -69,12 +77,17 @@ index-strategy = "unsafe-best-match"
 # 解決を邪魔しないよう新しい版に寄せておく。
 override-dependencies = ["anthropic>=0.69"]
 
-# di_pipeline (marker-pdf 経由で pypdfium2==4.30.0 に固定) と azure
-# (pypdfium2>=5.11.0 を要求) は依存が両立しないため、同時インストールを禁止する。
+# di_pipeline (marker-pdf 経由で Pillow<11 と pypdfium2==4.30.0 に固定)
+# は、画像を安全に実デコードする pairwise_reader (Pillow>=12.3) および
+# azure (pypdfium2>=5.11.0) と依存が両立しないため、同時インストールを禁止する。
 conflicts = [
     [
         { extra = "di_pipeline" },
         { extra = "azure" },
+    ],
+    [
+        { extra = "di_pipeline" },
+        { extra = "pairwise_reader" },
     ],
 ]
 

@@ -35,7 +35,7 @@ uv run python scripts/run_search.py \
   --process configs/process_style/mineru.yaml \
   --search configs/search_style/abstract_specter2_body_qwen3.yaml \
   --agent configs/agent_style/reading.yaml \
-  --queries data/validation_inputs.jsonl \
+  --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \
   --output predictions.jsonl \
   --build   # 初回のみ（前処理+索引構築）。2回目以降は外す（mineruは構築済みなので通常不要）
 ```
@@ -73,10 +73,25 @@ configs/
 │   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) +
 │         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う（デフォルト、構築済み）
 └── agent_style/
-    └── reading.yaml          : 分解→読解→不足分の再検索を繰り返す唯一の本命（デフォルト）
+    ├── reading.yaml          : 検索器と一体の旧reader
+    ├── aoai_pairwise_reader.yaml : 各query-paper pairを1回のbase AOAI callで判定→根拠回答（読解本命）
+    └── aoai_pairwise_reader_hybrid.yaml : 旧ファイル名互換（現在は上と同じ1回判定）
 ```
 
-推奨デフォルトの組み合わせ: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml` + `agent_style/reading.yaml`
+読解本命は `scripts/run_aoai_pairwise_reader.py` と
+`agent_style/aoai_pairwise_reader.yaml` を使う。PR #7の固定候補を読むだけで、
+この経路はDI・検索・rerank・再検索を行わない。論文を複数ファイルや
+複数promptへ分割せず、長い論文は単一コンテキストに圧縮して、1つの
+query-paper pairを1回のbase AOAI callで判定する。JSON修復・画像policy拒否時の
+text-only fallback・provider retryは失敗時のみで、論文分割のための追加callは行わない。
+最終prompt全体も `max_judgment_prompt_chars` で検査し、超える場合はAOAIを
+呼ぶ前に同じ単一contextをさらに決定的に圧縮する。
+
+公式の実行範囲は、開発用 `validation_inputs.jsonl` が55問、必須の本番
+`test.jsonl` が71問である。`test_extra.jsonl` の4,901問は任意の診断用であり、
+通常の本番実行に結合しない。5,027問を1つの必須データセットとして
+AOAIに送る運用はしない。
+検索比較だけを行う場合は従来どおり `scripts/run_search.py` を使う。
 
 ## 新しい手法を追加するとき
 

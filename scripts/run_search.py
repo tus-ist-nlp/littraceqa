@@ -4,13 +4,14 @@
 前処理・索引構築・検索・評価を一気通貫で実行する e2e スクリプト。
 
 使い方:
-    # 初回: 前処理 + 索引構築をしてから検索
+    # 初回: scripts/sync_official_release.py で公式入力を取得し、
+    # 前処理 + 索引構築をしてから検索
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --process configs/process_style/mineru.yaml \\
       --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
-      --queries data/validation_inputs.jsonl \\
+      --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \\
       --output predictions.jsonl \\
       --build
 
@@ -20,7 +21,7 @@
       --process configs/process_style/mineru.yaml \\
       --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
-      --queries data/validation_inputs.jsonl \\
+      --queries artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \\
       --output predictions.jsonl
 """
 
@@ -28,8 +29,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -41,8 +44,67 @@ except ImportError:
         return iterable
 
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
+from littraceqa.candidate_handoff import production_query_from_record
 from littraceqa.di_pipeline.config import build_pipeline, compose_config, load_config
 from littraceqa.di_pipeline.contracts import Chunk, Query
+
+
+def initialize_prediction_output(path: Path) -> None:
+    """Fail early and atomically replace any stale output with an empty JSONL."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        # Keep cleanup outside the ``with`` block. Windows does not allow an
+        # open NamedTemporaryFile to be unlinked, and attempting that would
+        # otherwise mask the original serialization/fsync error.
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.flush()
+            os.fsync(handle.fileno())
+        assert temporary_path is not None  # assigned immediately after open
+        os.replace(temporary_path, path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def append_prediction(path: Path, prediction: dict[str, Any]) -> None:
+    """Durably append one complete JSON record without rewriting prior rows.
+
+    Serialization happens before the destination is opened, so an invalid
+    prediction cannot alter an existing checkpoint. After writing, ``fsync``
+    makes every completed query durable. Ordinary write/fsync failures roll
+    the file back to its original byte length, preserving a valid JSONL made
+    only of previously completed rows.
+    """
+
+    payload = (json.dumps(prediction, ensure_ascii=False) + "\n").encode("utf-8")
+    with path.open("r+b", buffering=0) as handle:
+        handle.seek(0, os.SEEK_END)
+        original_size = handle.tell()
+        try:
+            remaining = memoryview(payload)
+            while remaining:
+                written = handle.write(remaining)
+                if not written:
+                    raise OSError("failed to append prediction checkpoint")
+                remaining = remaining[written:]
+            os.fsync(handle.fileno())
+        except BaseException:
+            # Keep the last fully persisted row as the recovery boundary. This
+            # also handles KeyboardInterrupt during a normal append operation.
+            handle.truncate(original_size)
+            os.fsync(handle.fileno())
+            raise
 
 
 def load_papers(path: Path) -> list[dict]:
@@ -67,20 +129,15 @@ def load_chunks(path: Path) -> list[Chunk]:
     return chunks
 
 
-# 本番の入力に実際に入っているフィールドはこの4つだけ（確定仕様）。
-# multiple_choice の options は**本番では与えられない**ので、ここには入れない。
-_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema")
-
-
 def load_mc_options(path: Path) -> dict[str, dict]:
-    """query_id -> multiple_choice の options だけを読む（gold は絶対に読まない）。
+    """Read public option text from current or legacy JSONL shapes.
 
-    本番入力に options は無い（上記 _PRODUCTION_FIELDS）。よってこれを結合した実行は
-    「選択肢を教えてもらえたら何点取れるか」を見る **oracle 設定** であり、本番の点数
-    ではない。gold（正解の選択肢）は読まないので答えそのものの漏洩ではないが、
-    41/55 問が multiple_choice で、うち21問は freeform すら無い（選択肢が無いと
-    そもそも文字を決められない）ため、点数への影響は大きい。
+    Current official input rows carry ``multiple_choice_options`` directly.
+    ``--options-file`` remains only as a migration aid for the repository's old
+    validation snapshot, whose public option text lived under
+    ``answer.multiple_choice.options``. The gold label is never read.
     """
+
     options_map: dict[str, dict] = {}
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -88,30 +145,46 @@ def load_mc_options(path: Path) -> dict[str, dict]:
             if not line:
                 continue
             record = json.loads(line)
-            mc = (record.get("answer") or {}).get("multiple_choice") or {}
-            options = mc.get("options") if isinstance(mc, dict) else None
-            if options:
-                options_map[record["query_id"]] = options
+            raw_options = record.get("multiple_choice_options")
+            if raw_options is None:
+                raw_options = record.get("options")
+            if raw_options is None:
+                answer = record.get("answer")
+                answer = answer if isinstance(answer, dict) else {}
+                mc = answer.get("multiple_choice")
+                mc = mc if isinstance(mc, dict) else {}
+                raw_options = mc.get("options")
+            if raw_options is None:
+                continue
+            parsed = Query.from_dict(
+                {
+                    "query_id": str(record.get("query_id") or "options"),
+                    "question": "options compatibility record",
+                    "answer_types": ["multiple_choice"],
+                    "options": raw_options,
+                }
+            )
+            options_map[str(record["query_id"])] = parsed.options or {}
     return options_map
 
 
 def load_queries(
-    path: Path, production_input: bool = False, options_path: Path | None = None
+    path: Path, production_input: bool = True, options_path: Path | None = None
 ) -> list[Query]:
     """クエリを読み込む。
 
-    production_input=True にすると、本番入力に無いフィールド
-    （task_family / primary_evidence_type / benchmark）を捨ててから Query を作る。
-    手元の validation_inputs.jsonl は55件すべてに task_family が入っているが、
-    本番入力には無い。task_family は提出論文数（cutoff）を決めるのに使うので、
-    これを与えたまま評価すると「正解を教えてもらった状態」の点数になり、
-    本番の点数と乖離する。比較実験ではこちらを使うこと。
+    既定では本番入力に無いフィールド
+    （task_family / primary_evidence_type など）を捨ててから Query を作る。
+    過去に使っていた開発用 validation スナップショットには55件すべてに
+    task_family が入っていたが、本番入力には無い。task_family は提出論文数
+    （cutoff）を決めるのに使うので、これを与えたまま評価すると「正解を
+    教えてもらった状態」の点数になり、本番の点数と乖離する。
+    production_input=False は過去実験の再現専用で、その結果を本番相当の
+    比較には使わないこと。
 
-    options_path があれば multiple_choice の選択肢だけを結合する（gold は読まない）。
-    ただし本番入力に options は無いので、これは oracle 設定であり本番の点数ではない。
-    production_input=True のときに自動で結合してはいけない（--production-input は
-    本番と情報量を揃えるためのフラグなので、そこで本番に無い情報を足し戻すと
-    フラグの意味が消える）。呼び出し側で options_path を渡さないこと。
+    現行の公式 multiple-choice 入力には ``multiple_choice_options`` が入る。
+    options_path は、これを持たない古いvalidationスナップショットへ公開済みの
+    選択肢本文だけを補う後方互換用で、gold label は読み込まない。
     """
     options_map = load_mc_options(options_path) if options_path else {}
     queries = []
@@ -121,12 +194,45 @@ def load_queries(
             if not line:
                 continue
             record = json.loads(line)
-            if production_input:
-                record = {k: v for k, v in record.items() if k in _PRODUCTION_FIELDS}
-            if not record.get("options") and record["query_id"] in options_map:
+            if (
+                record.get("multiple_choice_options") is None
+                and record.get("options") is None
+                and record["query_id"] in options_map
+            ):
                 record["options"] = options_map[record["query_id"]]
-            queries.append(Query.from_dict(record))
+            query = (
+                production_query_from_record(record)
+                if production_input
+                else Query.from_dict(record)
+            )
+            queries.append(query)
     return queries
+
+
+def should_evaluate_against_validation(
+    queries: list[Query], validation_gold_path: Path
+) -> bool:
+    """Return true only for the complete public validation query set.
+
+    The search runner also accepts held-out ``test`` and ``test_extra`` input
+    files.  Scoring either of those against validation gold silently produces
+    meaningless zero-heavy metrics and writes them to the experiment log.  A
+    partial validation run has the same dilution problem, so automatic scoring
+    is allowed only when both unique query-id sets match exactly.
+    """
+
+    if not validation_gold_path.is_file() or not queries:
+        return False
+    query_ids = [query.query_id for query in queries]
+    gold_ids = [
+        str(record.get("query_id") or "")
+        for record in load_papers(validation_gold_path)
+    ]
+    return (
+        len(query_ids) == len(set(query_ids))
+        and len(gold_ids) == len(set(gold_ids))
+        and set(query_ids) == set(gold_ids)
+    )
 
 
 def git_sha() -> str | None:
@@ -222,9 +328,8 @@ def log_experiment(
     全部同じ行に見えてしまい、後から「この数字はどのパラメータで出たのか」が
     追えない。compose_config() が解決した実際の値ごと残す。
 
-    options_joined は multiple_choice の選択肢を与えた oracle 実行かどうか。
-    本番では options が来ないので、True の行の multiple_choice_accuracy は
-    本番の点数として読んではいけない。後から見分けられるように残す。
+    options_joined は古い入力へ公開選択肢を互換結合した実行かどうか。
+    現行の公式入力は選択肢を直接含むが、由来を再現できるよう記録に残す。
     """
     path = Path("results/experiments.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,8 +446,8 @@ def write_report(
         lines.append(f"- git: `{sha[:12]}`")
     if options_joined:
         lines.append(
-            "- **[oracle] multiple_choice の選択肢を与えて実行**（本番入力に options は"
-            "無いため、multiple_choice_accuracy は本番の点数ではない）"
+            "- **[compat] 古い入力スナップショットへ公開済みの multiple-choice "
+            "options を補完**"
         )
     # yaml は後から書き換わるので、レポート単体で「どの値で回したか」が分かるように
     # 解決済みのパラメータをここに焼き込む。
@@ -377,7 +482,9 @@ def write_report(
     print(f"レポートを {path} に書き出しました")
 
 
-def main() -> None:
+def build_argument_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser with production-safe input projection by default."""
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--paths", required=True, help="configs/paths/*.yaml")
     parser.add_argument("--process", required=True, help="configs/process_style/*.yaml")
@@ -388,21 +495,31 @@ def main() -> None:
     parser.add_argument(
         "--build", action="store_true", help="前処理 + 索引構築をする（初回のみ）"
     )
-    parser.add_argument(
+    input_mode = parser.add_mutually_exclusive_group()
+    input_mode.add_argument(
         "--production-input",
+        dest="production_input",
         action="store_true",
-        help="task_family / primary_evidence_type を捨てて本番と同じ4フィールドで走らせる"
-        "（比較実験ではこちらを使う）",
+        default=True,
+        help="開発専用フィールドを捨てる（既定。本番相当の安全な入力契約）",
+    )
+    input_mode.add_argument(
+        "--include-development-fields",
+        dest="production_input",
+        action="store_false",
+        help="過去実験の再現専用。validation限定フィールドを残す（本番比較不可）",
     )
     parser.add_argument(
         "--options-file",
         default=None,
-        help="[oracle] multiple_choice の options を結合する jsonl（gold は読まない）。"
-        "本番入力に options は無いので、これを付けた実行は「選択肢を教えてもらえたら"
-        "何点取れるか」を見る ablation であり本番の点数ではない。"
-        "--production-input との併用時は無視される。",
+        help="古い入力に公開multiple-choice optionsだけを補う互換JSONL。"
+        "現行公式入力では不要。gold labelは読まない。",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_argument_parser().parse_args()
 
     cfg = compose_config(
         paths=load_config(args.paths),
@@ -456,51 +573,63 @@ def main() -> None:
                 sys.exit(1)
         print("読み込み完了")
 
-    # multiple_choice の options の入手先を決める。本番入力に options は無いので、
-    # 結合するのは常に oracle 設定（--options-file を明示したときだけ）。
-    # --production-input との併用は矛盾（本番と揃えるフラグなのに本番に無い情報を足す）
-    # なので、その場合は結合しない。
+    # 現行入力は multiple_choice_options を直接含む。options_path は古いvalidation
+    # スナップショットを移行する場合だけ使う。
     options_path = Path(args.options_file) if args.options_file else None
-    if options_path is not None and args.production_input:
-        print(
-            "警告: --production-input と --options-file は併用できません"
-            "（本番入力に options は無い）。options の結合をスキップします。",
-            file=sys.stderr,
-        )
-        options_path = None
     queries = load_queries(
         Path(args.queries),
         production_input=args.production_input,
         options_path=options_path,
     )
     if args.production_input:
-        print("本番と同じ4フィールド（query_id/question/answer_types/table_schema）で走らせます")
+        print(
+            "現行の公式入力契約（benchmark、multiple_choice_options、table_schemaの"
+            "条件付きフィールドを含む）で走らせます"
+        )
+    else:
+        print(
+            "[development-only] validation限定フィールドを残します。"
+            "この実行結果は本番相当の比較や公式提出には使えません。",
+            file=sys.stderr,
+        )
     if options_path is not None:
         n_opt = sum(1 for q in queries if q.options)
         print(
-            f"[oracle] multiple_choice options を {options_path} から結合しました"
-            f"（{n_opt}件）。本番では与えられないので、この点数は本番の点数ではありません。"
+            f"[compat] multiple-choice options を {options_path} から補完しました"
+            f"（optionsを持つ質問: {n_opt}件）"
         )
+    output_path = Path(args.output)
+    # Fail on an unwritable/malformed destination before the first (potentially
+    # paid) model call, and make it impossible to mistake an older completed
+    # file for the current run when the first query fails.
+    initialize_prediction_output(output_path)
     print(f"{len(queries)} 件の質問に対して検索中...")
 
     predictions = []
     for i, query in enumerate(queries):
         pred = agent.run(query)
-        predictions.append(pred.to_dict())
+        prediction = pred.to_dict()
+        append_prediction(output_path, prediction)
+        predictions.append(prediction)
         if (i + 1) % 10 == 0:
             print(f"  {i + 1}/{len(queries)} 完了")
 
-    output_path = Path(args.output)
-    with output_path.open("w", encoding="utf-8") as f:
-        for pred in predictions:
-            f.write(json.dumps(pred, ensure_ascii=False) + "\n")
     print(f"予測結果を {output_path} に書き出しました")
+
+    validation_gold_path = Path("data/validation.jsonl")
+    if not should_evaluate_against_validation(queries, validation_gold_path):
+        print(
+            "\n採点をスキップしました: 入力query_id集合が公開validation 55件と"
+            "完全一致しません。test/test_extraや部分実行をvalidation goldで採点・"
+            "実験記録しません。"
+        )
+        return
 
     print("\n採点中...")
     result = subprocess.run(
         [
             "uv", "run", "python", "scripts/evaluate.py",
-            "--gold", "data/validation.jsonl",
+            "--gold", str(validation_gold_path),
             "--pred", str(output_path),
         ],
         capture_output=True,
