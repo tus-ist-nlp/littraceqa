@@ -1,0 +1,6 @@
+# Evaluation-only paths for the prebuilt full-corpus indexes on this server.
+# Keep the indexes read-only and never use this file with run_search.py --build.
+pdf_dir: /data2/iseakira/pdfs/pdfs
+chunks_dir: /data2/kumagai/littraceqa_data/mineru_eval/accuracy_ladder_c27487/accuracy_27487/sparse/chunks
+index_dir: /data2/kumagai/littraceqa_data/mineru_eval/accuracy_ladder_c27487/accuracy_27487/sparse/index
+paper_metadata: data/paper_metadata.jsonl

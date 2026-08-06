@@ -210,6 +210,36 @@ def test_portable_retrieval_paths_resolve_all_prebuilt_indexes():
     )
 
 
+def test_server_shared_paths_resolve_read_only_prebuilt_indexes():
+    cfg = compose_config(
+        paths=load_config("configs/paths/server_shared_retrieval.yaml"),
+        process=load_config("configs/process_style/mineru.yaml"),
+        search=load_config(
+            "configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml"
+        ),
+        agent=_agent(),
+    )
+
+    index_root = (
+        "/data2/kumagai/littraceqa_data/mineru_eval/"
+        "accuracy_ladder_c27487/accuracy_27487/sparse/index/mineru"
+    )
+    index_dirs = {
+        item["name"]: item["params"]["index_dir"]
+        for item in cfg["retriever"]["indexers"]
+    }
+    assert index_dirs == {
+        "bm25s": f"{index_root}/bm25s",
+        "paper_bm25": f"{index_root}/paper_bm25",
+    }
+    assert (
+        cfg["retriever"]["retriever_wrapper"]["params"][
+            "paper_embedding_index_dir"
+        ]
+        == f"{index_root}/specter2_paper_embeddings"
+    )
+
+
 @pytest.mark.parametrize(
     "index_name",
     ["", "../outside", "/absolute", 42],

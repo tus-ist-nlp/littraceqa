@@ -207,6 +207,10 @@ uv run python scripts/eval_retrieval.py \
 
 For the pinned two-lane Qwen3 0.6B environment and prebuilt-index layout, see
 [`docs/retrieval_0p6b_reproduction.md`](../docs/retrieval_0p6b_reproduction.md).
+On the existing server, `paths/server_shared_retrieval.yaml` reads the
+completed indexes in place. It is evaluation-only and must never be passed to
+`run_search.py --build`; evaluation output must stay in the current user's
+home directory.
 
 組み合わせを変えたいときは、該当する引数だけ差し替える。他の3つはそのままでよい。
 
@@ -227,7 +231,9 @@ For the pinned two-lane Qwen3 0.6B environment and prebuilt-index layout, see
 ```
 configs/
 ├── paths/
-│   └── default.yaml
+│   ├── default.yaml
+│   ├── local_retrieval.yaml            : 他PCへ転送した索引用の相対パス
+│   └── server_shared_retrieval.yaml     : 同一サーバの構築済み索引（評価専用・読取専用）
 ├── process_style/
 │   ├── marker.yaml           : PDFをブロック単位でチャンク化
 │   ├── mineru.yaml           : MinerU。事前に scripts/run_mineru.py で変換が必要（デフォルト、構築済み）
