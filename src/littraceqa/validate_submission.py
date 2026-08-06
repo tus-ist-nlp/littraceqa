@@ -232,6 +232,9 @@ def check_table_rows(
         and column.get("name")
         and column.get("is_row_key")
     ]
+    # Match the official evaluator's implicit row-key rule when the schema does
+    # not declare one explicitly.
+    effective_row_keys = row_keys or columns[:1]
     types = {
         str(column.get("name")): str(column.get("type") or "")
         for column in table_schema
@@ -263,13 +266,33 @@ def check_table_rows(
             valid_types = valid_types and valid
         if not valid_types:
             checks.fail("table cell types match schema", query_id)
+        # Match the pinned evaluator: non-empty cells are required only for
+        # explicitly declared row keys. Its implicit first-column fallback still
+        # yields a valid tuple key even when that cell is empty.
         if any(row.get(column) in (None, "") for column in row_keys):
             checks.fail("table row keys non-empty", query_id)
             continue
-        key = tuple(str(row.get(column)) for column in (row_keys or columns))
+        # The official evaluator aligns rows after lowercasing, trimming outer
+        # quotes and collapsing whitespace.  Detect duplicates with that exact
+        # normalization; otherwise rows such as ``"X"`` and ``" x "`` pass this
+        # gate but silently overwrite one another in the scorer's dict.
+        # When no explicit row key is declared, the official scorer uses the
+        # first schema column (not the whole row) as its fallback key.
+        key = tuple(
+            _normalize_table_row_key(row.get(column))
+            for column in effective_row_keys
+        )
         if key in seen_keys:
             checks.fail("table row keys duplicate-free", query_id)
         seen_keys.add(key)
+
+
+def _normalize_table_row_key(value: Any) -> str:
+    """Normalize one row-key cell exactly like the pinned official evaluator."""
+
+    text = str(value or "").strip().lower()
+    text = text.strip("\"'“”‘’`")
+    return re.sub(r"\s+", " ", text)
 
 
 def check_evidence(

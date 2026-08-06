@@ -242,7 +242,10 @@ def _normalize_table_rows(rows: Any, schema: list[dict]) -> list[dict[str, Any]]
         for item in schema
         if isinstance(item, dict) and item.get("name") and item.get("is_row_key")
     ]
-    dedupe_columns = row_key_columns or columns
+    # Match the pinned official evaluator: when the schema declares no row key,
+    # the first schema column is the implicit key. Using the whole row here
+    # would serialize two rows that the scorer later collapses into one.
+    dedupe_columns = row_key_columns or columns[:1]
     output: list[dict[str, Any]] = []
     seen: set[tuple[str, ...]] = set()
     for row_index, row in enumerate(rows):

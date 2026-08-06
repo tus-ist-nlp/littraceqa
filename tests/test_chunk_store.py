@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
 
-from littraceqa.chunk_store import ChunkStore
+from littraceqa.chunk_store import IMAGE_PATH_ERROR_KEY, ChunkStore
+
+
+VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _record(paper_id: str, chunk_id: str, text: str = "本文", **metadata) -> dict:
@@ -118,7 +125,7 @@ def test_image_paths_can_be_rebased(tmp_path):
     image_root = tmp_path / "images"
     target = image_root / "p1" / "auto" / "images" / "figure.jpg"
     target.parent.mkdir(parents=True)
-    target.write_bytes(b"image")
+    target.write_bytes(VALID_PNG)
     record = _record("p1", "1", page=2)
     record["chunk_type"] = "figure"
     record["metadata"]["figure_id"] = "Figure 1"
@@ -129,3 +136,114 @@ def test_image_paths_can_be_rebased(tmp_path):
 
     assert len(figures) == 1
     assert figures[0]["metadata"]["image_path"] == str(target)
+
+
+def test_rebase_rejects_external_path_without_paper_id(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    image_root = tmp_path / "images"
+    image_root.mkdir()
+    external = tmp_path / "secret.png"
+    external.write_bytes(VALID_PNG)
+    record = _record("p1", "1", page=2)
+    record["chunk_type"] = "figure"
+    record["metadata"]["image_path"] = str(external)
+    _write_chunks(chunks, [record])
+
+    loaded = ChunkStore(chunks, image_root=image_root).load_paper("p1")[0]
+
+    assert loaded["metadata"]["image_path"] == ""
+    assert "paper_id/auto/images" in loaded["metadata"][IMAGE_PATH_ERROR_KEY]
+
+
+def test_image_path_is_disabled_without_explicit_image_root(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    external = tmp_path / "secret.png"
+    external.write_bytes(VALID_PNG)
+    record = _record("p1", "1", page=2)
+    record["chunk_type"] = "figure"
+    record["metadata"]["image_path"] = str(external)
+    _write_chunks(chunks, [record])
+
+    store = ChunkStore(chunks)
+    loaded = store.load_paper("p1")[0]
+
+    assert loaded["metadata"]["image_path"] == ""
+    assert "image_root is required" in loaded["metadata"][IMAGE_PATH_ERROR_KEY]
+    assert store.figures("p1") == []
+
+
+def test_rebase_rejects_dotdot_traversal(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    image_root = tmp_path / "images"
+    image_root.mkdir()
+    record = _record("p1", "1", page=2)
+    record["chunk_type"] = "figure"
+    record["metadata"]["image_path"] = "/old/p1/../../secret.png"
+    _write_chunks(chunks, [record])
+
+    loaded = ChunkStore(chunks, image_root=image_root).load_paper("p1")[0]
+
+    assert loaded["metadata"]["image_path"] == ""
+    assert "traversal" in loaded["metadata"][IMAGE_PATH_ERROR_KEY]
+
+
+def test_rebase_rejects_image_symlink_outside_root(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    image_root = tmp_path / "images"
+    image_dir = image_root / "p1" / "auto" / "images"
+    image_dir.mkdir(parents=True)
+    external = tmp_path / "secret.png"
+    external.write_bytes(VALID_PNG)
+    (image_dir / "figure.png").symlink_to(external)
+    record = _record("p1", "1", page=2)
+    record["chunk_type"] = "figure"
+    record["metadata"]["image_path"] = "/old/p1/auto/images/figure.png"
+    _write_chunks(chunks, [record])
+
+    loaded = ChunkStore(chunks, image_root=image_root).load_paper("p1")[0]
+
+    assert loaded["metadata"]["image_path"] == ""
+    assert "outside configured image_root" in loaded["metadata"][IMAGE_PATH_ERROR_KEY]
+
+
+def test_rebase_stores_canonical_path_when_image_root_is_a_symlink(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    real_root = tmp_path / "real-images"
+    target = real_root / "p1" / "auto" / "images" / "figure.png"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(VALID_PNG)
+    linked_root = tmp_path / "linked-images"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    record = _record("p1", "1", page=2)
+    record["chunk_type"] = "figure"
+    record["metadata"]["image_path"] = "/old/p1/auto/images/figure.png"
+    _write_chunks(chunks, [record])
+
+    loaded = ChunkStore(chunks, image_root=linked_root).load_paper("p1")[0]
+
+    assert loaded["metadata"]["image_path"] == str(target.resolve())
+
+
+def test_image_root_symlink_is_frozen_when_store_is_constructed(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    first_root = tmp_path / "first-images"
+    first_target = first_root / "p1" / "auto" / "images" / "figure.png"
+    first_target.parent.mkdir(parents=True)
+    first_target.write_bytes(VALID_PNG)
+    second_root = tmp_path / "second-images"
+    second_target = second_root / "p1" / "auto" / "images" / "figure.png"
+    second_target.parent.mkdir(parents=True)
+    second_target.write_bytes(VALID_PNG)
+    linked_root = tmp_path / "linked-images"
+    linked_root.symlink_to(first_root, target_is_directory=True)
+    record = _record("p1", "1", page=2)
+    record["chunk_type"] = "figure"
+    record["metadata"]["image_path"] = "/old/p1/auto/images/figure.png"
+    _write_chunks(chunks, [record])
+
+    store = ChunkStore(chunks, image_root=linked_root)
+    linked_root.unlink()
+    linked_root.symlink_to(second_root, target_is_directory=True)
+    loaded = store.load_paper("p1")[0]
+
+    assert loaded["metadata"]["image_path"] == str(first_target.resolve())

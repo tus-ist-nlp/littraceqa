@@ -84,8 +84,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional image mapping text to display in the rendered prompt",
     )
-    parser.add_argument("--batch-index", type=int, default=1)
-    parser.add_argument("--batch-count", type=int, default=1)
     parser.add_argument("--max-evidence", type=int, default=32)
     parser.add_argument("--max-evidence-per-paper", type=int, default=4)
     parser.add_argument(
@@ -102,8 +100,6 @@ def build_parser() -> argparse.ArgumentParser:
 def build_preview(args: argparse.Namespace) -> dict[str, Any]:
     """Build a serializable prompt preview from parsed command-line arguments."""
 
-    if args.batch_count < 1 or not 1 <= args.batch_index <= args.batch_count:
-        raise ValueError("batch index must be between 1 and batch count")
     if args.max_evidence < 1 or args.max_evidence_per_paper < 1:
         raise ValueError("evidence limits must be positive")
 
@@ -127,8 +123,6 @@ def build_preview(args: argparse.Namespace) -> dict[str, Any]:
             query_payload=query_payload,
             candidate_payload=candidate_payload,
             paper_text=paper_text,
-            batch_index=args.batch_index,
-            batch_count=args.batch_count,
             image_legend=image_legend,
         )
         prompts.append(_prompt_record("judgment", JUDGMENT_PROMPT_VERSION, prompt))
@@ -323,7 +317,7 @@ def _sample_paper_text(paper_id: str) -> str:
         "[chunk "
         + json.dumps(header, ensure_ascii=False, separators=(",", ":"))
         + "]\nSynthetic preview paper text. Supply --paper-text-file to inspect a "
-        "real formatted paper batch."
+        "real formatted selected paper context."
     )
 
 

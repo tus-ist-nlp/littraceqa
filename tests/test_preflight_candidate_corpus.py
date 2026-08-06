@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 from pathlib import Path
@@ -15,10 +16,28 @@ assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
+VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def _image_root(tmp_path: Path) -> Path:
+    return tmp_path / "trusted-images"
+
+
+def _image_path(tmp_path: Path, paper_id: str, filename: str) -> Path:
+    return _image_root(tmp_path) / paper_id / "auto" / "images" / filename
+
+
+def _image_store(chunks: Path, tmp_path: Path) -> ChunkStore:
+    return ChunkStore(chunks, image_root=_image_root(tmp_path))
+
 
 def test_preflight_reports_real_locator_and_image_coverage(tmp_path):
-    image = tmp_path / "figure.jpg"
-    image.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+    image = _image_path(tmp_path, "p1", "figure.jpg")
+    image.parent.mkdir(parents=True)
+    image.write_bytes(VALID_PNG)
     chunks = tmp_path / "chunks.jsonl"
     records = [
         {
@@ -41,7 +60,7 @@ def test_preflight_reports_real_locator_and_image_coverage(tmp_path):
         (CandidatePaper("p1", 1),),
     )
 
-    report, errors = MODULE.inspect_corpus([handoff], ChunkStore(chunks))
+    report, errors = MODULE.inspect_corpus([handoff], _image_store(chunks, tmp_path))
 
     assert errors == []
     assert report["chunk_types"] == {"figure": 1}
@@ -105,7 +124,8 @@ def test_preflight_checks_full_corpus_against_canonical_metadata(tmp_path):
 
 
 def test_preflight_rejects_corrupt_image_for_figure_query(tmp_path):
-    image = tmp_path / "figure.jpg"
+    image = _image_path(tmp_path, "p1", "figure.jpg")
+    image.parent.mkdir(parents=True)
     image.write_bytes(b"not-an-image")
     chunks = tmp_path / "chunks.jsonl"
     chunks.write_text(
@@ -130,7 +150,9 @@ def test_preflight_rejects_corrupt_image_for_figure_query(tmp_path):
         (CandidatePaper("p1", 1),),
     )
 
-    report, errors = MODULE.inspect_corpus([handoff], ChunkStore(chunks), {"p1"})
+    report, errors = MODULE.inspect_corpus(
+        [handoff], _image_store(chunks, tmp_path), {"p1"}
+    )
 
     assert errors
     assert report["image_paths"]["unreadable"] == 1
@@ -140,7 +162,7 @@ def test_preflight_rejects_corrupt_image_for_figure_query(tmp_path):
     # declared image set is unreadable remains a non-overridable root/data error.
     allowed_report, allowed_errors = MODULE.inspect_corpus(
         [handoff],
-        ChunkStore(chunks),
+        _image_store(chunks, tmp_path),
         {"p1"},
         allow_missing_figure_images=True,
     )
@@ -157,7 +179,7 @@ def test_preflight_rejects_corrupt_image_for_figure_query(tmp_path):
 
 
 def test_preflight_can_explicitly_warn_for_missing_figure_images(tmp_path):
-    missing_image = tmp_path / "missing-figure.png"
+    missing_image = _image_path(tmp_path, "p1", "missing-figure.png")
     chunks = tmp_path / "chunks.jsonl"
     chunks.write_text(
         json.dumps(
@@ -180,7 +202,7 @@ def test_preflight_can_explicitly_warn_for_missing_figure_images(tmp_path):
         Query("q1", "What does Figure 1 show?", ["freeform"], None),
         (CandidatePaper("p1", 1),),
     )
-    store = ChunkStore(chunks)
+    store = _image_store(chunks, tmp_path)
 
     strict_report, strict_errors = MODULE.inspect_corpus(
         [handoff], store, {"p1"}
@@ -279,7 +301,7 @@ def test_preflight_source_word_hints_are_warning_only(tmp_path):
     assert report["queries_without_required_visual_images"] == []
 
 
-def test_global_image_path_failure_is_fatal_even_for_nonvisual_query_and_override(
+def test_missing_image_root_is_fatal_even_for_nonvisual_query_and_override(
     tmp_path,
 ):
     chunks = tmp_path / "chunks.jsonl"
@@ -314,15 +336,59 @@ def test_global_image_path_failure_is_fatal_even_for_nonvisual_query_and_overrid
 
     assert report["visual_image_required_queries"] == []
     assert len(errors) == 1
-    assert "all declared table/figure images are unavailable" in errors[0]
-    assert "cannot be overridden" in errors[0]
+    assert "image paths are unsafe" in errors[0]
+    assert report["image_paths"]["unsafe"] == 1
+    assert "image_root is required" in report["image_paths"]["unsafe_examples"][0][
+        "reason"
+    ]
+
+
+def test_preflight_fails_for_image_path_outside_configured_root(tmp_path):
+    image_root = tmp_path / "trusted-images"
+    image_root.mkdir()
+    external = tmp_path / "external.png"
+    external.write_bytes(VALID_PNG)
+    chunks = tmp_path / "chunks.jsonl"
+    chunks.write_text(
+        json.dumps(
+            {
+                "paper_id": "p1",
+                "chunk_id": "p1#figure",
+                "chunk_type": "figure",
+                "text": "Figure 1",
+                "metadata": {
+                    "page": 1,
+                    "figure_id": "Figure 1",
+                    # No p1/auto/images tail: this must never be retained or sent.
+                    "image_path": str(external),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    handoff = CandidateHandoff(
+        Query("q1", "What value is reported?", ["freeform"], None),
+        (CandidatePaper("p1", 1),),
+    )
+
+    store = ChunkStore(chunks, image_root=image_root)
+    loaded = store.load_paper("p1")[0]
+    report, errors = MODULE.inspect_corpus([handoff], store, {"p1"})
+
+    assert loaded["metadata"]["image_path"] == ""
+    assert report["image_paths"]["unsafe"] == 1
+    assert report["image_paths"]["unsafe_examples"][0]["path"] == str(external)
+    assert any("image paths are unsafe" in error for error in errors)
 
 
 def test_isolated_corrupt_image_is_warning_for_nonvisual_query(tmp_path):
-    corrupt = tmp_path / "corrupt.png"
+    corrupt = _image_path(tmp_path, "p1", "corrupt.png")
+    corrupt.parent.mkdir(parents=True)
     corrupt.write_bytes(b"not-an-image")
-    readable = tmp_path / "readable.png"
-    readable.write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+    readable = _image_path(tmp_path, "p2", "readable.png")
+    readable.parent.mkdir(parents=True)
+    readable.write_bytes(VALID_PNG)
     chunks = tmp_path / "chunks.jsonl"
     records = [
         {
@@ -357,7 +423,7 @@ def test_isolated_corrupt_image_is_warning_for_nonvisual_query(tmp_path):
     )
 
     report, errors = MODULE.inspect_corpus(
-        [handoff], ChunkStore(chunks), {"p1", "p2"}
+        [handoff], _image_store(chunks, tmp_path), {"p1", "p2"}
     )
 
     assert errors == []
@@ -366,8 +432,9 @@ def test_isolated_corrupt_image_is_warning_for_nonvisual_query(tmp_path):
 
 
 def test_isolated_missing_visual_image_can_be_explicitly_allowed(tmp_path):
-    readable_table = tmp_path / "table.png"
-    readable_table.write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+    readable_table = _image_path(tmp_path, "p2", "table.png")
+    readable_table.parent.mkdir(parents=True)
+    readable_table.write_bytes(VALID_PNG)
     chunks = tmp_path / "chunks.jsonl"
     records = [
         {
@@ -378,7 +445,7 @@ def test_isolated_missing_visual_image_can_be_explicitly_allowed(tmp_path):
             "metadata": {
                 "page": 2,
                 "figure_id": "Figure 4",
-                "image_path": str(tmp_path / "missing-figure.png"),
+                "image_path": str(_image_path(tmp_path, "p1", "missing-figure.png")),
             },
         },
         {
@@ -402,11 +469,11 @@ def test_isolated_missing_visual_image_can_be_explicitly_allowed(tmp_path):
     )
 
     strict_report, strict_errors = MODULE.inspect_corpus(
-        [handoff], ChunkStore(chunks), {"p1", "p2"}
+        [handoff], _image_store(chunks, tmp_path), {"p1", "p2"}
     )
     allowed_report, allowed_errors = MODULE.inspect_corpus(
         [handoff],
-        ChunkStore(chunks),
+        _image_store(chunks, tmp_path),
         {"p1", "p2"},
         allow_missing_figure_images=True,
     )
@@ -426,6 +493,10 @@ def test_visual_image_requirement_is_conservative():
         "How many panels are visible?",
         "What value is visible in the image?",
         "What is the plotted ratio at the lowest difficulty?",
+        (
+            "Which NAACL 2025 papers explicitly mention or reference MCTS "
+            "(Monte Carlo Tree Search) in their primary method/framework figure?"
+        ),
     ]
     not_required = [
         "What speedup is reported for 2K image generation?",
@@ -433,6 +504,7 @@ def test_visual_image_requirement_is_conservative():
         "Which image dataset is used for training?",
         "Across these graph-focused works, how many categories are reported?",
         "What value does the paper report?",
+        "Which method improves performance in figure generation?",
     ]
 
     assert all(requires_visual_image(question) for question in required)

@@ -9,6 +9,7 @@ from littraceqa.di_pipeline.contracts import Query
 from littraceqa.pairwise_prompts import (
     ANSWER_EXAMPLES,
     ANSWER_PROMPT_VERSION,
+    JUDGMENT_EXAMPLES,
     JUDGMENT_PROMPT_VERSION,
     example_manifest,
     render_answer_prompt,
@@ -22,8 +23,8 @@ _COMPLETE_RESPONSE_MARKER = "Complete response object:\n"
 _COMPLETE_RESPONSE_CASES = (
     (
         "A1_reported_over_recomputed",
-        "multiple_choice",
-        {"answer.multiple_choice"},
+        "freeform+multiple_choice",
+        {"answer.freeform.text", "answer.multiple_choice"},
     ),
     (
         "A2_yes_no_polarity",
@@ -97,8 +98,8 @@ def test_few_shot_selection_is_stable_bounded_and_query_aware():
     judgment_ids = [item.example_id for item in judgment_first]
     answer_ids = [item.example_id for item in answer]
     assert judgment_first == judgment_second
-    assert 6 <= len(judgment_ids) <= 9
-    assert 9 <= len(answer_ids) <= 12
+    assert 3 <= len(judgment_ids) <= 9
+    assert 4 <= len(answer_ids) <= 12
     assert len(judgment_ids) == len(set(judgment_ids))
     assert len(answer_ids) == len(set(answer_ids))
     assert "J1_wrong_owner_same_figure_number" in judgment_ids
@@ -114,7 +115,188 @@ def test_table_query_selects_native_type_and_multi_paper_examples():
 
     assert "A9_native_table_types" in ids
     assert "A8_multi_paper_owner_completeness" in ids
-    assert "A13_wrong_setting_omitted" in ids
+    assert "A13_wrong_setting_omitted" not in ids
+
+    constrained_query = Query(
+        "constrained_table",
+        "Across datasets, return each model row only for the requested split.",
+        ["table"],
+        table_schema=_table_query().table_schema,
+    )
+    constrained_ids = [
+        item.example_id for item in selected_answer_examples(constrained_query)
+    ]
+    assert "A13_wrong_setting_omitted" in constrained_ids
+
+
+def test_specialised_examples_require_all_tags_and_avoid_substring_false_positives():
+    images_query = Query(
+        "images_model",
+        "Which Images model reports the requested value?",
+        ["freeform"],
+    )
+    judgment_ids = {
+        item.example_id for item in selected_judgment_examples(images_query)
+    }
+    assert "J1_wrong_owner_same_figure_number" not in judgment_ids
+    assert "J6_visual_panel_count" not in judgment_ids
+
+    reference_free_query = Query(
+        "reference_free",
+        "Across reference-free methods, list each method.",
+        ["table"],
+        table_schema=[
+            {"name": "Method", "type": "string", "is_row_key": True}
+        ],
+    )
+    judgment_ids = {
+        item.example_id
+        for item in selected_judgment_examples(reference_free_query)
+    }
+    answer_ids = {
+        item.example_id for item in selected_answer_examples(reference_free_query)
+    }
+    assert "J7_reference_identity" not in judgment_ids
+    assert "A6_distinct_citations" not in answer_ids
+
+
+def test_paper_title_ending_in_images_is_not_treated_as_a_visual_request():
+    query = Query(
+        "q_title_images",
+        (
+            "How many parentheses are in Equation 6 of Continuous Latent "
+            "Dynamical Models from Images?"
+        ),
+        ["freeform", "multiple_choice"],
+        options={"A": "2", "B": "4", "C": "6", "D": "8"},
+    )
+
+    judgment_ids = {
+        item.example_id for item in selected_judgment_examples(query)
+    }
+    answer_ids = {item.example_id for item in selected_answer_examples(query)}
+
+    assert "J6_visual_panel_count" not in judgment_ids
+    assert "A3_count_consistency" not in answer_ids
+    assert "A2_yes_no_polarity" not in answer_ids
+    assert "A7_literal_parenthesis_pairs" in answer_ids
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How many parameters does the image generation model use?",
+        "How many layers does the graph neural network contain?",
+        "How many stages does the figure generation model use?",
+        "What is the score in the image-missing condition?",
+        "Which encoder builds the KNN graph in the graph-score method?",
+        "What decrease does the refined FLUX image show relative to its origin?",
+        "How many frames are used in the chart-attribution annotation pipeline?",
+    ],
+)
+def test_visual_topic_terms_do_not_select_visual_count_examples(question):
+    query = Query(
+        "q_visual_topic",
+        question,
+        ["freeform", "multiple_choice"],
+        options={"A": "2", "B": "4"},
+    )
+
+    judgment_ids = {
+        item.example_id for item in selected_judgment_examples(query)
+    }
+    answer_ids = {item.example_id for item in selected_answer_examples(query)}
+
+    assert "J6_visual_panel_count" not in judgment_ids
+    assert "A3_count_consistency" not in answer_ids
+
+
+def test_explicit_image_inspection_selects_visual_count_examples():
+    query = Query(
+        "q_explicit_image",
+        "How many bars are visible in the provided image?",
+        ["freeform", "multiple_choice"],
+        options={"A": "2", "B": "4"},
+    )
+
+    judgment_ids = {
+        item.example_id for item in selected_judgment_examples(query)
+    }
+    answer_ids = {item.example_id for item in selected_answer_examples(query)}
+
+    assert "J6_visual_panel_count" in judgment_ids
+    assert "A3_count_consistency" in answer_ids
+
+
+def test_primary_framework_figure_selects_visual_examples():
+    query = Query(
+        "q_primary_figure",
+        "Which papers mention search in their primary method/framework figure?",
+        ["freeform", "table"],
+        table_schema=[
+            {"name": "Paper Title", "type": "string", "is_row_key": True}
+        ],
+    )
+
+    judgment_ids = {
+        item.example_id for item in selected_judgment_examples(query)
+    }
+    answer_ids = {item.example_id for item in selected_answer_examples(query)}
+
+    assert "J1_wrong_owner_same_figure_number" in judgment_ids
+    assert "J4_multi_paper_one_complete_row" in judgment_ids
+    assert "A14_combined_freeform_table" in answer_ids
+
+
+def test_combined_argmax_query_selects_header_alignment_example():
+    query = Query(
+        "q_argmax",
+        (
+            "In the Agent paper, which backbone model achieves the highest "
+            "performance on the API benchmark when integrated with Agent?"
+        ),
+        ["freeform", "multiple_choice"],
+        options={
+            "A": "Backbone-A",
+            "B": "Backbone-B",
+            "C": "Backbone-C",
+        },
+    )
+
+    answer_ids = {item.example_id for item in selected_answer_examples(query)}
+
+    assert "A5_argmax_header_alignment" in answer_ids
+
+
+def test_visual_count_examples_teach_units_without_validation_total():
+    judgment = next(
+        item for item in JUDGMENT_EXAMPLES if item.example_id == "J6_visual_panel_count"
+    )
+    answer = next(
+        item for item in ANSWER_EXAMPLES if item.example_id == "A3_count_consistency"
+    )
+
+    for body in (judgment.body, answer.body):
+        assert "independent coordinate-axes" in body
+        assert "eight" not in body.casefold()
+        assert '"result":8' not in body
+    assert "five independent plot frames" in judgment.body
+    assert '"result":5' in answer.body
+    assert "answer.freeform.text" in answer.body
+    assert "answer.multiple_choice" in answer.body
+
+
+def test_argmax_example_uses_fully_synthetic_labels_and_binds_both_answers():
+    example = next(
+        item
+        for item in ANSWER_EXAMPLES
+        if item.example_id == "A5_argmax_header_alignment"
+    )
+
+    assert "Cedar=17, Flint=24, Quartz=19" in example.body
+    assert "Backbone-A" not in example.body
+    assert "answer.freeform.text" in example.body
+    assert "answer.multiple_choice" in example.body
 
 
 @pytest.mark.parametrize(
@@ -159,10 +341,11 @@ def test_complete_stage_two_examples_are_parseable_and_internally_linked(
     derivation = payload["derivation"]
     assert derivation["facts"]
     assert isinstance(derivation["operations"], list)
+    assert derivation["answer_bindings"]
     assert derivation["final_semantic_answer"]
     for fact in derivation["facts"]:
         assert fact["id"]
-        assert fact["value_kind"] in {"reported", "computed", "visual", "text"}
+        assert fact["value_kind"] in {"reported", "visual", "text"}
         assert fact["paper_id"] in paper_chunks
         assert set(fact["chunk_ids"]).issubset(paper_chunks[fact["paper_id"]])
 
@@ -184,16 +367,16 @@ def test_complete_stage_two_examples_cover_requested_reasoning_patterns():
     assert reported["derivation"]["operations"] == []
     assert reported["answer"]["multiple_choice"] == {
         "label": "B",
-        "selected_option_text": "12.30",
+        "selected_option_text": "7.42",
     }
     assert comparison["derivation"]["operations"] == [
         {
             "id": "op_compare",
             "kind": "compare",
-            "fact_ids": ["f_category_a", "f_category_b"],
-            "left": 30,
-            "operator": ">",
-            "right": 21,
+            "fact_ids": ["f_category_l", "f_category_r"],
+            "left": 44,
+            "operator": "<",
+            "right": 51,
             "result": True,
             "answer_binding": {
                 "answer_path": "answer.multiple_choice.selected_option_text",
@@ -203,8 +386,8 @@ def test_complete_stage_two_examples_cover_requested_reasoning_patterns():
         }
     ]
     assert multi_table["answer"]["table"]["rows"] == [
-        {"Method": "Method-A", "Objective": "Eq. 3"},
-        {"Method": "Method-B", "Objective": "Eq. 7"},
+        {"System": "CedarNet", "Vocabulary Size": 48000},
+        {"System": "FlintNet", "Vocabulary Size": 65536},
     ]
     assert five_option["answer"]["multiple_choice"] == {
         "label": "E",
@@ -236,15 +419,15 @@ def test_missing_image_example_is_a_complete_non_ready_contract():
             Query(
                 "syn_a1_q",
                 "Which improvement is reported?",
-                ["multiple_choice"],
-                options={"A": "12.31", "B": "12.30", "C": "11.30"},
+                ["freeform", "multiple_choice"],
+                options={"A": "7.43", "B": "7.42", "C": "6.42"},
             ),
         ),
         (
             "A2_yes_no_polarity",
             Query(
                 "syn_a2_q",
-                "Does A have more entries than B?",
+                "Does Category L have fewer entries than Category R?",
                 ["multiple_choice"],
                 options={"A": "Yes", "B": "No"},
             ),
@@ -253,11 +436,15 @@ def test_missing_image_example_is_a_complete_non_ready_contract():
             "A8_multi_paper_owner_completeness",
             Query(
                 "syn_a8_q",
-                "Return objective equations.",
+                "Return tokenizer vocabulary sizes.",
                 ["table"],
                 table_schema=[
-                    {"name": "Method", "type": "string", "is_row_key": True},
-                    {"name": "Objective", "type": "string", "is_row_key": False},
+                    {"name": "System", "type": "string", "is_row_key": True},
+                    {
+                        "name": "Vocabulary Size",
+                        "type": "number",
+                        "is_row_key": False,
+                    },
                 ],
             ),
         ),
@@ -320,18 +507,21 @@ def test_judgment_render_places_examples_before_live_data_and_marks_no_images():
             "year": 2025,
         },
         paper_text="[chunk live#fig4]\nLIVE_PAPER_SENTINEL",
-        batch_index=2,
-        batch_count=3,
         image_legend="",
     )
 
-    assert JUDGMENT_PROMPT_VERSION.endswith("fewshot")
+    assert JUDGMENT_PROMPT_VERSION == (
+        "pairwise-paper-judge-v11-single-selected-context"
+    )
     assert prompt.index("SYNTHETIC FEW-SHOT EXAMPLES") < prompt.index("LIVE TASK")
     assert prompt.index("LIVE TASK") < prompt.index("LIVE_PAPER_SENTINEL")
     assert '"multiple_choice_options"' in prompt
     assert '"label":"E","text":"10"' in prompt
     assert '"paper_id":"paper_live"' in prompt
-    assert "Paper batch: 2/3" in prompt
+    assert "Selected paper context" in prompt
+    assert "Content not shown here is unknown" in prompt
+    assert "do not infer or cite it" in prompt
+    assert "Paper batch:" not in prompt
     assert "Actually attached image mapping: NONE" in prompt
     assert "Do not claim visual inspection" in prompt
 
@@ -354,7 +544,9 @@ def test_answer_render_includes_answer_shape_limits_and_actual_image_mapping():
         max_evidence_per_paper=2,
     )
 
-    assert ANSWER_PROMPT_VERSION.endswith("fewshot")
+    assert ANSWER_PROMPT_VERSION == (
+        "accepted-evidence-answer-v19-observable-query-tags"
+    )
     assert prompt.index("SYNTHETIC FEW-SHOT EXAMPLES") < prompt.index("LIVE TASK")
     assert '"Passed":false' in prompt
     assert '"Score":0' in prompt

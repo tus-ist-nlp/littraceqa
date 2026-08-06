@@ -41,6 +41,15 @@ Record = dict[str, Any]
 # 画像を持つのはこの2種だけ（equation_algorithm は image_path を持たない）。
 IMAGE_CHUNK_TYPES = ("table", "figure")
 
+# ``image_path`` comes from the transferred MinerU corpus and is therefore data,
+# not a trusted local path. Unsafe source paths are cleared and the reason is
+# retained for the corpus preflight report. In particular, paths are disabled
+# entirely unless the caller supplies an explicit trusted image root.
+# Keeping these keys in one module ensures every consumer recognizes the same
+# fail-closed marker without importing the AOAI-specific reader.
+IMAGE_PATH_ERROR_KEY = "_littraceqa_image_path_error"
+IMAGE_PATH_ORIGINAL_KEY = "_littraceqa_original_image_path"
+
 # 索引ファイルのフォーマット版。構造を変えたら上げる（古い索引は自動で作り直す）。
 _INDEX_VERSION = 1
 
@@ -67,7 +76,15 @@ class ChunkStore:
             if index_path is not None
             else self.chunks_path.with_suffix(self.chunks_path.suffix + ".offsets.json")
         )
-        self.image_root = Path(image_root) if image_root is not None else None
+        # Freeze the configured trust boundary at construction time.  Keeping a
+        # relative path or a root symlink here would let a later cwd change or
+        # symlink retargeting silently change which files a long-running reader
+        # is permitted to attach.
+        self.image_root = (
+            Path(image_root).expanduser().resolve()
+            if image_root is not None
+            else None
+        )
         self._offsets: dict[str, tuple[int, int]] | None = None
         self._offset_source: dict[str, int] | None = None
 
@@ -222,9 +239,11 @@ class ChunkStore:
             raise ValueError(
                 f"offset索引とコーパスのpaper_idが一致しない: paper_id={paper_id!r}"
             ) from invalid_reason
-        if self.image_root is not None:
-            for chunk in chunks:
-                _rebase_image_path(chunk, self.image_root)
+        # Never expose an image path copied verbatim from the corpus. Without
+        # an explicit trusted root there is no safe way to distinguish a
+        # legitimate MinerU image from an arbitrary readable local file.
+        for chunk in chunks:
+            _prepare_image_path(chunk, self.image_root)
         return chunks
 
     def _rebuild_cached_index(self) -> None:
@@ -253,10 +272,13 @@ class ChunkStore:
         切り出しが無かった table）。存在チェックを通すのは、転送や
         image_root の指定ミスに気づかず空画像を VLM に渡さないため。
         """
+        # Local import avoids a module cycle: ``mineru_record`` uses the Record
+        # alias and source helpers from this module.
+        from littraceqa.mineru_record import readable_image_path
+
         found: list[Record] = []
         for chunk in self.iter_chunks(paper_id, IMAGE_CHUNK_TYPES):
-            path = (chunk.get("metadata") or {}).get("image_path")
-            if path and Path(path).exists():
+            if readable_image_path(chunk):
                 found.append(chunk)
         return found
 
@@ -315,22 +337,93 @@ def _decode_offsets(
     return decoded
 
 
-def _rebase_image_path(chunk: Record, image_root: Path) -> None:
-    """image_path の `{mineru出力}/{paper_id}/...` の前半を差し替える。
+def _prepare_image_path(chunk: Record, image_root: Path | None) -> None:
+    """Replace an untrusted corpus path with one derived from ``image_root``.
 
-    パスは `{root}/{paper_id}/auto/images/{sha256}.jpg` の形をしているので、
-    paper_id のディレクトリ成分を探して、その手前を丸ごと入れ替える。
-    root の文字列を前方一致で削るより、転送先の階層が違っても効く。
+    The only accepted source shape is
+    ``.../{paper_id}/auto/images/{filename}``. The prefix is discarded, and
+    the trusted root plus those four validated components is used instead.
+    With no root, every declared image is rejected rather than opening an
+    arbitrary absolute path embedded in the JSONL.
     """
     metadata = chunk.get("metadata")
     if not isinstance(metadata, dict):
         return
+    # These internal fields must never be trusted when they already exist in
+    # the source JSONL.
+    metadata.pop(IMAGE_PATH_ERROR_KEY, None)
+    metadata.pop(IMAGE_PATH_ORIGINAL_KEY, None)
     raw = metadata.get("image_path")
-    if not raw:
+    if raw in (None, ""):
         return
-    parts = Path(raw).parts
+    if image_root is None:
+        _reject_image_path(
+            metadata,
+            raw,
+            "image_root is required; corpus image_path values are untrusted",
+        )
+        return
+    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        _reject_image_path(metadata, raw, "image_path must be a non-empty string")
+        return
+
+    raw_path = Path(raw)
+    parts = raw_path.parts
+    if ".." in parts:
+        _reject_image_path(metadata, raw, "image_path contains '..' traversal")
+        return
     paper_id = chunk.get("paper_id")
-    if paper_id not in parts:
+    if not isinstance(paper_id, str) or not paper_id:
+        _reject_image_path(metadata, raw, "record has no valid paper_id")
         return
-    tail = parts[parts.index(paper_id) :]
-    metadata["image_path"] = str(image_root.joinpath(*tail))
+
+    # The student corpus uses exactly
+    #   {old_root}/{paper_id}/auto/images/{filename}
+    # Do not append an arbitrary tail from the corpus to a trusted root.  In
+    # particular, requiring this shape prevents both missing-paper-id absolute
+    # paths and path traversal hidden after the paper-id component.
+    matching_tails = [
+        parts[index:]
+        for index, part in enumerate(parts)
+        if part == paper_id
+        and len(parts[index:]) == 4
+        and parts[index + 1 : index + 3] == ("auto", "images")
+    ]
+    if len(matching_tails) != 1:
+        _reject_image_path(
+            metadata,
+            raw,
+            "image_path must end with paper_id/auto/images/filename",
+        )
+        return
+    filename = matching_tails[0][-1]
+    if filename in {"", ".", ".."}:
+        _reject_image_path(metadata, raw, "image filename is invalid")
+        return
+
+    trusted_root = image_root.expanduser().resolve()
+    rebased = trusted_root / paper_id / "auto" / "images" / filename
+    # ``resolve(strict=False)`` follows every existing parent/final symlink but
+    # still works for a legitimately missing image.  A symlink escaping the
+    # configured image root is unsafe even if its target is a valid image.
+    resolved = rebased.resolve(strict=False)
+    if not resolved.is_relative_to(trusted_root):
+        _reject_image_path(
+            metadata,
+            raw,
+            "rebased image_path resolves outside configured image_root",
+        )
+        return
+    # Store the canonical target, not the possibly relative/symlinked root that
+    # the caller supplied. This keeps later validation independent of cwd and
+    # prevents a root symlink retargeted after loading from changing which file
+    # the already-hydrated record names.
+    metadata["image_path"] = str(resolved)
+
+
+def _reject_image_path(metadata: dict[str, Any], raw: Any, reason: str) -> None:
+    """Make an unsafe corpus path impossible for downstream code to open."""
+
+    metadata[IMAGE_PATH_ORIGINAL_KEY] = str(raw)
+    metadata[IMAGE_PATH_ERROR_KEY] = reason
+    metadata["image_path"] = ""

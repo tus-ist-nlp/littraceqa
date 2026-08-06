@@ -16,11 +16,11 @@ uv sync
 The base install covers the dataset scripts (`scripts/`) and the
 provider-agnostic tools (`littraceqa.extract_pdf_archives`,
 `littraceqa.fix_chunk_locators`, `littraceqa.validate_submission`,
-`littraceqa.compare_runs`). The heavier legacy pipelines have their own
-optional extras, and **`di_pipeline` and `azure` are mutually exclusive**
-(`di_pipeline` pins `pypdfium2==4.30.0` transitively via `marker-pdf`, which
-conflicts with `azure`'s `pypdfium2>=5.11.0`; `uv` will refuse to resolve
-both extras together):
+`littraceqa.compare_runs`). The heavier pipelines have their own optional
+extras. **Do not combine `di_pipeline` with either `azure` or
+`pairwise_reader`**: its transitive pins conflict with the newer PDF/image
+dependencies in those reading environments, and `uv` intentionally refuses
+those combinations. `azure` and `pairwise_reader` may be combined:
 
 ```bash
 uv sync --extra azure         # Azure RAG pipeline (baseline)
@@ -87,6 +87,11 @@ The released splits at the pinned revision are:
 - `test.jsonl`: 71 required leaderboard questions;
 - `test_extra.jsonl`: 4,901 optional diagnostic questions.
 
+The required production target is the 71-question `test.jsonl`, not all 5,027
+rows obtained by adding validation, test, and test_extra. Do not concatenate the
+three splits. Run the optional 4,901-question `test_extra` only when the team has
+an explicit diagnostic objective and has approved its separate AOAI budget.
+
 `test` scores papers, evidence, and answers. `test_extra` scores papers and
 answers, so its uploaded evidence field is optional. The reader still requires
 source-grounded papers/chunks internally for both splits; `--evidence-policy`
@@ -120,11 +125,11 @@ git show a020604:data/validation_with_candidates.jsonl \
 
 For every question, the reader:
 
-1. hydrates each candidate paper from MinerU and asks AOAI whether that exact
-   paper supplies an answer, a required partial row/operand, a constraint, or
-   only a distractor/mention;
+1. hydrates each candidate paper from MinerU and makes one base AOAI call to ask
+   whether that query-paper pair supplies an answer, a required partial
+   row/operand, a constraint, or only a distractor/mention;
 2. checks target-paper ownership, hard settings, visual availability, exact
-   chunk IDs, and batch conflicts before accepting a paper; a claim of visual
+   chunk IDs, and internal consistency before accepting a paper; a claim of visual
    inspection is rejected unless the source image was actually attached;
 3. gives only accepted original chunks and bounded neighbours to AOAI to build
    the answer;
@@ -136,9 +141,17 @@ For every question, the reader:
 5. keeps the broader `paper_relevance` set separate from the minimal chunks
    directly supporting the selected answer.
 
-Long papers are split deterministically. Every paper judgment is checkpointed.
-API errors, invalid JSON, invented IDs, absent required images, inconsistent
-calculations, and invalid official locators never become silent guesses.
+Stage 1 never splits a paper into several AOAI requests. A long paper is
+deterministically compacted into one bounded paper context, with at most 10
+selected images, and receives one base judgment call for that query-paper pair.
+The final rendered Stage-1 prompt, including few-shot instructions and query
+metadata, is guarded at 240,000 characters; the paper context is reduced again
+locally if necessary, without another AOAI request.
+Every completed paper judgment is checkpointed. JSON repair, an image-policy
+text-only fallback, and provider retry can add requests only on failure; they
+are not normal paper partitions. API errors,
+invalid JSON, invented IDs, absent required images, inconsistent calculations,
+and invalid official locators never become silent guesses.
 
 Configure Azure OpenAI in the repository-root `.env` (never commit real values):
 
@@ -173,7 +186,7 @@ uv run python scripts/render_aoai_prompts.py \
   --query-id ltqa_03af2c583a696a04 \
   --candidates /path/to/test_candidates.jsonl \
   --paper-id acl2025_00001 \
-  --paper-text-file /path/to/formatted_paper_batch.txt \
+  --paper-text-file /path/to/formatted_single_paper_context.txt \
   --accepted-summary-file /path/to/accepted_summary.json \
   --evidence-file /path/to/formatted_answer_evidence.txt \
   --stage all \
@@ -185,10 +198,17 @@ The preview records the system and user messages, prompt version, SHA-256,
 selected few-shot IDs, official query projection, and whether synthetic context
 was used. Do not treat a synthetic preview as an executable scientific answer.
 
-First run the gold-free corpus check. `--image-root` rebases the absolute image
-paths embedded on the student's machine. If MinerU declares images but none are
-readable, preflight stops even when the isolated-missing-image override is set.
-`answer_types=["table"]` is an output shape and does not force table evidence:
+First run the gold-free corpus check. `--image-root` is the explicit trust
+boundary for visual input: corpus-supplied paths are never opened directly;
+only a validated `paper_id/auto/images/filename` suffix is rebased below this
+root. Omitting the root disables every declared image and makes preflight fail
+until the path is configured. Traversal and root-external symlinks are fatal.
+Corrupt, oversized, or undecodable files are never sent to AOAI; preflight is
+fatal when that leaves the corpus globally unavailable or an explicitly visual
+query without a candidate figure, and otherwise reports the isolated file as a
+warning. AOAI calls are capped at 10 validated JPEG/PNG/GIF/WebP images and
+20 MiB per image. `answer_types=["table"]` is an output shape and does not by
+itself force table evidence:
 
 ```bash
 uv run python scripts/preflight_candidate_corpus.py \
@@ -217,10 +237,10 @@ uv run python scripts/run_aoai_pairwise_reader.py \
   --query-id q_001
 ```
 
-To screen all papers from text first and attach images only for relevant,
-caption-only, or visually unreadable cases that merit refinement, replace the
-reader config with
-`configs/agent_style/aoai_pairwise_reader_hybrid.yaml`.
+`configs/agent_style/aoai_pairwise_reader_hybrid.yaml` remains only as a
+configuration-name compatibility alias. It now uses the same one-call
+text-plus-selected-images judgment as the primary config; it no longer performs
+a text call followed by a second visual-refinement call.
 
 Resume the same question after interruption by adding `--resume`. To inspect or
 re-run one pair without touching other checkpoints:
@@ -232,7 +252,30 @@ uv run python scripts/run_aoai_pairwise_reader.py <same arguments> \
 
 After q_001 is satisfactory, omit `--query-id`, keep the same run directory,
 and add `--resume` to reuse its 50 pair judgments while completing all 55
-questions. The run directory contains:
+questions. An unfiltered run prints the query/paper/minimum-call scope and
+refuses to start unless `--confirm-full-run` is present:
+
+```bash
+uv run python scripts/run_aoai_pairwise_reader.py <same arguments> \
+  --resume --confirm-full-run
+```
+
+For a cache-empty run, the exact minimum is one Stage-1 call per candidate pair
+plus one Stage-2 call per question. For example, 71 test questions with 50
+candidates each have a minimum of `71 * 50 + 71 = 3,621` calls, before any JSON
+repair, image-policy fallback, or provider retry. The optional 4,901-question
+test_extra would be vastly
+larger and is not part of the normal leaderboard run. The CLI prints the actual
+pair count from the supplied sidecar before it asks for confirmation.
+Any run selecting more than 71 questions is rejected unless the separate
+`--confirm-optional-test-extra` cost gate is also supplied.
+
+Use `--evidence-policy optional` only for an explicitly selected
+`test_extra.jsonl` run; filenames never weaken the safe `required` default.
+The missing-image override is diagnostic only and is accepted solely with
+`--stage judge`, never while constructing a submission answer.
+
+The run directory contains:
 
 ```text
 manifest.json
@@ -406,7 +449,7 @@ your embedding deployment.
 
 ```bash
 uv run --extra azure python -m littraceqa.azure.run_rag \
-  --input data/validation_inputs.jsonl \
+  --input artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845/data/validation_inputs.jsonl \
   --output runs/validation_submission.jsonl
 ```
 

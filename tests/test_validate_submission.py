@@ -124,6 +124,75 @@ def test_strict_validator_rejects_silent_zero_score_shapes():
     assert checks.failures["table row keys duplicate-free"] == 1
 
 
+@pytest.mark.parametrize(
+    "second_key",
+    [" x ", "'X'", "X\t\n"],
+)
+def test_strict_validator_deduplicates_official_normalized_row_keys(second_key):
+    prediction = _prediction()
+    prediction["answer"]["table"]["rows"] = [
+        {"Method": "X", "Score": 91.2},
+        {"Method": second_key, "Score": 92.0},
+    ]
+    checks = CheckCounter()
+
+    validate(
+        [_input()],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+    )
+
+    assert checks.failures["table row keys duplicate-free"] == 1
+
+
+def test_strict_validator_uses_first_schema_column_as_implicit_row_key():
+    input_record = _input()
+    for column in input_record["table_schema"]:
+        column["is_row_key"] = False
+    prediction = _prediction()
+    prediction["answer"]["table"]["rows"] = [
+        {"Method": "X", "Score": 91.2},
+        {"Method": " x ", "Score": 92.0},
+    ]
+    checks = CheckCounter()
+
+    validate(
+        [input_record],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+    )
+
+    assert checks.failures["table row keys duplicate-free"] == 1
+
+
+def test_strict_validator_does_not_invent_implicit_row_key_nonempty_rule():
+    input_record = _input()
+    for column in input_record["table_schema"]:
+        column["is_row_key"] = False
+    prediction = _prediction()
+    prediction["answer"]["table"]["rows"] = [
+        {"Method": "", "Score": 91.2},
+    ]
+    checks = CheckCounter()
+
+    validate(
+        [input_record],
+        [prediction],
+        {},
+        checks,
+        strict=True,
+        canonical_papers={"p1"},
+    )
+
+    assert checks.failures["table row keys non-empty"] == 0
+
+
 def test_strict_validator_rejects_nested_oracle_and_alias_shapes():
     prediction = _prediction()
     prediction["gold_papers"] = ["p1"]

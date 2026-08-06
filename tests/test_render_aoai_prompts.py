@@ -185,22 +185,15 @@ def test_markdown_preview_without_candidate_uses_conspicuous_samples(tmp_path):
     assert "SHA-256:" in markdown
 
 
-def test_preview_rejects_invalid_batch_range(tmp_path):
+def test_preview_cli_has_no_batch_options(tmp_path):
     queries = tmp_path / "queries.jsonl"
     _write_jsonl(queries, [_multiple_choice_query()])
-    args = _RENDERER.build_parser().parse_args(
-        [
-            "--queries",
-            str(queries),
-            "--batch-index",
-            "2",
-            "--batch-count",
-            "1",
-        ]
-    )
+    parser = _RENDERER.build_parser()
 
-    with pytest.raises(ValueError, match="batch index"):
-        _RENDERER.build_preview(args)
+    assert "batch_index" not in {action.dest for action in parser._actions}
+    assert "batch_count" not in {action.dest for action in parser._actions}
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--queries", str(queries), "--batch-index", "1"])
 
 
 @pytest.mark.parametrize(

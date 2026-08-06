@@ -120,7 +120,10 @@ def invalidate_aggregate_query(run_dir: Path, query_id: str) -> None:
     rejudgment from leaving an old answer paired with new judgments in the root
     trace and submission files.
     """
-    for filename in ("reading_traces.jsonl", "submission.jsonl"):
+    # Remove the uploadable artifact first. If the process dies between the two
+    # independent atomic rewrites, a stale diagnostic trace is safer than a stale
+    # submission that still looks ready to upload.
+    for filename in ("submission.jsonl", "reading_traces.jsonl"):
         path = run_dir / filename
         if not path.exists():
             continue
@@ -298,6 +301,61 @@ def _submission_from_answer_checkpoint(
     )
 
 
+def ensure_submission_from_answer_checkpoint(
+    query: Query,
+    answer_record: dict[str, Any],
+    submission_path: Path,
+    *,
+    require_evidence: bool = True,
+) -> dict[str, Any]:
+    """Validate or atomically restore a submission from a current answer.
+
+    Callers must first prove that ``answer_record`` has the expected cache key.
+    Keeping the restoration here gives both aggregate materialization and the
+    paid-call runner the same fail-closed validation path.
+    """
+
+    if answer_record.get("query_id") != query.query_id:
+        raise ValueError(
+            f"{query.query_id}: answer checkpoint query_id mismatch: "
+            f"{submission_path.parent / 'answer.json'}"
+        )
+    if answer_record.get("status") != "complete":
+        raise ValueError(
+            f"{query.query_id}: answer checkpoint status is not complete: "
+            f"{submission_path.parent / 'answer.json'}"
+        )
+
+    regenerated = _submission_from_answer_checkpoint(
+        query,
+        answer_record,
+        require_evidence=require_evidence,
+    )
+    if submission_path.exists():
+        submission = json.loads(submission_path.read_text(encoding="utf-8"))
+    else:
+        # ``answer.json`` is written before ``submission.json``. An interruption
+        # between those two atomic writes is recoverable without another LLM call.
+        submission = regenerated
+        atomic_write_json(submission_path, submission)
+
+    allowed_top_level_keys = {TOP_LEVEL_KEYS}
+    if not require_evidence:
+        allowed_top_level_keys.add(TOP_LEVEL_KEYS_WITHOUT_EVIDENCE)
+    if (
+        not isinstance(submission, dict)
+        or frozenset(submission) not in allowed_top_level_keys
+        or submission.get("query_id") != query.query_id
+    ):
+        raise ValueError(f"invalid per-query submission: {submission_path}")
+    if submission != regenerated:
+        raise ValueError(
+            "stale/invalid per-query submission does not match answer "
+            f"checkpoint: {submission_path}"
+        )
+    return submission
+
+
 def materialize_run_outputs(
     run_dir: Path,
     handoffs: list[CandidateHandoff],
@@ -345,7 +403,7 @@ def materialize_run_outputs(
             )
 
         answer_is_current = False
-        regenerated_submission: dict[str, Any] | None = None
+        answer_record: dict[str, Any] | None = None
         if paths.answer.exists():
             answer_record = json.loads(paths.answer.read_text(encoding="utf-8"))
             if not isinstance(answer_record, dict):
@@ -361,28 +419,18 @@ def materialize_run_outputs(
                 )
                 trace["completeness"] = answer_record.get("completeness")
                 trace["prediction"] = answer_record.get("prediction")
-                regenerated_submission = _submission_from_answer_checkpoint(
-                    handoff.query,
-                    answer_record,
-                    require_evidence=require_evidence,
-                )
 
-        if paths.submission.exists() and answer_is_current:
-            submission = json.loads(paths.submission.read_text(encoding="utf-8"))
-            allowed_top_level_keys = {TOP_LEVEL_KEYS}
-            if not require_evidence:
-                allowed_top_level_keys.add(TOP_LEVEL_KEYS_WITHOUT_EVIDENCE)
-            if (
-                not isinstance(submission, dict)
-                or frozenset(submission) not in allowed_top_level_keys
-                or submission.get("query_id") != query_id
-            ):
-                raise ValueError(f"invalid per-query submission: {paths.submission}")
-            if submission != regenerated_submission:
-                raise ValueError(
-                    "stale/invalid per-query submission does not match answer "
-                    f"checkpoint: {paths.submission}"
+        if answer_is_current:
+            if answer_record is None:
+                raise AssertionError(
+                    f"{query_id}: current answer checkpoint was not loaded"
                 )
+            submission = ensure_submission_from_answer_checkpoint(
+                handoff.query,
+                answer_record,
+                paths.submission,
+                require_evidence=require_evidence,
+            )
             trace["submission"] = submission
             submissions.append(submission)
         traces.append(trace)

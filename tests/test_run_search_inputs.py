@@ -179,3 +179,69 @@ def test_validation_scoring_rejects_duplicate_query_ids(tmp_path):
     ]
 
     assert should_evaluate_against_validation(duplicated, gold) is False
+
+
+def test_initialize_prediction_output_creates_parent_and_replaces_atomically(tmp_path):
+    output = tmp_path / "new" / "predictions.jsonl"
+    output.parent.mkdir(parents=True)
+    output.write_text('{"query_id":"stale"}\n', encoding="utf-8")
+
+    RUN_SEARCH.initialize_prediction_output(output)
+
+    assert output.read_text(encoding="utf-8") == ""
+    assert not list(output.parent.glob(f".{output.name}.*.tmp"))
+
+
+def test_initialize_prediction_output_can_preflight_new_destination(tmp_path):
+    output = tmp_path / "new" / "predictions.jsonl"
+
+    RUN_SEARCH.initialize_prediction_output(output)
+
+    assert output.read_text(encoding="utf-8") == ""
+
+
+def test_append_prediction_builds_valid_jsonl_incrementally(tmp_path):
+    output = tmp_path / "predictions.jsonl"
+    RUN_SEARCH.initialize_prediction_output(output)
+
+    RUN_SEARCH.append_prediction(output, {"query_id": "q1", "text": "日本語"})
+    first_checkpoint = output.read_bytes()
+    RUN_SEARCH.append_prediction(output, {"query_id": "q2"})
+
+    assert output.read_bytes().startswith(first_checkpoint)
+    assert [json.loads(line) for line in output.read_text().splitlines()] == [
+        {"query_id": "q1", "text": "日本語"},
+        {"query_id": "q2"},
+    ]
+
+
+def test_append_prediction_serializes_before_touching_destination(tmp_path):
+    output = tmp_path / "predictions.jsonl"
+    output.write_text('{"query_id":"old"}\n', encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        RUN_SEARCH.append_prediction(output, {"not_json": object()})
+
+    assert output.read_text(encoding="utf-8") == '{"query_id":"old"}\n'
+
+
+def test_append_prediction_fsyncs_and_rolls_back_on_failure(tmp_path, monkeypatch):
+    output = tmp_path / "predictions.jsonl"
+    output.write_text('{"query_id":"old"}\n', encoding="utf-8")
+    real_fsync = RUN_SEARCH.os.fsync
+    calls = 0
+
+    def fail_first_fsync(file_descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated checkpoint failure")
+        return real_fsync(file_descriptor)
+
+    monkeypatch.setattr(RUN_SEARCH.os, "fsync", fail_first_fsync)
+
+    with pytest.raises(OSError, match="simulated checkpoint failure"):
+        RUN_SEARCH.append_prediction(output, {"query_id": "q2"})
+
+    assert calls == 2
+    assert output.read_text(encoding="utf-8") == '{"query_id":"old"}\n'

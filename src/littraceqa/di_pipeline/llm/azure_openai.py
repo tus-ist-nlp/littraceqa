@@ -36,7 +36,6 @@ LLM 呼び出しを try/except で囲んでフォールバックする作りな�
 from __future__ import annotations
 
 import base64
-import mimetypes
 import os
 import time
 from pathlib import Path
@@ -46,6 +45,12 @@ import openai
 from openai import AzureOpenAI
 
 from littraceqa.di_pipeline.registry import register
+from littraceqa.mineru_record import (
+    MAX_AOAI_IMAGES_PER_REQUEST,
+    MAX_IMAGE_BYTES,
+    validate_image_bytes,
+    validate_image_file,
+)
 
 _SYSTEM = (
     "あなたは科学論文の検索システムの一部として動作しています。"
@@ -138,6 +143,11 @@ class AzureOpenAILLM:
         APIキー、endpoint、送信画像のbase64は返さない。呼び出し側はこの辞書を
         checkpointへ安全に保存できる。
         """
+        if image_paths and len(image_paths) > MAX_AOAI_IMAGES_PER_REQUEST:
+            raise ValueError(
+                "Azure OpenAI accepts at most "
+                f"{MAX_AOAI_IMAGES_PER_REQUEST} images per request"
+            )
         content: str | list[dict[str, Any]]
         if image_paths:
             content = [{"type": "text", "text": prompt}]
@@ -206,8 +216,13 @@ class AzureOpenAILLM:
 
 def _image_data_url(image_path: str | Path) -> str:
     path = Path(image_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"image does not exist: {path}")
-    mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    # Check size and structure before allocating the payload. Read at most one
+    # byte over the cap so a file swapped/grown after stat cannot cause an
+    # unbounded allocation. Validate the actual bytes again to close the normal
+    # stat/read race and derive MIME from content rather than an extension.
+    validate_image_file(path)
+    with path.open("rb") as handle:
+        payload = handle.read(MAX_IMAGE_BYTES + 1)
+    mime_type = validate_image_bytes(payload, source=str(path))
+    encoded = base64.b64encode(payload).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"

@@ -13,14 +13,18 @@ llm:
     timeout: 180.0
     max_retries: 3
 params:
-  # 通常の論文（中央値約114KB）は1回で判定し、長い論文だけ分割する。
-  max_batch_chars: 160000
-  batch_overlap_chars: 1000
-  max_images_per_batch: 6
+  # 1つのquery-paper pairの正常な一次判定は1回だけ。長い論文も分割せず、
+  # 全chunkを候補として保持したまま、この文字数内の単一コンテキストへ決定的に圧縮する。
+  # JSON修復・画像policy fallback・provider retryはあり得るが、論文分割による追加callは行わない。
+  max_paper_context_chars: 220000
+  # few-shot・query・画像mappingを含む最終Stage 1 user promptのhard guard。
+  max_judgment_prompt_chars: 240000
+  # 1回の判定に添付する論文画像の上限。AOAI側の1リクエスト上限と同じ。
+  max_paper_images: 10
   answer_context_chars: 220000
   # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
   answer_neighbor_chunks: 0
-  max_answer_images: 12
+  max_answer_images: 10
   # 回答部品へ直接対応する最小根拠だけを提出する。関連論文集合は別管理する。
   max_evidence: 32
   max_evidence_per_paper: 4

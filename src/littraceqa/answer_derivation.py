@@ -36,7 +36,10 @@ _COMPARE_OPERATORS = {
     "!=": lambda left, right: left != right,
 }
 _NUMBER_IN_TEXT = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
-_FACT_VALUE_KINDS = frozenset({"reported", "computed", "visual", "text"})
+# Facts must be values read directly from the supplied source.  Derived values
+# belong in ``operations``; accepting a free-standing ``computed`` fact would
+# let a model attach an arbitrary result to an otherwise valid chunk.
+_FACT_VALUE_KINDS = frozenset({"reported", "visual", "text"})
 _ROUNDING_MODES = {
     "half_up": ROUND_HALF_UP,
     "half_even": ROUND_HALF_EVEN,
@@ -91,9 +94,10 @@ def validate_answer_semantics(
     if not isinstance(raw_operations, list):
         raise DerivationValidationError("derivation.operations must be a list")
     operations: list[dict[str, Any]] = []
+    operation_results: dict[str, tuple[Any, str]] = {}
     seen_operation_ids: set[str] = set()
     for index, operation in enumerate(raw_operations):
-        validated_operation = _validate_operation(
+        validated_operation, computed = _validate_operation(
             operation,
             index,
             facts_by_id=facts_by_id,
@@ -106,6 +110,18 @@ def validate_answer_semantics(
             )
         seen_operation_ids.add(operation_id)
         operations.append(validated_operation)
+        operation_results[operation_id] = (
+            computed,
+            str(validated_operation["kind"]),
+        )
+
+    answer_bindings = _validate_final_answer_bindings(
+        derivation.get("answer_bindings"),
+        query=query,
+        answer=answer,
+        facts_by_id=facts_by_id,
+        operation_results=operation_results,
+    )
 
     final_answer = derivation.get("final_semantic_answer")
     if not isinstance(final_answer, str) or not final_answer.strip():
@@ -119,12 +135,22 @@ def validate_answer_semantics(
         raise DerivationValidationError(
             "final_semantic_answer must exactly equal freeform.text"
         )
-    _validate_multiple_choice(query, answer, final_answer)
+    # A combined freeform + multiple-choice record commonly uses a descriptive
+    # freeform sentence and a shorter option text for the same semantic answer.
+    # The bindings above validate both output components independently.  Only an
+    # MC-only answer uses the option text as its canonical final string.
+    _validate_multiple_choice(
+        query,
+        answer,
+        final_answer,
+        require_final_match="freeform" not in query.answer_types,
+    )
 
     return {
         **derivation,
         "facts": facts,
         "operations": operations,
+        "answer_bindings": answer_bindings,
         "final_semantic_answer": final_answer,
     }
 
@@ -154,7 +180,9 @@ def validate_table_rows(query: Query, rows: Any) -> list[dict[str, Any]]:
         and column.get("name")
         and column.get("is_row_key") is True
     ]
-    dedupe_columns = row_keys or columns
+    # Match the official evaluator: when no explicit key exists, only the first
+    # schema column is the implicit row key (not the entire row).
+    dedupe_columns = row_keys or columns[:1]
     seen_keys: set[tuple[str, ...]] = set()
     validated: list[dict[str, Any]] = []
     for row_index, row in enumerate(rows):
@@ -168,6 +196,9 @@ def validate_table_rows(query: Query, rows: Any) -> list[dict[str, Any]]:
                 column_types[column],
                 path=f"table.rows[{row_index}].{column}",
             )
+        # The pinned evaluator enforces non-empty cells only for explicitly
+        # declared row keys.  Its implicit first-column fallback still produces
+        # a valid (possibly empty-string) tuple key.
         if any(row[column] in (None, "") for column in row_keys):
             raise DerivationValidationError(
                 f"table row {row_index} has an empty row-key cell"
@@ -248,7 +279,7 @@ def _validate_operation(
     *,
     facts_by_id: dict[str, dict[str, Any]],
     answer: dict[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Any]:
     if not isinstance(operation, dict):
         raise DerivationValidationError(
             f"derivation.operations[{index}] must be an object"
@@ -382,12 +413,15 @@ def _validate_operation(
         answer=answer,
         path=f"{path}.answer_binding",
     )
-    return {
-        **operation,
-        "id": operation_id,
-        "fact_ids": fact_ids,
-        "answer_binding": binding,
-    }
+    return (
+        {
+            **operation,
+            "id": operation_id,
+            "fact_ids": fact_ids,
+            "answer_binding": binding,
+        },
+        computed,
+    )
 
 
 def _compute_arithmetic(
@@ -534,6 +568,229 @@ def _validate_answer_binding(
     return normalized
 
 
+def _validate_final_answer_bindings(
+    raw_bindings: Any,
+    *,
+    query: Query,
+    answer: dict[str, Any],
+    facts_by_id: dict[str, dict[str, Any]],
+    operation_results: dict[str, tuple[Any, str]],
+) -> list[dict[str, Any]]:
+    """Bind every emitted answer component to a sourced fact or operation.
+
+    Operation-local ``answer_binding`` proves that an operation was computed
+    correctly.  This top-level contract is deliberately separate: it also
+    covers pure lookups (``operations=[]``), combined answer types, and table
+    cells.  Consequently a syntactically valid final string cannot float free
+    of the evidence-backed derivation.
+    """
+
+    if not isinstance(raw_bindings, list) or not raw_bindings:
+        raise DerivationValidationError(
+            "derivation.answer_bindings must be a non-empty list"
+        )
+
+    validated: list[dict[str, Any]] = []
+    for index, binding in enumerate(raw_bindings):
+        path = f"derivation.answer_bindings[{index}]"
+        if not isinstance(binding, dict):
+            raise DerivationValidationError(f"{path} must be an object")
+        required = {"answer_path", "source_type", "source_id"}
+        missing = sorted(required - set(binding))
+        extra = sorted(set(binding) - required - {"answer_fragment"})
+        if missing or extra:
+            raise DerivationValidationError(
+                f"{path} requires answer_path/source_type/source_id and optional "
+                f"answer_fragment; missing={missing}, extra={extra}"
+            )
+
+        answer_path = _non_empty_string(
+            binding.get("answer_path"), f"{path}.answer_path"
+        )
+        source_type = _non_empty_string(
+            binding.get("source_type"), f"{path}.source_type"
+        )
+        source_id = _non_empty_string(binding.get("source_id"), f"{path}.source_id")
+        if source_type == "fact":
+            fact = facts_by_id.get(source_id)
+            if fact is None:
+                raise DerivationValidationError(
+                    f"{path} references unknown fact {source_id!r}"
+                )
+            source_value = fact["value"]
+            source_kind = "fact"
+        elif source_type == "operation":
+            operation_result = operation_results.get(source_id)
+            if operation_result is None:
+                raise DerivationValidationError(
+                    f"{path} references unknown operation {source_id!r}"
+                )
+            source_value, source_kind = operation_result
+        else:
+            raise DerivationValidationError(
+                f"{path}.source_type must be 'fact' or 'operation'"
+            )
+
+        answer_value = _resolve_answer_path(
+            answer, answer_path, path=f"{path}.answer_path"
+        )
+        fragment = binding.get("answer_fragment")
+        if fragment is not None and not isinstance(fragment, str):
+            raise DerivationValidationError(f"{path}.answer_fragment must be a string")
+        _validate_source_value_in_answer(
+            answer_value,
+            source_value=source_value,
+            source_kind=source_kind,
+            answer_fragment=fragment,
+            answer_path=answer_path,
+            path=path,
+        )
+        normalized = {
+            "answer_path": answer_path,
+            "source_type": source_type,
+            "source_id": source_id,
+        }
+        if fragment is not None:
+            normalized["answer_fragment"] = fragment
+        validated.append(normalized)
+
+    _validate_answer_binding_coverage(query, answer, validated)
+    return validated
+
+
+def _validate_source_value_in_answer(
+    answer_value: Any,
+    *,
+    source_value: Any,
+    source_kind: str,
+    answer_fragment: str | None,
+    answer_path: str,
+    path: str,
+) -> None:
+    if isinstance(answer_value, str):
+        if not answer_fragment:
+            raise DerivationValidationError(
+                f"{path}.answer_fragment is required for a string answer"
+            )
+        if answer_fragment not in answer_value:
+            raise DerivationValidationError(
+                f"{path}.answer_fragment is not an exact substring of {answer_path}"
+            )
+        if source_kind == "fact":
+            if not _fragment_contains_fact(answer_fragment, source_value):
+                raise DerivationValidationError(
+                    f"{path}.answer_fragment={answer_fragment!r} does not express "
+                    f"sourced fact value {source_value!r}"
+                )
+        elif not _fragment_contains_expected(
+            answer_fragment, source_value, source_kind
+        ):
+            raise DerivationValidationError(
+                f"{path}.answer_fragment={answer_fragment!r} does not express "
+                f"operation result {source_value!r}"
+            )
+        return
+
+    if source_kind == "fact":
+        matches = _fact_values_equal(answer_value, source_value)
+    else:
+        matches = _typed_answer_matches(answer_value, source_value, source_kind)
+    if not matches:
+        raise DerivationValidationError(
+            f"{answer_path}={answer_value!r} does not exactly equal sourced "
+            f"value {source_value!r}"
+        )
+
+
+def _fragment_contains_fact(fragment: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return _yes_no_polarity(fragment) is value
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return _decimal(value, "fact value") in _numbers_in_text(fragment)
+    if isinstance(value, str):
+        expected = _normalize_item(value)
+        actual = _normalize_item(fragment)
+        return _contains_normalized_token(actual, expected)
+    return False
+
+
+def _fact_values_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float, Decimal)) and isinstance(
+        right, (int, float, Decimal)
+    ):
+        try:
+            return _decimal(left, "answer value") == _decimal(right, "fact value")
+        except DerivationValidationError:
+            return False
+    return left == right
+
+
+def _validate_answer_binding_coverage(
+    query: Query,
+    answer: dict[str, Any],
+    bindings: list[dict[str, Any]],
+) -> None:
+    paths = {str(item["answer_path"]) for item in bindings}
+    allowed_paths: set[str] = set()
+    required_paths: set[str] = set()
+    if "freeform" in query.answer_types:
+        required_paths.add("answer.freeform.text")
+    if "multiple_choice" in query.answer_types:
+        multiple_choice_paths = {
+            "answer.multiple_choice",
+            "answer.multiple_choice.selected_option_text",
+        }
+        allowed_paths.update(multiple_choice_paths)
+        if not multiple_choice_paths.intersection(paths):
+            raise DerivationValidationError(
+                "derivation.answer_bindings is missing the multiple-choice answer"
+            )
+        if "freeform" in query.answer_types:
+            freeform_sources = {
+                (str(item["source_type"]), str(item["source_id"]))
+                for item in bindings
+                if item["answer_path"] == "answer.freeform.text"
+            }
+            multiple_choice_sources = {
+                (str(item["source_type"]), str(item["source_id"]))
+                for item in bindings
+                if item["answer_path"] in multiple_choice_paths
+            }
+            if not freeform_sources.intersection(multiple_choice_sources):
+                raise DerivationValidationError(
+                    "combined freeform and multiple-choice answers must share "
+                    "at least one derivation source"
+                )
+    if "table" in query.answer_types:
+        rows = answer["table"]["rows"]
+        for row_index, row in enumerate(rows):
+            row_path = f"answer.table.rows[{row_index}]"
+            cell_paths = {f"{row_path}.{column}" for column in row}
+            allowed_paths.add(row_path)
+            allowed_paths.update(cell_paths)
+            if row_path not in paths and not cell_paths.issubset(paths):
+                missing = sorted(cell_paths - paths)
+                raise DerivationValidationError(
+                    f"derivation.answer_bindings for table row {row_index} need "
+                    f"a row binding or every cell; missing={missing}"
+                )
+    allowed_paths.update(required_paths)
+    missing_required = sorted(required_paths - paths)
+    if missing_required:
+        raise DerivationValidationError(
+            "derivation.answer_bindings is missing required answer paths: "
+            f"{missing_required}"
+        )
+    unknown_paths = sorted(paths - allowed_paths)
+    if unknown_paths:
+        raise DerivationValidationError(
+            "derivation.answer_bindings contains unsupported answer paths: "
+            f"{unknown_paths}"
+        )
+
+
 def _resolve_answer_path(
     answer: dict[str, Any], answer_path: str, *, path: str
 ) -> Any:
@@ -622,14 +879,20 @@ def _fragment_contains_expected(fragment: str, computed: Any, kind: str) -> bool
 
     expected_label = _normalize_item(computed)
     normalized_fragment = _normalize_item(fragment)
-    if len(expected_label) <= 2:
-        return bool(
-            re.search(
-                rf"(?<![\w]){re.escape(expected_label)}(?![\w])",
-                normalized_fragment,
-            )
-        )
-    return expected_label in normalized_fragment
+    return _contains_normalized_token(normalized_fragment, expected_label)
+
+
+def _contains_normalized_token(text: str, token: str) -> bool:
+    """Match a normalized value as a token/phrase, never inside another word.
+
+    Bindings may point at a concise fragment inside a longer answer sentence,
+    but a source value such as ``42`` must not validate ``142`` and an argmax
+    label such as ``Flint`` must not validate ``SuperFlint``.
+    """
+
+    if not token:
+        return False
+    return bool(re.search(rf"(?<![\w]){re.escape(token)}(?![\w])", text))
 
 
 def _numbers_in_text(text: str) -> set[Decimal]:
@@ -743,7 +1006,11 @@ def _validate_answer_types(query: Query, answer: dict[str, Any]) -> None:
 
 
 def _validate_multiple_choice(
-    query: Query, answer: dict[str, Any], final_answer: str
+    query: Query,
+    answer: dict[str, Any],
+    final_answer: str,
+    *,
+    require_final_match: bool,
 ) -> None:
     if "multiple_choice" not in query.answer_types:
         return
@@ -763,7 +1030,7 @@ def _validate_multiple_choice(
             "selected_option_text must exactly equal the released text for "
             f"label {label}"
         )
-    if final_answer != selected_text:
+    if require_final_match and final_answer != selected_text:
         raise DerivationValidationError(
             "final_semantic_answer must exactly equal selected_option_text"
         )
@@ -822,4 +1089,7 @@ def _normalize_item(value: Any) -> str:
 
 
 def _normalize_row_key(value: Any) -> str:
-    return " ".join(str(value).strip().casefold().split())
+    # This is the pinned official evaluator's row-alignment normalization.
+    text = str(value or "").strip().lower()
+    text = text.strip("\"'“”‘’`")
+    return re.sub(r"\s+", " ", text)

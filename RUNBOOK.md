@@ -7,6 +7,27 @@ previous step's writer is still active.
 
 Key dates: test set release **8/3**, submission deadline **8/19** (EMNLP 2026).
 
+## Required challenge scope and AOAI budget
+
+Treat the organizer splits as separate jobs:
+
+- `validation_inputs.jsonl`: 55 development questions;
+- `test.jsonl`: 71 required leaderboard questions and the default production job;
+- `test_extra.jsonl`: 4,901 optional diagnostic questions.
+
+Do not concatenate them into a 5,027-question AOAI run. `test_extra` is not
+required for the main challenge submission and should be run only after a
+separate diagnostic goal and budget are approved. The pairwise reader uses one
+Stage-1 base AOAI call per query-paper pair, without splitting long papers into
+additional calls, followed by one Stage-2 base answer call per question. Thus a
+cache-empty 71-question run with 50 candidates per question has an exact minimum
+of 3,621 calls; JSON repairs, image-policy text fallbacks, and provider retries
+can increase that number. Always
+review the CLI's actual query, candidate-pair, and minimum-call counts before
+passing `--confirm-full-run`. A selection larger than 71 questions additionally
+requires `--confirm-optional-test-extra`; this prevents an ordinary full-run
+confirmation from accidentally authorizing the 4,901 optional questions.
+
 Baseline to beat (`runs/validation_submission_metadata_plus_partial_pdf.jsonl`,
 official `scripts/evaluate.py`): paper_f1 **0.338**, evidence_f1 **0.029**,
 multiple_choice **0.0**, freeform **0.0**, table metrics **0.0**.
@@ -141,15 +162,13 @@ Budget and duration for ~1.94M chunks (~650-700M tokens):
 
 ## 6. Full validation run + official scoring + per-question diff
 
-Run RAG over the validation inputs with the answer-side fixes enabled
-(multiple-choice options file, query decomposition for multi_paper questions,
-run-metadata sidecar):
+Run RAG over the pinned current validation inputs. Multiple-choice options are
+already present in each applicable input row; do not join validation gold:
 
 ```powershell
 uv run --extra azure python -m littraceqa.azure.run_rag `
-    --input data\validation_inputs.jsonl `
-    --output runs\validation_full_index.jsonl `
-    --options-file data\validation.jsonl
+    --input artifacts\official_release\bd35dc14cf0483e0ffa51fa2a54d2689c13f9845\data\validation_inputs.jsonl `
+    --output runs\validation_full_index.jsonl
 ```
 
 (Decomposition/sidecar flags: see `uv run --extra azure python -m littraceqa.azure.run_rag --help`;
@@ -164,14 +183,9 @@ captured next to the output in a file named with the `.jsonl` suffix replaced
 by `_raw_failures.jsonl` (e.g. `runs\x.jsonl` -> `runs\x_raw_failures.jsonl`)
 — check it when `failed=` in the summary line is non-zero.
 
-`--options-file` behavior in `run_rag`: the flag defaults to none. When it is
-omitted, the validation options `data\validation.jsonl` are auto-joined ONLY
-if `--input` resolves to the default `data\validation_inputs.jsonl`; any
-other input — in particular the hidden test inputs — runs **without** options
-unless `--options-file` is passed explicitly. A WARN is printed when the
-options file shares no query_id with the input, and per-question options are
-dropped (with a WARN) when the options file's question text does not match
-the input's. See the "Test-day options" policy below.
+`--options-file` is a migration aid for an obsolete local snapshot only. Current
+official validation/test/test_extra rows carry `multiple_choice_options`
+directly. Never pass a gold record as an options sidecar for a current run.
 
 Score officially, then diff against the baseline per question:
 
@@ -217,12 +231,13 @@ downloads, which is why the Box staging above comes first):
 ```powershell
 uv run --extra azure python -m littraceqa.azure.figure_answer `
     --predictions runs\test_full_index.jsonl `
-    --inputs data\test_inputs.jsonl `
+    --inputs artifacts\official_release\bd35dc14cf0483e0ffa51fa2a54d2689c13f9845\data\test.jsonl `
     --output runs\test_full_index_vision.jsonl
 ```
 
-On test day pass the organizers' options file explicitly (see "Test-day
-options"); the auto-join only fires for the default validation inputs.
+The pinned `test.jsonl` already carries `multiple_choice_options` for every
+multiple-choice row. Do not attach a validation-gold or separately maintained
+options sidecar.
 
 The vision pass also tops up short `multi_paper` figure-question paper lists
 (`--compare-expand`, on by default): the vision model reports the comparison
@@ -244,19 +259,17 @@ needs only the released inputs file, so it works on the test set too:
 
 ```powershell
 uv run python -m littraceqa.validate_submission `
-    --inputs data\validation_inputs.jsonl `
-    --predictions runs\validation_full_index.jsonl `
-    --options-file data\validation.jsonl
+    --inputs artifacts\official_release\bd35dc14cf0483e0ffa51fa2a54d2689c13f9845\data\validation_inputs.jsonl `
+    --predictions runs\validation_full_index.jsonl
 ```
 
 Exit code 0 is required. It catches the silent zero-score failure modes:
 missing/duplicate query_ids, answer objects not matching `answer_types`,
-letters outside the option keys (without known options any single A-Z letter
-passes, but empty/multi-character answers fail), empty freeform, empty table
-rows on table questions, and evidence items missing
-`paper_id`/`source_type`/`locator.page` (the evaluator drops those silently).
-For the test set, pass the test inputs file and the test options file (if the
-organizers release options separately) — see "Test-day options" below.
+letters outside each input row's option keys, empty freeform, empty table rows
+on table questions, and evidence items missing `paper_id`, `source_type`, or an
+official page/section/object locator (the evaluator drops those silently).
+For the test set, pass the pinned official test input itself; its applicable
+rows already contain the valid option mapping.
 
 ---
 
@@ -264,16 +277,10 @@ organizers release options separately) — see "Test-day options" below.
 
 ### Test-day options
 
-On 8/3, multiple-choice options must be provided **explicitly**: pass the
-organizers' test options file via `--options-file` to both `run_rag` and
-`validate_submission`. Never reuse the validation options
-(`data\validation.jsonl`) for the test inputs — a query_id collision would
-silently attach the wrong options to the wrong questions. `run_rag`
-deliberately auto-joins the validation options only for the default
-validation input and never for any other `--input`. If the organizers release
-no options file, the prompts run without options (pass-through: the model's
-single-letter answer is submitted as-is) and `validate_submission` accepts
-any single A-Z letter for those questions.
+The current official input schema includes `multiple_choice_options` on every
+multiple-choice row. Use that inline mapping as authoritative for validation,
+test, and test_extra. Do not join `data\validation.jsonl` or any separately
+maintained options file into a challenge input.
 
 ### Index freeze
 
@@ -292,9 +299,11 @@ One MC question is worth ~2.4 points of accuracy; one gold-paper swing moves
 paper_f1 by ~1.8 points. Treat any aggregate move smaller than **2 flipped
 questions** as noise, and always review `compare_runs` per-query flips instead
 of aggregates. Prefer structurally justified changes (options in prompt,
-schema injection, K by task_family) over prompt wording tuned until the
-55-question score moves — the latter is dev-set overfitting that will not
-transfer to the hidden test set.
+schema injection, ownership checks, and evidence validation) over prompt wording
+tuned until the 55-question score moves — the latter is dev-set overfitting that
+will not transfer to the hidden test set. `task_family` and
+`primary_evidence_type` are unavailable at test time and must not drive the
+production path.
 
 ### Query-rewrite experimentation (query_lab)
 
@@ -332,7 +341,7 @@ end-to-end run — with the flag unset, `run_rag` behavior is unchanged:
 
 ```powershell
 uv run --extra azure python -m littraceqa.azure.run_rag `
-    --input data\validation_inputs.jsonl `
+    --input artifacts\official_release\bd35dc14cf0483e0ffa51fa2a54d2689c13f9845\data\validation_inputs.jsonl `
     --output runs\validation_rewrite_exp01.jsonl `
     --rewrite-prompt-file prompts\query_rewrite.txt
 ```

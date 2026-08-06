@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -8,13 +10,36 @@ import pytest
 from littraceqa.aoai_pairwise_reader import (
     PairwiseAOAIReader,
     ReadingResponseError,
-    merge_batch_judgments,
 )
 from littraceqa.candidate_handoff import CandidatePaper
-from littraceqa.chunk_store import ChunkStore
+from littraceqa.chunk_store import IMAGE_PATH_ERROR_KEY, ChunkStore
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.di_pipeline.llm.fake import FakeLLM
+from littraceqa.mineru_record import readable_image_path
 from littraceqa.submission import prediction_to_submission
+
+
+VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+VALID_PNG_ALTERNATE = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4"
+    "z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
+
+
+def _image_root(tmp_path):
+    return tmp_path / "trusted-images"
+
+
+def _write_trusted_image(
+    tmp_path, paper_id: str, filename: str, payload: bytes = VALID_PNG
+):
+    image_path = _image_root(tmp_path) / paper_id / "auto" / "images" / filename
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(payload)
+    return image_path
 
 
 def _write_corpus(path, *, long_text: str | None = None) -> None:
@@ -51,8 +76,9 @@ def _write_image_corpus(path, tmp_path, *, image_count: int) -> list[str]:
     records = []
     image_paths = []
     for index in range(1, image_count + 1):
-        image_path = tmp_path / f"figure-{index}.png"
-        image_path.write_bytes(f"image-{index}".encode())
+        image_path = _write_trusted_image(
+            tmp_path, "p1", f"figure-{index}.png"
+        )
         image_paths.append(str(image_path))
         records.append(
             {
@@ -155,6 +181,14 @@ def _structured_answer_payload(
                 }
             ],
             "operations": [],
+            "answer_bindings": [
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": "f_reported_value",
+                    "answer_fragment": "42",
+                }
+            ],
             "final_semantic_answer": "42",
         },
         "answer": {"freeform": {"text": "42"}},
@@ -240,6 +274,50 @@ def test_paper_relevance_is_separate_from_minimal_answer_support(tmp_path):
     assert {item.paper_id for item in prediction.evidence} == {"p1"}
 
 
+def test_stage_two_rejects_submitted_chunk_unused_by_derivation(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    raw = _structured_answer_payload({"p1": ["p1#table", "p1#text"]})
+    context_records = {
+        record["chunk_id"]: record for record in reader.chunk_store.load_paper("p1")
+    }
+
+    with pytest.raises(ReadingResponseError, match="unrelated_evidence"):
+        reader._parse_answer(
+            query=_query(),
+            payload_text=json.dumps(raw),
+            relevant_paper_ids={"p1"},
+            context_records=context_records,
+        )
+
+
+def test_stage_two_rejects_fact_from_different_submitted_paper_chunk(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    raw = _structured_answer_payload({"p1": ["p1#table"]})
+    raw["paper_relevance"].append(
+        {"paper_id": "p2", "role": "comparison_source", "reason": "comparison"}
+    )
+    raw["derivation"]["facts"][0].update(
+        {"paper_id": "p2", "chunk_ids": ["p2#text"]}
+    )
+    context_records = {
+        record["chunk_id"]: record
+        for paper_id in ("p1", "p2")
+        for record in reader.chunk_store.load_paper(paper_id)
+    }
+
+    with pytest.raises(ReadingResponseError, match="unsupported_facts"):
+        reader._parse_answer(
+            query=_query(),
+            payload_text=json.dumps(raw),
+            relevant_paper_ids={"p1", "p2"},
+            context_records=context_records,
+        )
+
+
 def test_one_chunk_can_support_multiple_table_cells(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
@@ -271,6 +349,13 @@ def test_one_chunk_can_support_multiple_table_cells(tmp_path):
                 }
             ],
             "operations": [],
+            "answer_bindings": [
+                {
+                    "answer_path": "answer.table.rows[0]",
+                    "source_type": "fact",
+                    "source_id": "f_row",
+                }
+            ],
             "final_semantic_answer": "X | 42",
         },
         "answer": {"table": {"rows": [{"Method": "X", "Score": 42}]}},
@@ -314,7 +399,16 @@ def test_official_multiple_choice_label_is_used_without_placeholder(tmp_path):
         options={"A": "Alpha", "E": "Epsilon"},
     )
     raw = _structured_answer_payload({"p1": ["p1#table"]})
+    raw["derivation"]["facts"][0]["value"] = "Epsilon"
     raw["derivation"]["final_semantic_answer"] = "Epsilon"
+    raw["derivation"]["answer_bindings"] = [
+        {
+            "answer_path": "answer.multiple_choice",
+            "source_type": "fact",
+            "source_id": "f_reported_value",
+            "answer_fragment": "Epsilon",
+        }
+    ]
     raw["answer"] = {
         "multiple_choice": {
             "label": "E",
@@ -349,7 +443,9 @@ def test_official_multiple_choice_label_is_used_without_placeholder(tmp_path):
 def test_stage_two_visual_fact_requires_its_actual_attached_image(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     image_paths = _write_image_corpus(corpus, tmp_path, image_count=1)
-    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
     query = Query(
         "ltqa_visual",
         "How many panels are visible in Figure 1?",
@@ -379,6 +475,94 @@ def test_stage_two_visual_fact_requires_its_actual_attached_image(tmp_path):
         attached_image_paths=image_paths,
     )
     assert payload["derivation"]["facts"][0]["value_kind"] == "visual"
+
+
+def test_stage_one_visual_false_positive_omitted_by_stage_two_is_not_required(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    raw = _structured_answer_payload({"p1": ["p1#table"]})
+    context_records = {
+        record["chunk_id"]: record
+        for paper_id in ("p1", "p2")
+        for record in reader.chunk_store.load_paper(paper_id)
+    }
+
+    payload = reader._parse_answer(
+        query=_query(),
+        payload_text=json.dumps(raw),
+        relevant_paper_ids={"p1", "p2"},
+        context_records=context_records,
+        required_visual_paper_ids={"p2"},
+    )
+
+    assert payload["papers"] == [
+        {"paper_id": "p1", "evidence_chunk_ids": ["p1#table"]}
+    ]
+    assert {fact["paper_id"] for fact in payload["derivation"]["facts"]} == {"p1"}
+
+
+def test_stage_one_visual_requirement_for_used_paper_forces_visual_fact(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    raw = _structured_answer_payload({"p1": ["p1#table"]})
+    context_records = {
+        record["chunk_id"]: record for record in reader.chunk_store.load_paper("p1")
+    }
+
+    with pytest.raises(ReadingResponseError, match="stage-1 marked visual evidence"):
+        reader._parse_answer(
+            query=_query(),
+            payload_text=json.dumps(raw),
+            relevant_paper_ids={"p1"},
+            context_records=context_records,
+            required_visual_paper_ids={"p1"},
+        )
+
+
+def test_explicit_visual_query_still_requires_visual_fact_without_stage_one_flag(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    raw = _structured_answer_payload({"p1": ["p1#table"]})
+    context_records = {
+        record["chunk_id"]: record for record in reader.chunk_store.load_paper("p1")
+    }
+    query = Query(
+        "ltqa_explicit_visual",
+        "How many panels are visible in Figure 1?",
+        ["freeform"],
+    )
+
+    with pytest.raises(ReadingResponseError, match="explicitly requires visual reading"):
+        reader._parse_answer(
+            query=query,
+            payload_text=json.dumps(raw),
+            relevant_paper_ids={"p1"},
+            context_records=context_records,
+            required_visual_paper_ids=set(),
+        )
+
+
+def test_untrusted_corpus_image_is_never_attached_without_image_root(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_image_corpus(corpus, tmp_path, image_count=1)
+    llm = _RecordingMultimodalLLM([_judgment("irrelevant")])
+    reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
+
+    reader.judge_candidate(
+        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    )
+
+    assert [call["image_paths"] for call in llm.calls] == [[]]
+    metadata = reader.chunk_store.load_paper("p1")[0]["metadata"]
+    assert metadata["image_path"] == ""
+    assert "image_root is required" in metadata[IMAGE_PATH_ERROR_KEY]
 
 
 def test_stage_two_rejects_malformed_completeness(tmp_path):
@@ -420,7 +604,9 @@ def test_stage_one_repairs_invented_chunk_id_once_with_same_validator(tmp_path):
     invented_response = _judgment("direct_answer", "p1#fig0010")
     repaired_response = _judgment("direct_answer", "p1#fig1")
     llm = _RecordingMultimodalLLM([invented_response, repaired_response])
-    reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), llm
+    )
 
     judgment = reader.judge_candidate(
         _query(), CandidatePaper("p1", 26, "Paper One", "ACL", 2025)
@@ -435,8 +621,11 @@ def test_stage_one_repairs_invented_chunk_id_once_with_same_validator(tmp_path):
     repair_prompt = str(llm.calls[1]["prompt"])
     assert "Validation error:" in repair_prompt
     assert "p1#fig0010" in repair_prompt
-    assert 'Allowed batch chunk_ids: ["p1#fig1"]' in repair_prompt
-    assert [call["phase"] for call in judgment["calls"]] == ["full", "full"]
+    assert 'Allowed selected-context chunk_ids: ["p1#fig1"]' in repair_prompt
+    assert [call["phase"] for call in judgment["calls"]] == [
+        "single_context",
+        "single_context",
+    ]
     assert [call["attempt"] for call in judgment["calls"]] == [
         "initial",
         "evidence_repair",
@@ -446,138 +635,166 @@ def test_stage_one_repairs_invented_chunk_id_once_with_same_validator(tmp_path):
     assert all("usage" in call for call in judgment["calls"])
     assert judgment["calls"][0]["raw_response"] == invented_response
     assert judgment["calls"][1]["raw_response"] == repaired_response
+    assert judgment["judgment_call_count"] == 2
+    assert judgment["judgment"]["evidence_chunk_ids"] == ["p1#fig1"]
 
 
-def test_oversized_paper_is_batched_but_merged_as_one_pair_judgment(tmp_path):
+def _write_compaction_corpus(path) -> None:
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#abstract",
+            "chunk_type": "title_abstract",
+            "text": "Paper One studies several evaluation settings.",
+            "metadata": {"page": 1},
+        }
+    ]
+    records.extend(
+        {
+            "paper_id": "p1",
+            "chunk_id": f"p1#noise{index:02d}",
+            "chunk_type": "text_span",
+            "text": (f"Background discussion {index}. " + "filler " * 400),
+            "metadata": {"page": index + 1, "section": "Background"},
+        }
+        for index in range(1, 13)
+    )
+    records.append(
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#table",
+            "chunk_type": "table",
+            "text": "Table 7: Method X reports exactly 42 on Dataset Y.",
+            "metadata": {"page": 20, "table_id": "Table 7"},
+        }
+    )
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
+def test_oversized_paper_is_compacted_and_judged_with_one_initial_call(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
-    _write_corpus(corpus, long_text="Method X value 42. " * 1800)
+    _write_compaction_corpus(corpus)
     llm = FakeLLM(responses=[_judgment("direct_answer", "p1#table")])
     reader = PairwiseAOAIReader(
         ChunkStore(corpus),
         llm,
-        max_batch_chars=8_000,
-        batch_overlap_chars=200,
+        max_paper_context_chars=8_000,
     )
 
     judgment = reader.judge_candidate(
         _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
     )
 
-    assert judgment["batch_count"] > 1
-    assert len(llm.calls) == judgment["batch_count"]
+    all_chunk_ids = {
+        record["chunk_id"] for record in reader.chunk_store.load_paper("p1")
+    }
+    assert len(llm.calls) == 1
+    assert judgment["base_judgment_call_count"] == 1
+    assert judgment["judgment_call_count"] == 1
+    assert judgment["paper_context_compacted"] is True
+    assert judgment["context_chunk_count"] < len(all_chunk_ids)
+    assert judgment["omitted_chunk_count"] > 0
+    assert set(judgment["context_chunk_ids"]).isdisjoint(
+        judgment["omitted_chunk_ids"]
+    )
+    assert set(judgment["context_chunk_ids"]) | set(
+        judgment["omitted_chunk_ids"]
+    ) == all_chunk_ids
+    assert "p1#table" in judgment["context_chunk_ids"]
+    assert [item["chunk_id"] for item in judgment["paper_context_selection"]] == (
+        judgment["context_chunk_ids"]
+    )
+    assert judgment["calls"][0]["context_chunk_ids"] == judgment[
+        "context_chunk_ids"
+    ]
     assert judgment["paper_id"] == "p1"
     assert judgment["evidence_chunk_ids"] == ["p1#table"]
+    assert judgment["judgment"]["evidence_chunk_ids"] == ["p1#table"]
+    assert "batch_count" not in judgment
+    assert "batch_judgments" not in judgment
 
 
-def test_development_metadata_is_rejected_before_any_llm_call(tmp_path):
+def test_single_paper_context_is_deterministic_and_preserves_original_records(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_compaction_corpus(corpus)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), max_paper_context_chars=8_000
+    )
+    query = _query()
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    records = reader.chunk_store.load_paper("p1")
+
+    first = reader._paper_context(query, candidate, records)
+    second = reader._paper_context(query, candidate, records)
+
+    assert first == second
+    assert first["compacted"] is True
+    assert len(first["text"]) <= reader.max_paper_context_chars
+    assert first["total_chunk_count"] == len(records)
+    assert set(first["selected_chunk_ids"]).isdisjoint(first["omitted_chunk_ids"])
+    assert set(first["selected_chunk_ids"]) | set(first["omitted_chunk_ids"]) == {
+        record["chunk_id"] for record in records
+    }
+    assert list(first["records_by_id"]) == first["selected_chunk_ids"]
+    assert first["records_by_id"]["p1#table"]["text"] == (
+        "Table 7: Method X reports exactly 42 on Dataset Y."
+    )
+    assert '"segment"' not in first["text"]
+
+
+def test_real_but_omitted_chunk_id_is_rejected_by_stage_one(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_compaction_corpus(corpus)
+    store = ChunkStore(corpus)
+    query = _query()
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    probe = PairwiseAOAIReader(
+        store, FakeLLM(), max_paper_context_chars=8_000
+    )
+    context = probe._paper_context(query, candidate, store.load_paper("p1"))
+    omitted_chunk_id = context["omitted_chunk_ids"][0]
+    llm = FakeLLM(
+        responses=[_judgment("direct_answer", omitted_chunk_id)]
+    )
+    reader = PairwiseAOAIReader(
+        store, llm, max_paper_context_chars=8_000
+    )
+
+    with pytest.raises(ReadingResponseError, match="invented or cross-cited"):
+        reader.judge_candidate(query, candidate)
+
+    # The normal judgment is one call. A validator failure gets exactly one
+    # bounded evidence-repair attempt, which is rejected by the same validator.
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("task_family", "multi_paper"),
+        ("primary_evidence_type", "table"),
+    ],
+)
+def test_development_metadata_is_rejected_before_any_llm_call(
+    tmp_path, field, value
+):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
     llm = FakeLLM(responses=[_judgment("irrelevant")])
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
     query = _query()
-    query.task_family = "multi_paper"
+    setattr(query, field, value)
 
-    with pytest.raises(ValueError, match="four official input fields"):
+    with pytest.raises(ValueError, match="forbidden values are present"):
         reader.judge_candidate(
             query, CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
         )
     assert llm.calls == []
-
-
-def test_irrelevant_batch_evidence_is_not_merged_into_relevant_paper():
-    merged = merge_batch_judgments(
-        [
-            {
-                "label": "partial_answer",
-                "answerable_from_this_paper": False,
-                "satisfied_constraints": ["needed value"],
-                "missing_constraints": [],
-                "evidence": [{"chunk_id": "p1#table"}],
-                "candidate_answer": {"meaning": "42"},
-                "confidence": 0.9,
-                "reason": "useful",
-            },
-            {
-                "label": "mention_only",
-                "answerable_from_this_paper": False,
-                "satisfied_constraints": [],
-                "missing_constraints": ["not here"],
-                "evidence": [{"chunk_id": "p1#noise"}],
-                "candidate_answer": {},
-                "confidence": 0.8,
-                "reason": "mere mention",
-            },
-        ]
-    )
-
-    assert merged["relevant"] is True
-    assert merged["evidence_chunk_ids"] == ["p1#table"]
-
-
-def test_owner_mismatch_overrides_same_numbered_figure_positive_batch():
-    positive = {
-        "paper_role": "answer_source",
-        "label": "direct_answer",
-        "answerable_from_this_paper": True,
-        "satisfied_constraints": ["Figure 4 panel count"],
-        "missing_constraints": [],
-        "blocking_mismatches": [],
-        "visual": {"required": True, "status": "inspected"},
-        "evidence": [{"chunk_id": "fastmoe#fig4"}],
-        "candidate_answer": {"units": [{"name": "panels", "value": 2}]},
-        "confidence": 0.95,
-        "reason": "this batch contains a Figure 4",
-    }
-    owner_conflict = {
-        "paper_role": "distractor",
-        "label": "irrelevant",
-        "answerable_from_this_paper": False,
-        "satisfied_constraints": [],
-        "missing_constraints": ["WavePipe Figure 4"],
-        "blocking_mismatches": ["candidate is FastMoE, not WavePipe"],
-        "visual": {"required": True, "status": "inspected"},
-        "evidence": [],
-        "candidate_answer": {},
-        "confidence": 0.99,
-        "reason": "wrong owning paper",
-    }
-
-    merged = merge_batch_judgments([positive, owner_conflict])
-
-    assert merged["label"] == "irrelevant"
-    assert merged["relevant"] is False
-    assert merged["identity_conflict"] is True
-    assert merged["paper_role"] == "distractor"
-
-
-def test_owner_mismatch_veto_does_not_depend_on_english_phrase():
-    positive = {
-        "paper_role": "answer_source",
-        "label": "direct_answer",
-        "answerable_from_this_paper": True,
-        "satisfied_constraints": ["Figure 4 panel count"],
-        "missing_constraints": [],
-        "blocking_mismatches": [],
-        "visual": {"required": True, "status": "inspected"},
-        "evidence": [{"chunk_id": "fastmoe#fig4"}],
-        "candidate_answer": {"units": [{"name": "panels", "value": 2}]},
-        "confidence": 0.95,
-        "reason": "this batch contains a Figure 4",
-    }
-    owner_conflict = {
-        **positive,
-        "paper_role": "distractor",
-        "label": "irrelevant",
-        "answerable_from_this_paper": False,
-        "blocking_mismatches": ["著者と題名が指定対象に一致しない"],
-        "evidence": [],
-        "candidate_answer": {},
-    }
-
-    merged = merge_batch_judgments([positive, owner_conflict])
-
-    assert merged["label"] == "irrelevant"
-    assert merged["identity_conflict"] is True
 
 
 def test_stage_one_rejects_relevant_distractor_role(tmp_path):
@@ -597,7 +814,6 @@ def test_stage_one_rejects_relevant_distractor_role(tmp_path):
             candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
             payload_text=json.dumps(payload),
             allowed_records=records,
-            batch_index=1,
         )
 
 
@@ -606,7 +822,9 @@ def test_stage_one_rejects_claimed_visual_inspection_without_attachment(tmp_path
     _write_image_corpus(corpus, tmp_path, image_count=1)
     payload = json.loads(_judgment("direct_answer", "p1#fig1"))
     payload["visual"] = {"required": True, "status": "inspected"}
-    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
     records = {
         record["chunk_id"]: record
         for record in reader.chunk_store.load_paper("p1")
@@ -618,8 +836,7 @@ def test_stage_one_rejects_claimed_visual_inspection_without_attachment(tmp_path
             candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
             payload_text=json.dumps(payload),
             allowed_records=records,
-            batch_index=1,
-            attached_image_count=0,
+            attached_image_paths=[],
         )
 
     parsed = reader._parse_judgment(
@@ -627,42 +844,36 @@ def test_stage_one_rejects_claimed_visual_inspection_without_attachment(tmp_path
         candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
         payload_text=json.dumps(payload),
         allowed_records=records,
-        batch_index=1,
-        attached_image_count=1,
+        attached_image_paths=[readable_image_path(records["p1#fig1"])],
     )
     assert parsed["visual"] == {"required": True, "status": "inspected"}
 
 
-def test_later_satisfied_constraint_resolves_same_missing_constraint():
-    base = {
-        "paper_role": "answer_source",
-        "label": "partial_answer",
-        "answerable_from_this_paper": False,
-        "blocking_mismatches": [],
-        "visual": {"required": False, "status": "not_needed"},
-        "evidence": [{"chunk_id": "p1#c1"}],
-        "candidate_answer": {"units": [{"name": "value", "value": 42}]},
-        "confidence": 0.9,
-        "reason": "partial batch",
-    }
-    merged = merge_batch_judgments(
-        [
-            {
-                **base,
-                "satisfied_constraints": [],
-                "missing_constraints": [" Dataset Y score "],
-            },
-            {
-                **base,
-                "satisfied_constraints": ["dataset y score"],
-                "missing_constraints": [],
-                "evidence": [{"chunk_id": "p1#c2"}],
-            },
-        ]
+def test_stage_one_rejects_visual_evidence_when_a_different_image_was_attached(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    image_paths = _write_image_corpus(corpus, tmp_path, image_count=2)
+    payload = json.loads(_judgment("direct_answer", "p1#fig2"))
+    payload["visual"] = {"required": True, "status": "inspected"}
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
     )
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
 
-    assert merged["satisfied_constraints"] == ["dataset y score"]
-    assert merged["missing_constraints"] == []
+    with pytest.raises(
+        ReadingResponseError, match="actually attached source image"
+    ):
+        reader._parse_judgment(
+            query=_query(),
+            candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+            payload_text=json.dumps(payload),
+            allowed_records=records,
+            attached_image_paths=[image_paths[0]],
+        )
 
 
 def test_answer_evidence_cap_is_round_robin_across_papers(tmp_path):
@@ -763,7 +974,7 @@ def test_answer_prompt_preserves_q029_constraint_conflict_and_cache_inputs(
         ],
         "candidate_answer": {"dataset": "ImageNet", "fid": 2.49},
         "reason": reason,
-        "visual_conflict": True,
+        "visual": {"required": False, "status": "not_needed"},
     }
     reader = PairwiseAOAIReader(
         ChunkStore(corpus), FakeLLM(), answer_neighbor_chunks=0
@@ -777,19 +988,17 @@ def test_answer_prompt_preserves_q029_constraint_conflict_and_cache_inputs(
     )[1].split("\n\n", 1)[0]
     summary = json.loads(summary_text)
     assert summary == [
-            {
-                "paper_id": "ecm",
-                "title": "",
-                "rank": 1,
+        {
+            "paper_id": "ecm",
+            "title": "",
+            "rank": 1,
             "label": "partial_answer",
             "paper_role": "uncertain",
             "satisfied_constraints": ["ECM-XL 102.4M is listed"],
             "missing_constraints": [missing],
             "blocking_mismatches": [],
             "candidate_answer": {"dataset": "ImageNet", "fid": 2.49},
-            "candidate_answers_by_batch": [],
             "reason": reason,
-            "visual_conflict": True,
         }
     ]
     assert "dataset, split, model variant/size" in prompt
@@ -806,7 +1015,13 @@ def test_answer_prompt_preserves_q029_constraint_conflict_and_cache_inputs(
             query, [{**judgment, "reason": "different reason"}]
         ),
         reader.answer_cache_key(
-            query, [{**judgment, "visual_conflict": False}]
+            query,
+            [
+                {
+                    **judgment,
+                    "visual": {"required": True, "status": "inspected"},
+                }
+            ],
         ),
         reader.answer_cache_key(
             query, [{**judgment, "paper_role": "comparison_source"}]
@@ -819,12 +1034,12 @@ def test_answer_prompt_preserves_q029_constraint_conflict_and_cache_inputs(
     assert len(changed_keys) == 5
 
 
-def test_q052_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path):
+def test_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
     reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
     query = Query(
-        query_id="q_052",
+        query_id="synthetic_lexical_cells",
         question="Copy the displayed results into the requested table.",
         answer_types=["table"],
         table_schema=[
@@ -840,13 +1055,17 @@ def test_q052_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path)
             "label": "direct_answer",
             "satisfied_constraints": ["table cells"],
             "missing_constraints": [],
-            "candidate_answer": {"Method": "X", "Score": ".9", "Aux": "-"},
+            "candidate_answer": {
+                "Method": "Cedar",
+                "Score": "007.25",
+                "Aux": "not measured",
+            },
             "reason": "Table 1 displays the requested row",
             "visual_conflict": False,
         }
     ]
     context = {
-        "text": "Method | Score | Aux\nX | .9 | -",
+        "text": "Method | Score | Aux\nCedar | 007.25 | not measured",
         "records_by_id": {},
         "image_paths": [],
     }
@@ -858,12 +1077,10 @@ def test_q052_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path)
     assert "Do not append %, units, or explanatory prose" in prompt
     assert "unless they literally appear in" in prompt
     assert "Preserve punctuation and typography byte-for-byte as displayed" in prompt
-    assert "A displayed `.9` remains `.9`, not `0.9`" in prompt
-    assert "printed dash or" in prompt
-    assert "minus-like missing-value mark" in prompt
-    assert "ASCII string `-`" in prompt
+    assert "Do not numerically normalize a string-valued cell" in prompt
+    assert "Preserve\n  a visibly printed missing-value mark as a string" in prompt
     assert "only a genuinely" in prompt
-    assert "Never replace a dash or blank" in prompt
+    assert "Never replace a mark or blank" in prompt
     assert "attached table image conflicts with lossy OCR or extracted Markdown" in prompt
     assert "use the cell visibly printed in the image" in prompt
     assert "Every emitted cell must be directly" in prompt
@@ -871,80 +1088,16 @@ def test_q052_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path)
     assert '"Score":"source string"' in prompt
 
 
-def test_q055_prompt_preserves_conflicting_batch_answers_for_source_reconciliation(
+def test_table_prompt_uses_canonical_row_keys_and_splits_named_settings(
     tmp_path,
 ):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
     reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
     query = Query(
-        query_id="q_055",
-        question="Does the first method outperform the second method?",
-        answer_types=["freeform"],
-        table_schema=[],
-    )
-    batch_answers = [
-        {"source": "text/table", "answer": "Yes", "values": ["~30", "~21"]},
-        {
-            "source": "visual",
-            "answer": "No",
-            "reason": "axis labels were shifted",
-        },
-        {"source": "visual/table", "answer": "Yes", "values": ["~30", "~21"]},
-    ]
-    judgment = {
-        "paper_id": "p1",
-        "rank": 1,
-        "label": "direct_answer",
-        "satisfied_constraints": ["requested comparison"],
-        "missing_constraints": [],
-        "candidate_answer": batch_answers[0],
-        "candidate_answers_by_batch": batch_answers,
-        "reason": "The accepted evidence includes text, a table, and a chart.",
-        "visual_conflict": True,
-    }
-    context = {
-        "text": "The table reports about 30 for the first method and 21 for the second.",
-        "records_by_id": {},
-        "image_paths": [],
-    }
-
-    prompt = reader._answer_prompt(query, [judgment], context)
-    summary_payload = prompt.split(
-        "Accepted paper summary (fallible hints, not evidence):\n", 1
-    )[1].split("\n\n", 1)[0]
-    summary = json.loads(summary_payload)
-
-    assert summary[0]["candidate_answers_by_batch"] == batch_answers
-    assert summary[0]["batch_answer_conflict"] is True
-    assert summary[0]["candidate_answer"] == {}
-    assert "Stage-1 summaries are fallible hints, never evidence" in prompt
-    assert "A2_yes_no_polarity" in prompt
-    assert '"kind":"compare"' in prompt
-    assert "final polarity and selected option must agree" in prompt
-
-    changed_judgment = {
-        **judgment,
-        "candidate_answers_by_batch": [
-            *batch_answers[:-1],
-            {"source": "visual/table", "answer": "No"},
-        ],
-    }
-    assert reader.answer_cache_key(query, [judgment]) != reader.answer_cache_key(
-        query, [changed_judgment]
-    )
-
-
-def test_q056_table_prompt_uses_canonical_row_keys_and_splits_named_settings(
-    tmp_path,
-):
-    corpus = tmp_path / "chunks.jsonl"
-    _write_corpus(corpus)
-    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
-    query = Query(
-        query_id="q_056",
+        query_id="synthetic_canonical_row_key",
         question=(
-            "Report AP-BPTT under the short-context and long-context settings."
+            "Report LinrNet under the warm-start and cold-start settings."
         ),
         answer_types=["table"],
         table_schema=[
@@ -961,13 +1114,12 @@ def test_q056_table_prompt_uses_canonical_row_keys_and_splits_named_settings(
             "satisfied_constraints": ["both settings"],
             "missing_constraints": [],
             "candidate_answer": {},
-            "candidate_answers_by_batch": [],
-            "reason": "The source table spells the method AT-BPTT.",
+            "reason": "The source table spells the method LinearNet.",
             "visual_conflict": False,
         }
     ]
     context = {
-        "text": "Method | Setting | Score\nAT-BPTT | short-context | 1.2 ± 0.3",
+        "text": "Method | Setting | Score\nLinearNet | warm-start | 4.8 ± 0.6",
         "records_by_id": {},
         "image_paths": [],
     }
@@ -977,40 +1129,13 @@ def test_q056_table_prompt_uses_canonical_row_keys_and_splits_named_settings(
     assert "row-key entity or method name" in prompt
     assert "canonical spelling visibly" in prompt
     assert "question contains an obvious typo" in prompt
-    assert "numeric uncertainty compactly as `x±y` with no spaces around `±`" in prompt
+    assert "copy its spacing" in prompt
+    assert "typography exactly from the source" in prompt
     assert "two\n  separately requested rows" in prompt
     assert "not one impossible combined setting" in prompt
     assert "Never invent" in prompt
     assert "Prefer the owning paper" in prompt
     assert "one direct object chunk per answer unit" in prompt
-
-
-def test_stage_two_summary_bounds_batch_answer_hints(tmp_path):
-    corpus = tmp_path / "chunks.jsonl"
-    _write_corpus(corpus)
-    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
-    query = _query()
-    batch_answers = [{"batch": index, "answer": "x"} for index in range(100)]
-    judgment = {
-        "paper_id": "p1",
-        "rank": 1,
-        "label": "direct_answer",
-        "satisfied_constraints": [],
-        "missing_constraints": [],
-        "candidate_answer": {},
-        "candidate_answers_by_batch": batch_answers,
-        "reason": "bounded diagnostic hints",
-        "visual_conflict": False,
-    }
-    context = {"text": "accepted evidence", "records_by_id": {}, "image_paths": []}
-
-    prompt = reader._answer_prompt(query, [judgment], context)
-    summary_payload = prompt.split(
-        "Accepted paper summary (fallible hints, not evidence):\n", 1
-    )[1].split("\n\n", 1)[0]
-    summary = json.loads(summary_payload)
-
-    assert summary[0]["candidate_answers_by_batch"] == batch_answers[:64]
 
 
 def test_answer_images_prioritize_direct_primary_evidence_without_starvation(
@@ -1021,8 +1146,9 @@ def test_answer_images_prioritize_direct_primary_evidence_without_starvation(
     direct_image_paths = []
     direct_evidence = []
     for index in range(1, 8):
-        image_path = tmp_path / f"direct-{index}.png"
-        image_path.write_bytes(f"direct-{index}".encode())
+        image_path = _write_trusted_image(
+            tmp_path, "direct", f"direct-{index}.png"
+        )
         direct_image_paths.append(str(image_path))
         chunk_id = f"direct#fig{index}"
         direct_evidence.append(
@@ -1046,10 +1172,12 @@ def test_answer_images_prioritize_direct_primary_evidence_without_starvation(
     partial_primary_paths = []
     for rank in range(1, 13):
         paper_id = f"partial-{rank:02d}"
-        neighbor_path = tmp_path / f"{paper_id}-neighbor.png"
-        primary_path = tmp_path / f"{paper_id}-primary.png"
-        neighbor_path.write_bytes(b"neighbor")
-        primary_path.write_bytes(b"primary")
+        neighbor_path = _write_trusted_image(
+            tmp_path, paper_id, f"{paper_id}-neighbor.png"
+        )
+        primary_path = _write_trusted_image(
+            tmp_path, paper_id, f"{paper_id}-primary.png"
+        )
         partial_primary_paths.append(str(primary_path))
         records.extend(
             [
@@ -1108,17 +1236,17 @@ def test_answer_images_prioritize_direct_primary_evidence_without_starvation(
         encoding="utf-8",
     )
     reader = PairwiseAOAIReader(
-        ChunkStore(corpus),
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
         FakeLLM(),
         answer_neighbor_chunks=1,
-        max_answer_images=12,
+        max_answer_images=10,
     )
 
     context = reader._answer_context(_query(), judgments)
 
     assert context["image_paths"][:7] == direct_image_paths
-    assert context["image_paths"][7:] == partial_primary_paths[:5]
-    assert len(context["image_paths"]) == 12
+    assert context["image_paths"][7:] == partial_primary_paths[:3]
+    assert len(context["image_paths"]) == 10
     assert direct_image_paths[-1] in context["image_paths"]
     assert all("neighbor" not in path for path in context["image_paths"])
 
@@ -1146,8 +1274,9 @@ def test_answer_images_round_robin_papers_within_the_same_label(tmp_path):
             )
         paper_paths = []
         for image_index in range(1, image_count + 1):
-            image_path = tmp_path / f"{paper_id}-{image_index}.png"
-            image_path.write_bytes(f"{paper_id}-{image_index}".encode())
+            image_path = _write_trusted_image(
+                tmp_path, paper_id, f"{paper_id}-{image_index}.png"
+            )
             paper_paths.append(str(image_path))
             records.append(
                 {
@@ -1202,7 +1331,7 @@ def test_answer_images_round_robin_papers_within_the_same_label(tmp_path):
         for paper_id in ("partial-rank9", "partial-rank1", "partial-rank5")
     ]
     reader = PairwiseAOAIReader(
-        ChunkStore(corpus),
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
         FakeLLM(),
         answer_neighbor_chunks=0,
         max_answer_images=5,
@@ -1363,6 +1492,14 @@ def test_answer_repairs_comparison_polarity_once(tmp_path):
             },
         }
     ]
+    first["derivation"]["answer_bindings"] = [
+        {
+            "answer_path": "answer.freeform.text",
+            "source_type": "operation",
+            "source_id": "compare_values",
+            "answer_fragment": "No",
+        }
+    ]
     first["derivation"]["final_semantic_answer"] = "No"
     first["answer"] = {"freeform": {"text": "No"}}
     repaired = _structured_answer_payload({"p1": ["p1#table"]})
@@ -1381,6 +1518,14 @@ def test_answer_repairs_comparison_polarity_once(tmp_path):
                 "expected": True,
                 "answer_fragment": "Yes",
             },
+        }
+    ]
+    repaired["derivation"]["answer_bindings"] = [
+        {
+            "answer_path": "answer.freeform.text",
+            "source_type": "operation",
+            "source_id": "compare_values",
+            "answer_fragment": "Yes",
         }
     ]
     repaired["derivation"]["final_semantic_answer"] = "Yes"
@@ -1407,8 +1552,7 @@ def test_answer_repairs_comparison_polarity_once(tmp_path):
 
 
 def test_candidate_cache_key_changes_when_image_bytes_change(tmp_path):
-    image = tmp_path / "table.png"
-    image.write_bytes(b"first-image")
+    image = _write_trusted_image(tmp_path, "p1", "table.png")
     corpus = tmp_path / "chunks.jsonl"
     corpus.write_text(
         json.dumps(
@@ -1427,14 +1571,67 @@ def test_candidate_cache_key_changes_when_image_bytes_change(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
     candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
     records = reader.chunk_store.load_paper("p1")
     before = reader.judgment_cache_key(_query(), candidate, records)
 
-    image.write_bytes(b"second-image")
+    image.write_bytes(VALID_PNG_ALTERNATE)
     after = reader.judgment_cache_key(_query(), candidate, records)
 
+    assert before != after
+
+
+def test_candidate_cache_key_hashes_chunks_omitted_from_single_context(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_compaction_corpus(corpus)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), max_paper_context_chars=8_000
+    )
+    query = _query()
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    records = reader.chunk_store.load_paper("p1")
+    context = reader._paper_context(query, candidate, records)
+    omitted_chunk_id = context["omitted_chunk_ids"][0]
+    omitted_record = next(
+        record for record in records if record["chunk_id"] == omitted_chunk_id
+    )
+    before = reader.judgment_cache_key(query, candidate, records)
+
+    omitted_record["text"] += " changed outside the selected context"
+    after = reader.judgment_cache_key(query, candidate, records)
+
+    assert omitted_chunk_id not in context["selected_chunk_ids"]
+    assert before != after
+
+
+def test_candidate_cache_key_hashes_images_not_selected_for_attachment(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_paths = _write_image_corpus(corpus, tmp_path, image_count=12)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
+        FakeLLM(),
+        max_paper_images=1,
+    )
+    query = Query(
+        "q_visual_12",
+        "What value is visible in Figure 12?",
+        ["freeform"],
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    records = reader.chunk_store.load_paper("p1")
+    context = reader._paper_context(query, candidate, records)
+    unselected_path = next(
+        path for path in image_paths if path not in context["image_paths"]
+    )
+    before = reader.judgment_cache_key(query, candidate, records)
+
+    Path(unselected_path).write_bytes(VALID_PNG_ALTERNATE)
+    after = reader.judgment_cache_key(query, candidate, records)
+
+    assert len(context["image_paths"]) == 1
     assert before != after
 
 
@@ -1467,227 +1664,155 @@ def test_image_policy_rejection_falls_back_to_text_and_is_recorded(tmp_path):
     assert result["image_fallback_reason"] == "content_policy_violation"
     assert result["requested_image_count"] == 1
     assert result["attached_image_count"] == 0
+    assert result["provider_invocation_count"] == 2
 
 
-def test_full_image_mode_remains_default_and_uses_image_limited_batches(tmp_path):
+def test_many_images_are_ranked_and_attached_in_one_paper_call(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
-    image_paths = _write_image_corpus(corpus, tmp_path, image_count=7)
-    llm = _RecordingMultimodalLLM([_judgment("irrelevant")])
+    image_paths = _write_image_corpus(corpus, tmp_path, image_count=12)
+    raw = json.loads(_judgment("direct_answer", "p1#fig12", answer_meaning="12"))
+    raw["visual"] = {"required": True, "status": "inspected"}
+    llm = _RecordingMultimodalLLM([json.dumps(raw)])
     reader = PairwiseAOAIReader(
-        ChunkStore(corpus), llm, max_images_per_batch=6
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
+        llm,
+        max_paper_images=10,
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    query = Query(
+        "q_visual_12",
+        "How many panels are visible in Figure 12?",
+        ["freeform"],
+    )
+
+    judgment = reader.judge_candidate(query, candidate)
+
+    assert len(llm.calls) == 1
+    attached = llm.calls[0]["image_paths"]
+    assert len(attached) == 2
+    assert len(set(attached)) == 2
+    assert image_paths[11] in attached
+    assert image_paths[11] == attached[0]
+    prompt = str(llm.calls[0]["prompt"])
+    assert "p1#fig12" in prompt
+    assert "figure-12.png" in prompt
+    assert judgment["base_judgment_call_count"] == 1
+    assert judgment["judgment_call_count"] == 1
+    assert judgment["label"] == "direct_answer"
+    assert judgment["evidence_chunk_ids"] == ["p1#fig12"]
+    assert judgment["judgment"]["visual"] == {
+        "required": True,
+        "status": "inspected",
+    }
+    assert judgment["paper_readable_image_count"] == 12
+    assert judgment["attached_image_count"] == 2
+    assert judgment["paper_image_compacted"] is True
+    assert len(judgment["omitted_image_chunk_ids"]) == 10
+    assert "batch_count" not in judgment
+    assert "judgment_image_mode" not in judgment
+
+
+def test_paper_image_selection_is_deterministic(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_image_corpus(corpus, tmp_path, image_count=12)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
+        FakeLLM(),
+        max_paper_images=4,
+    )
+    query = Query(
+        "q_visual_12",
+        "What value is visible in Figure 12?",
+        ["freeform"],
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    records = reader.chunk_store.load_paper("p1")
+
+    first = reader._paper_context(query, candidate, records)
+    second = reader._paper_context(query, candidate, records)
+
+    assert first == second
+    assert len(first["image_paths"]) == 2
+    assert first["image_paths"][0].endswith("figure-12.png")
+    assert len(set(first["image_paths"])) == 2
+    assert first["total_readable_image_count"] == 12
+    assert len(first["omitted_image_chunk_ids"]) == 10
+
+
+def test_implicit_numeric_comparison_keeps_early_figure_fallbacks(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_paths = _write_image_corpus(corpus, tmp_path, image_count=12)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    query = Query(
+        "q_implicit_chart",
+        "Does Category Cedar have more prompts than Category Flint?",
+        ["freeform"],
     )
     candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
 
-    judgment = reader.judge_candidate(_query(), candidate)
-
-    assert reader.judgment_image_mode == "full"
-    assert judgment["judgment_image_mode"] == "full"
-    assert judgment["visual_refinement_status"] == "not_applicable_full"
-    assert [call["image_paths"] for call in llm.calls] == [
-        image_paths[:6],
-        image_paths[6:],
-    ]
-    assert [item["phase"] for item in judgment["batch_judgments"]] == [
-        "full",
-        "full",
-    ]
-    assert [item["phase"] for item in judgment["calls"]] == ["full", "full"]
-
-    explicit_full = PairwiseAOAIReader(
-        ChunkStore(corpus),
-        FakeLLM(),
-        max_images_per_batch=6,
-        judgment_image_mode="full",
-    )
-    records = reader.chunk_store.load_paper("p1")
-    assert reader.judgment_cache_key(_query(), candidate, records) == (
-        explicit_full.judgment_cache_key(_query(), candidate, records)
+    context = reader._paper_context(
+        query, candidate, reader.chunk_store.load_paper("p1")
     )
 
+    assert 2 <= len(context["image_paths"]) <= 7
+    assert image_paths[0] in context["image_paths"]
+    assert image_paths[1] in context["image_paths"]
 
-def test_hybrid_text_screen_ignores_image_cap_and_skips_irrelevant_images(tmp_path):
+
+def test_judgment_cache_key_includes_single_context_limits(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
-    _write_image_corpus(corpus, tmp_path, image_count=7)
-    llm = _RecordingMultimodalLLM([_judgment("irrelevant")])
-    reader = PairwiseAOAIReader(
-        ChunkStore(corpus),
-        llm,
-        max_images_per_batch=6,
-        judgment_image_mode="text_then_relevant_images",
-    )
-
-    judgment = reader.judge_candidate(
-        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
-    )
-
-    # Seven images would make two full-mode batches, but the text screen is
-    # governed only by the character limit and must remain a single call.
-    assert len(llm.calls) == 1
-    assert llm.calls[0]["image_paths"] == []
-    assert judgment["batch_count"] == 1
-    assert judgment["calls"][0]["phase"] == "text_screen"
-    assert judgment["visual_refinement_status"] == "skipped_label"
-    assert judgment["visual_conflict"] is False
-    assert "visual_judgment" not in judgment
-
-
-def test_hybrid_visual_refine_upgrades_label_and_unions_evidence(tmp_path):
-    corpus = tmp_path / "chunks.jsonl"
-    image_paths = _write_image_corpus(corpus, tmp_path, image_count=2)
-    llm = _RecordingMultimodalLLM(
-        [
-            _judgment("partial_answer", "p1#fig1"),
-            _judgment("direct_answer", "p1#fig2"),
-        ]
-    )
-    reader = PairwiseAOAIReader(
-        ChunkStore(corpus),
-        llm,
-        judgment_image_mode="text_then_relevant_images",
-    )
-
-    judgment = reader.judge_candidate(
-        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
-    )
-
-    assert [call["image_paths"] for call in llm.calls] == [[], image_paths]
-    assert [item["phase"] for item in judgment["calls"]] == [
-        "text_screen",
-        "visual_refine",
-    ]
-    assert judgment["visual_refinement_status"] == "complete"
-    assert judgment["text_judgment"]["label"] == "partial_answer"
-    assert judgment["visual_judgment"]["label"] == "direct_answer"
-    assert judgment["label"] == "direct_answer"
-    assert judgment["evidence_chunk_ids"] == ["p1#fig1", "p1#fig2"]
-    assert judgment["visual_conflict"] is False
-
-
-def test_hybrid_refines_text_unreadable_paper_with_available_image(tmp_path):
-    corpus = tmp_path / "chunks.jsonl"
-    image_paths = _write_image_corpus(corpus, tmp_path, image_count=1)
-    unreadable = json.loads(_judgment("unreadable"))
-    unreadable.update(
-        {
-            "paper_role": "target_owner",
-            "missing_constraints": ["visible Figure 1 panels"],
-            "visual": {"required": True, "status": "missing"},
-        }
-    )
-    direct = json.loads(_judgment("direct_answer", "p1#fig1"))
-    direct["visual"] = {"required": True, "status": "inspected"}
-    llm = _RecordingMultimodalLLM(
-        [json.dumps(unreadable), json.dumps(direct)]
-    )
-    reader = PairwiseAOAIReader(
-        ChunkStore(corpus),
-        llm,
-        judgment_image_mode="text_then_relevant_images",
-    )
-
-    judgment = reader.judge_candidate(
-        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
-    )
-
-    assert [call["image_paths"] for call in llm.calls] == [[], image_paths]
-    assert judgment["text_judgment"]["label"] == "unreadable"
-    assert judgment["visual_judgment"]["label"] == "direct_answer"
-    assert judgment["label"] == "direct_answer"
-    assert judgment["visual_refinement_status"] == "complete"
-
-
-def test_hybrid_same_label_prefers_visual_candidate_answer_and_unions_evidence(
-    tmp_path,
-):
-    corpus = tmp_path / "chunks.jsonl"
-    image_paths = _write_image_corpus(corpus, tmp_path, image_count=2)
-    llm = _RecordingMultimodalLLM(
-        [
-            _judgment("partial_answer", "p1#fig1", answer_meaning="2.60"),
-            _judgment("partial_answer", "p1#fig2", answer_meaning="2.06"),
-        ]
-    )
-    reader = PairwiseAOAIReader(
-        ChunkStore(corpus),
-        llm,
-        judgment_image_mode="text_then_relevant_images",
-    )
-
-    judgment = reader.judge_candidate(
-        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
-    )
-
-    assert [call["image_paths"] for call in llm.calls] == [[], image_paths]
-    assert judgment["text_judgment"]["label"] == "partial_answer"
-    assert judgment["visual_judgment"]["label"] == "partial_answer"
-    assert judgment["label"] == "partial_answer"
-    assert judgment["candidate_answer"] == {"meaning": "2.06"}
-    assert judgment["evidence_chunk_ids"] == ["p1#fig1", "p1#fig2"]
-    assert judgment["visual_conflict"] is False
-
-
-def test_hybrid_irrelevant_visual_preserves_text_evidence_and_flags_conflict(
-    tmp_path,
-):
-    corpus = tmp_path / "chunks.jsonl"
-    image_paths = _write_image_corpus(corpus, tmp_path, image_count=1)
-    llm = _RecordingMultimodalLLM(
-        [
-            _judgment("direct_answer", "p1#fig1"),
-            _judgment("irrelevant"),
-        ]
-    )
-    reader = PairwiseAOAIReader(
-        ChunkStore(corpus),
-        llm,
-        judgment_image_mode="text_then_relevant_images",
-    )
-
-    judgment = reader.judge_candidate(
-        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
-    )
-
-    assert [call["image_paths"] for call in llm.calls] == [[], image_paths]
-    assert judgment["label"] == "direct_answer"
-    assert judgment["relevant"] is True
-    assert judgment["evidence_chunk_ids"] == ["p1#fig1"]
-    assert judgment["visual_judgment"]["label"] == "irrelevant"
-    assert judgment["visual_conflict"] is True
-
-
-def test_judgment_cache_key_includes_hybrid_mode_and_refine_labels(tmp_path):
-    corpus = tmp_path / "chunks.jsonl"
-    _write_image_corpus(corpus, tmp_path, image_count=1)
-    store = ChunkStore(corpus)
+    _write_image_corpus(corpus, tmp_path, image_count=2)
+    store = ChunkStore(corpus, image_root=_image_root(tmp_path))
     candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
     records = store.load_paper("p1")
-    full = PairwiseAOAIReader(store, FakeLLM())
-    hybrid = PairwiseAOAIReader(
-        store, FakeLLM(), judgment_image_mode="text_then_relevant_images"
-    )
-    direct_only = PairwiseAOAIReader(
-        store,
-        FakeLLM(),
-        judgment_image_mode="text_then_relevant_images",
-        image_refine_labels=["direct_answer"],
+    readers = (
+        PairwiseAOAIReader(
+            store,
+            FakeLLM(),
+            max_paper_context_chars=8_000,
+            max_paper_images=1,
+        ),
+        PairwiseAOAIReader(
+            store,
+            FakeLLM(),
+            max_paper_context_chars=9_000,
+            max_paper_images=1,
+        ),
+        PairwiseAOAIReader(
+            store,
+            FakeLLM(),
+            max_paper_context_chars=8_000,
+            max_paper_images=2,
+        ),
+        PairwiseAOAIReader(
+            store,
+            FakeLLM(),
+            max_paper_context_chars=8_000,
+            max_judgment_prompt_chars=20_000,
+            max_paper_images=1,
+        ),
     )
 
     keys = {
         reader.judgment_cache_key(_query(), candidate, records)
-        for reader in (full, hybrid, direct_only)
+        for reader in readers
     }
 
-    assert len(keys) == 3
+    assert len(keys) == 4
 
 
-def test_hybrid_refine_labels_cannot_be_empty(tmp_path):
+@pytest.mark.parametrize(
+    "image_limits",
+    [
+        {"max_paper_images": 11},
+        {"max_answer_images": 11},
+    ],
+)
+def test_reader_rejects_more_images_than_aoai_accepts(tmp_path, image_limits):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
 
-    with pytest.raises(ValueError, match="non-empty subset"):
-        PairwiseAOAIReader(
-            ChunkStore(corpus),
-            FakeLLM(),
-            judgment_image_mode="text_then_relevant_images",
-            image_refine_labels=[],
-        )
+    with pytest.raises(ValueError, match="between 0 and 10"):
+        PairwiseAOAIReader(ChunkStore(corpus), FakeLLM(), **image_limits)

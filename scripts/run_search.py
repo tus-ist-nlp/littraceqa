@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,64 @@ from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 from littraceqa.candidate_handoff import production_query_from_record
 from littraceqa.di_pipeline.config import build_pipeline, compose_config, load_config
 from littraceqa.di_pipeline.contracts import Chunk, Query
+
+
+def initialize_prediction_output(path: Path) -> None:
+    """Fail early and atomically replace any stale output with an empty JSONL."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        # Keep cleanup outside the ``with`` block. Windows does not allow an
+        # open NamedTemporaryFile to be unlinked, and attempting that would
+        # otherwise mask the original serialization/fsync error.
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.flush()
+            os.fsync(handle.fileno())
+        assert temporary_path is not None  # assigned immediately after open
+        os.replace(temporary_path, path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def append_prediction(path: Path, prediction: dict[str, Any]) -> None:
+    """Durably append one complete JSON record without rewriting prior rows.
+
+    Serialization happens before the destination is opened, so an invalid
+    prediction cannot alter an existing checkpoint. After writing, ``fsync``
+    makes every completed query durable. Ordinary write/fsync failures roll
+    the file back to its original byte length, preserving a valid JSONL made
+    only of previously completed rows.
+    """
+
+    payload = (json.dumps(prediction, ensure_ascii=False) + "\n").encode("utf-8")
+    with path.open("r+b", buffering=0) as handle:
+        handle.seek(0, os.SEEK_END)
+        original_size = handle.tell()
+        try:
+            remaining = memoryview(payload)
+            while remaining:
+                written = handle.write(remaining)
+                if not written:
+                    raise OSError("failed to append prediction checkpoint")
+                remaining = remaining[written:]
+            os.fsync(handle.fileno())
+        except BaseException:
+            # Keep the last fully persisted row as the recovery boundary. This
+            # also handles KeyboardInterrupt during a normal append operation.
+            handle.truncate(original_size)
+            os.fsync(handle.fileno())
+            raise
 
 
 def load_papers(path: Path) -> list[dict]:
@@ -115,11 +175,12 @@ def load_queries(
 
     既定では本番入力に無いフィールド
     （task_family / primary_evidence_type など）を捨ててから Query を作る。
-    手元の validation_inputs.jsonl は55件すべてに task_family が入っているが、
-    本番入力には無い。task_family は提出論文数（cutoff）を決めるのに使うので、
-    これを与えたまま評価すると「正解を教えてもらった状態」の点数になり、
-    本番の点数と乖離する。production_input=False は過去実験の再現専用で、
-    その結果を本番相当の比較には使わないこと。
+    過去に使っていた開発用 validation スナップショットには55件すべてに
+    task_family が入っていたが、本番入力には無い。task_family は提出論文数
+    （cutoff）を決めるのに使うので、これを与えたまま評価すると「正解を
+    教えてもらった状態」の点数になり、本番の点数と乖離する。
+    production_input=False は過去実験の再現専用で、その結果を本番相当の
+    比較には使わないこと。
 
     現行の公式 multiple-choice 入力には ``multiple_choice_options`` が入る。
     options_path は、これを持たない古いvalidationスナップショットへ公開済みの
@@ -537,19 +598,22 @@ def main() -> None:
             f"[compat] multiple-choice options を {options_path} から補完しました"
             f"（optionsを持つ質問: {n_opt}件）"
         )
+    output_path = Path(args.output)
+    # Fail on an unwritable/malformed destination before the first (potentially
+    # paid) model call, and make it impossible to mistake an older completed
+    # file for the current run when the first query fails.
+    initialize_prediction_output(output_path)
     print(f"{len(queries)} 件の質問に対して検索中...")
 
     predictions = []
     for i, query in enumerate(queries):
         pred = agent.run(query)
-        predictions.append(pred.to_dict())
+        prediction = pred.to_dict()
+        append_prediction(output_path, prediction)
+        predictions.append(prediction)
         if (i + 1) % 10 == 0:
             print(f"  {i + 1}/{len(queries)} 完了")
 
-    output_path = Path(args.output)
-    with output_path.open("w", encoding="utf-8") as f:
-        for pred in predictions:
-            f.write(json.dumps(pred, ensure_ascii=False) + "\n")
     print(f"予測結果を {output_path} に書き出しました")
 
     validation_gold_path = Path("data/validation.jsonl")

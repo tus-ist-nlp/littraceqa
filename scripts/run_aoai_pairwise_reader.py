@@ -1,7 +1,9 @@
 """Run the reading-only, pairwise Azure OpenAI workflow.
 
-Each candidate paper receives its own durable judgment before the answer stage
-starts.  The command never opens a validation gold file.
+Each query-paper pair receives one base AOAI judgment call and its own durable
+checkpoint before the answer stage starts. JSON repair, an image-policy
+text-only fallback, and provider retry are exceptional recovery requests,
+never paper partitions. The command never opens a validation gold file.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from littraceqa.di_pipeline.llm.fake import FakeLLM
 from littraceqa.pairwise_run_store import (
     QueryRunPaths,
     atomic_write_json,
+    ensure_submission_from_answer_checkpoint,
     ensure_manifest,
     invalidate_aggregate_query,
     load_judgments,
@@ -96,7 +99,7 @@ def resolve_image_root(
     source = "cli" if cli_image_root is not None else "config"
     raw = cli_image_root if cli_image_root is not None else config.get("image_root")
     if raw is None:
-        return None, "corpus paths"
+        return None, "disabled"
     if not isinstance(raw, (str, Path)) or not str(raw).strip():
         raise ValueError("image_root must be a non-empty filesystem path")
     path = Path(raw).expanduser()
@@ -198,6 +201,8 @@ def build_manifest(
         },
         "reader": {
             "max_candidates": args.max_candidates,
+            "evidence_policy": args.evidence_policy,
+            "require_evidence": args.evidence_policy == "required",
             "allow_missing_figure_images": args.allow_missing_figure_images,
             "image_root": (
                 str(Path(args.image_root).resolve()) if args.image_root else None
@@ -214,8 +219,10 @@ def build_manifest(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Judge each fixed candidate paper independently with Azure OpenAI, "
-            "then answer from accepted MinerU evidence."
+            "Judge each fixed query-paper pair with one base Azure OpenAI call "
+            "(never by paper partition), then answer from accepted MinerU "
+            "evidence. The required challenge test has 71 questions; "
+            "test_extra's 4,901 questions are optional."
         )
     )
     parser.add_argument(
@@ -248,8 +255,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Allow an isolated explicit Figure/chart/image/panel query to proceed "
-            "without a readable candidate image. This never bypasses a globally "
-            "wrong --image-root where every declared image is unavailable."
+            "without a readable candidate image for diagnostic judgment only; "
+            "requires --stage judge. This never bypasses a globally wrong "
+            "--image-root where every declared image is unavailable."
         ),
     )
     parser.add_argument(
@@ -261,7 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--query-id",
         action="append",
         default=[],
-        help="Run only this query; repeat for several. Default is every input row.",
+        help=(
+            "Run only this query; repeat for several. Default is every input row. "
+            "Do not concatenate the 71-question main test with the optional "
+            "4,901-question test_extra split."
+        ),
     )
     parser.add_argument(
         "--paper-id",
@@ -282,11 +294,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--evidence-policy",
-        choices=("auto", "required", "optional"),
-        default="auto",
+        choices=("required", "optional"),
+        default="required",
         help=(
             "Official test requires evidence; test_extra does not score it. "
-            "auto recognizes a test_extra JSONL filename."
+            "The safe default is required. Pass optional explicitly only for "
+            "test_extra; filenames are never used to weaken this policy."
+        ),
+    )
+    parser.add_argument(
+        "--confirm-full-run",
+        action="store_true",
+        help=(
+            "Confirm an unfiltered all-query AOAI run after its exact minimum "
+            "query/pair/call summary is printed. This does not mean test_extra is "
+            "required: the main challenge test has 71 questions and test_extra's "
+            "4,901 questions are optional. Runs with explicit --query-id values "
+            "do not require this flag."
+        ),
+    )
+    parser.add_argument(
+        "--confirm-optional-test-extra",
+        action="store_true",
+        help=(
+            "Second cost gate required whenever more than 71 queries are "
+            "selected. The 4,901-question test_extra split is optional and must "
+            "never be included merely to complete the main leaderboard run."
         ),
     )
     parser.add_argument("--resume", action="store_true")
@@ -298,20 +331,110 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def require_evidence_for_input(path: str | Path, policy: str) -> bool:
-    """Resolve official test versus test_extra submission policy."""
+def require_evidence_for_policy(policy: str) -> bool:
+    """Resolve an explicit evidence policy without trusting a filename."""
 
     if policy == "required":
         return True
     if policy == "optional":
         return False
-    if policy != "auto":
-        raise ValueError(f"unknown evidence policy: {policy!r}")
-    normalized_name = Path(path).name.lower()
-    return not (
-        normalized_name == "test_extra.jsonl"
-        or normalized_name.startswith("test_extra_")
+    raise ValueError(f"unknown evidence policy: {policy!r}")
+
+
+def _planned_aoai_calls(
+    handoffs: list[CandidateHandoff],
+    *,
+    stage: str,
+    paper_id: str | None,
+) -> tuple[int, int, int]:
+    """Return query count, pair count, and exact fresh minimum AOAI calls.
+
+    Stage 1 makes exactly one base call per selected query-paper pair. Stage 2
+    makes exactly one base call per selected question. JSON repair attempts,
+    image-policy text-only fallbacks, and provider retries can still increase
+    the actual request count.
+    """
+
+    candidate_pairs = sum(
+        1
+        for handoff in handoffs
+        for candidate in handoff.candidate_papers
+        if paper_id is None or candidate.paper_id == paper_id
     )
+    judgment_calls = candidate_pairs if stage in {"all", "judge"} else 0
+    answer_calls = len(handoffs) if stage in {"all", "answer"} else 0
+    return len(handoffs), candidate_pairs, judgment_calls + answer_calls
+
+
+def _print_and_confirm_run_plan(
+    args: argparse.Namespace,
+    selected_handoffs: list[CandidateHandoff],
+) -> None:
+    """Print AOAI scope and require confirmation for an implicit full run."""
+
+    query_count, candidate_pairs, minimum_calls = _planned_aoai_calls(
+        selected_handoffs,
+        stage=args.stage,
+        paper_id=args.paper_id,
+    )
+    print(
+        "AOAI run plan: "
+        f"queries={query_count}, candidate_pairs={candidate_pairs}, "
+        f"minimum_calls_without_cache={minimum_calls}, stage={args.stage}"
+    )
+    if query_count > 71:
+        print(
+            "AOAI scope warning: the required challenge test contains 71 "
+            "questions. test_extra contains 4,901 optional diagnostic questions; "
+            "do not run or concatenate it unless that optional experiment is "
+            "intentional."
+        )
+        if not getattr(args, "confirm_optional_test_extra", False):
+            raise SystemExit(
+                "refusing a run with more than 71 queries without "
+                "--confirm-optional-test-extra; the 4,901-question test_extra "
+                "split is optional and has a separate AOAI budget"
+            )
+    if not args.query_id and not args.confirm_full_run:
+        raise SystemExit(
+            "refusing an unfiltered all-query AOAI run without "
+            "--confirm-full-run; review the run plan above, then pass the flag"
+        )
+
+
+def checkpoint_judgment_update(
+    *,
+    run_dir: Path,
+    query_id: str,
+    judgments_path: Path,
+    judgments: dict[str, dict[str, Any]],
+    candidates: tuple[Any, ...],
+) -> None:
+    """Invalidate aggregate output before durably replacing judgments."""
+
+    invalidate_aggregate_query(run_dir, query_id)
+    write_judgments(judgments_path, judgments, candidates)
+
+
+def checkpoint_answer_update(
+    *,
+    run_dir: Path,
+    query_id: str,
+    answer_path: Path,
+    answer_record: dict[str, Any],
+    submission_path: Path,
+    submission: dict[str, Any],
+) -> None:
+    """Invalidate aggregate output before replacing an answer checkpoint."""
+
+    # ``answer.json`` and ``submission.json`` are two separate atomic files.
+    # Removing this query from the aggregate first ensures that interruption
+    # between their writes cannot leave an older, apparently complete aggregate
+    # row available for upload. ``materialize_run_outputs`` can reconstruct a
+    # missing submission from the current answer on the next invocation.
+    invalidate_aggregate_query(run_dir, query_id)
+    atomic_write_json(answer_path, answer_record)
+    atomic_write_json(submission_path, submission)
 
 
 def _select_handoffs(
@@ -342,34 +465,21 @@ def main() -> None:
         len(args.query_id) != 1 or args.stage != "judge"
     ):
         raise SystemExit("--paper-id requires exactly one --query-id and --stage judge")
+    if args.allow_missing_figure_images and args.stage != "judge":
+        raise SystemExit(
+            "--allow-missing-required-visual-images is a diagnostic --stage judge "
+            "override; it cannot be used with answer or all"
+        )
     for query_id in args.query_id:
         if not _SAFE_QUERY_ID.fullmatch(query_id):
             raise SystemExit(f"unsafe query id: {query_id!r}")
 
     config = load_config(args.reader)
-    require_evidence = require_evidence_for_input(
-        args.queries, args.evidence_policy
-    )
+    require_evidence = require_evidence_for_policy(args.evidence_policy)
     print(
         "submission evidence: "
-        + ("required" if require_evidence else "optional (test_extra policy)")
+        + ("required" if require_evidence else "optional (explicit policy)")
     )
-    try:
-        args.image_root, image_root_source = resolve_image_root(
-            args.image_root, config
-        )
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-    if args.image_root:
-        print(f"image root ({image_root_source}): {args.image_root}")
-    else:
-        print(
-            "image root: not configured; preflight will verify paths embedded "
-            "in the corpus"
-        )
-    # Fail before corpus scanning or writing a run manifest when AOAI
-    # credentials/deployment are absent.
-    llm = build_llm(config)
     all_handoffs = load_candidate_handoffs(
         args.queries,
         args.candidates,
@@ -390,6 +500,25 @@ def main() -> None:
         for handoff in all_handoffs
     ]
     selected_handoffs = _select_handoffs(all_handoffs, args.query_id)
+    _print_and_confirm_run_plan(args, selected_handoffs)
+
+    try:
+        args.image_root, image_root_source = resolve_image_root(
+            args.image_root, config
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.image_root:
+        print(f"image root ({image_root_source}): {args.image_root}")
+    else:
+        print(
+            "image paths are disabled; configure --image-root to enable visual input"
+        )
+    # Fail before corpus scanning or writing a run manifest when AOAI
+    # credentials/deployment are absent. The full-run confirmation gate above
+    # intentionally runs first so an accidental all-query invocation cannot even
+    # instantiate the provider client.
+    llm = build_llm(config)
     if args.chunk_index:
         Path(args.chunk_index).parent.mkdir(parents=True, exist_ok=True)
     store = ChunkStore(
@@ -495,10 +624,13 @@ def main() -> None:
                     )
                     raise
                 judgments[candidate.paper_id] = judgment
-                write_judgments(
-                    paths.judgments, judgments, handoff.candidate_papers
+                checkpoint_judgment_update(
+                    run_dir=run_dir,
+                    query_id=query.query_id,
+                    judgments_path=paths.judgments,
+                    judgments=judgments,
+                    candidates=handoff.candidate_papers,
                 )
-                invalidate_aggregate_query(run_dir, query.query_id)
                 print(
                     f"[{query.query_id} {index}/{total}] rank={candidate.rank} "
                     f"{candidate.paper_id} -> {judgment['label']}"
@@ -521,13 +653,21 @@ def main() -> None:
             expected_answer_key = reader.answer_cache_key(
                 query, list(judgments.values())
             )
-            if paths.answer.exists() and paths.submission.exists() and not args.force:
+            if paths.answer.exists() and not args.force:
                 cached_answer = json.loads(paths.answer.read_text(encoding="utf-8"))
+                if not isinstance(cached_answer, dict):
+                    raise ValueError(f"invalid answer checkpoint: {paths.answer}")
                 if cached_answer.get("cache_key") != expected_answer_key:
                     raise ValueError(
                         f"{query.query_id}: cached answer is stale; rerun with --force "
                         "and this --query-id"
                     )
+                ensure_submission_from_answer_checkpoint(
+                    query,
+                    cached_answer,
+                    paths.submission,
+                    require_evidence=require_evidence,
+                )
                 print(f"[{query.query_id}] answer cached")
             else:
                 try:
@@ -549,8 +689,14 @@ def main() -> None:
                         error=exc,
                     )
                     raise
-                atomic_write_json(paths.answer, answer_record)
-                atomic_write_json(paths.submission, submission)
+                checkpoint_answer_update(
+                    run_dir=run_dir,
+                    query_id=query.query_id,
+                    answer_path=paths.answer,
+                    answer_record=answer_record,
+                    submission_path=paths.submission,
+                    submission=submission,
+                )
                 print(f"[{query.query_id}] answer complete")
     trace_count, submission_count = materialize_run_outputs(
         run_dir,

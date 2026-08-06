@@ -2,36 +2,55 @@ version = 1
 revision = 2
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader')",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader')",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
 ]
 conflicts = [[
     { package = "littraceqa", extra = "azure" },
     { package = "littraceqa", extra = "di-pipeline" },
+], [
+    { package = "littraceqa", extra = "di-pipeline" },
+    { package = "littraceqa", extra = "pairwise-reader" },
 ]]
 
 [manifest]
@@ -43,8 +62,8 @@ version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "packaging" },
     { name = "psutil" },
     { name = "pyyaml" },
@@ -309,8 +328,8 @@ name = "bm25s"
 version = "0.3.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7c/ab/39d08d4589dad6f5735a6b03ee083088dc37fba57fa45d4a0749393b9295/bm25s-0.3.9.tar.gz", hash = "sha256:895c679d952b7de8355edb5f3e1a620a1e2f294d1d42b919bf0821cce2e2f597", size = 80528, upload-time = "2026-05-13T23:08:20.952Z" }
 wheels = [
@@ -458,7 +477,7 @@ name = "colorlog"
 version = "6.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a2/61/f083b5ac52e505dfc1c624eafbf8c7589a0d7f32daa398d2e7590efa5fda/colorlog-6.10.1.tar.gz", hash = "sha256:eb4ae5cb65fe7fec7773c2306061a8e63e02efc2c72eba9d27b0fa23c94f1321", size = 17162, upload-time = "2025-10-16T16:14:11.978Z" }
 wheels = [
@@ -513,7 +532,7 @@ name = "cuda-bindings"
 version = "13.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-pathfinder", marker = "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "cuda-pathfinder" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/6b/457ca12dad3ee9bfcc9a545cfd6b64b359ba49de40f776f6e028e678f262/cuda_bindings-13.3.1-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c5879712accf6e14bb01aa5e67440eb84998b8d104b509cc7a6dc0b8f656a474", size = 6053539, upload-time = "2026-05-29T23:11:43.19Z" },
@@ -545,37 +564,37 @@ wheels = [
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cublas", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cufft", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufile = [
     { name = "nvidia-cufile", marker = "sys_platform == 'linux'" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-curand", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cusolver", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cusparse", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvtx", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -589,8 +608,8 @@ dependencies = [
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "multiprocess" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "packaging" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -677,7 +696,7 @@ dependencies = [
     { name = "latex2mathml" },
     { name = "pandas" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
@@ -710,10 +729,10 @@ dependencies = [
     { name = "docling-core" },
     { name = "huggingface-hub" },
     { name = "jsonlines" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "pydantic" },
     { name = "rtree" },
     { name = "safetensors", extra = ["torch"] },
@@ -734,9 +753,9 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docling-core" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "pydantic" },
-    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/23/3f/7fa6749a3c89ae9ca7586718e9c2f1e42ce92a9397a4f751eda214064081/docling_parse-7.8.0.tar.gz", hash = "sha256:af99bd764835a308078764d04b99c4eeec5b519a854e715cbf56d2ccb2560891", size = 6754332, upload-time = "2026-07-10T14:43:41.946Z" }
 wheels = [
@@ -788,23 +807,23 @@ standard = [
     { name = "huggingface-hub" },
     { name = "mail-parser" },
     { name = "marko" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "openpyxl" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "polyfactory" },
     { name = "pylatexenc" },
     { name = "pypdfium2", version = "4.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pypdfium2", version = "5.12.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pypdfium2", version = "5.12.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "python-docx" },
     { name = "python-dotenv" },
     { name = "python-pptx" },
     { name = "rapidocr" },
     { name = "rich" },
     { name = "rtree" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "torch" },
     { name = "torchvision" },
     { name = "typer" },
@@ -843,8 +862,8 @@ name = "faiss-cpu"
 version = "1.14.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "packaging" },
 ]
 wheels = [
@@ -864,7 +883,7 @@ name = "faker"
 version = "40.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "tzdata", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "tzdata", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/74/e1/adf05724d5838fa9fe2ada64bf390bbf37b77e3714189ae9f17a2c6d0470/faker-40.31.0.tar.gz", hash = "sha256:af163a937aec99dca5abaeb94dd5008c51c26c6e9af1a26c8db4b3c4e7ca4403", size = 2024136, upload-time = "2026-07-14T15:33:32.045Z" }
 wheels = [
@@ -880,8 +899,8 @@ dependencies = [
     { name = "filelock" },
     { name = "joblib" },
     { name = "maturin" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "setuptools" },
     { name = "torch" },
     { name = "usearch" },
@@ -903,8 +922,8 @@ name = "fastkmeans"
 version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "torch" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/08/b5/2ccaf75530a5250825bd5f3c100492e39c43cf2bea84d1bf7ae3def10a85/fastkmeans-0.5.0.tar.gz", hash = "sha256:64196ba228bfa02a98358ee4d30e5af33ddf1aa44cd72e93428916d0e5d2167f", size = 17010, upload-time = "2025-05-14T05:52:38.613Z" }
@@ -1358,6 +1377,7 @@ figures = [
 ]
 pairwise-reader = [
     { name = "openai" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" } },
     { name = "python-dotenv" },
     { name = "pyyaml" },
 ]
@@ -1383,6 +1403,7 @@ requires-dist = [
     { name = "openai", marker = "extra == 'di-pipeline'", specifier = ">=1.109.1" },
     { name = "openai", marker = "extra == 'pairwise-reader'", specifier = ">=1.109.1" },
     { name = "pillow", marker = "extra == 'azure'", specifier = ">=12.3.0" },
+    { name = "pillow", marker = "extra == 'pairwise-reader'", specifier = ">=12.3.0" },
     { name = "pylate", marker = "extra == 'di-pipeline'" },
     { name = "pypdf", specifier = ">=4.0" },
     { name = "pypdfium2", marker = "extra == 'azure'", specifier = ">=5.11.0" },
@@ -1610,7 +1631,7 @@ version = "2.10.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pygments" },
-    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/93/80ac75c20ce54c785648b4ed363c88f148bf22637e10c9863db4fbe73e74/mpire-2.10.2.tar.gz", hash = "sha256:f66a321e93fadff34585a4bfa05e95bd946cf714b442f51c529038eb45773d97", size = 271270, upload-time = "2024-05-07T14:00:31.815Z" }
@@ -1852,19 +1873,27 @@ name = "numpy"
 version = "2.4.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader')",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/ad/fed0499ce6a338d2a03ebae59cd15093910c8875328855781952abf6c2fe/numpy-2.4.6.tar.gz", hash = "sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda", size = 20735807, upload-time = "2026-05-18T23:37:14.07Z" }
 wheels = [
@@ -1925,19 +1954,27 @@ name = "numpy"
 version = "2.5.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader')",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/fd/89965aa4ac08c74998539fcbf24fa3540f3e15237fbeb6bcf9c908f4aade/numpy-2.5.1.tar.gz", hash = "sha256:a48a113e6afea91f5608793bafa7ef2ad481fefbda87ec5069f483de61cb9fa3", size = 20755553, upload-time = "2026-07-04T17:08:00.933Z" }
 wheels = [
@@ -2010,7 +2047,7 @@ name = "nvidia-cudnn-cu13"
 version = "9.19.0.56"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-cublas" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/84/26025437c1e6b61a707442184fa0c03d083b661adf3a3eecfd6d21677740/nvidia_cudnn_cu13-9.19.0.56-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:6ed29ffaee1176c612daf442e4dd6cfeb6a0caa43ddcbeb59da94953030b1be4", size = 433781201, upload-time = "2026-02-03T20:40:53.805Z" },
@@ -2023,7 +2060,7 @@ name = "nvidia-cufft"
 version = "12.0.0.61"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8b/ae/f417a75c0259e85c1d2f83ca4e960289a5f814ed0cea74d18c353d3e989d/nvidia_cufft-12.0.0.61-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:2708c852ef8cd89d1d2068bdbece0aa188813a0c934db3779b9b1faa8442e5f5", size = 214053554, upload-time = "2025-09-04T08:31:38.196Z" },
@@ -2055,9 +2092,9 @@ name = "nvidia-cusolver"
 version = "12.0.4.66"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "nvidia-cusparse", marker = "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "nvidia-nvjitlink", marker = "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-cublas" },
+    { name = "nvidia-cusparse" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/c3/b30c9e935fc01e3da443ec0116ed1b2a009bb867f5324d3f2d7e533e776b/nvidia_cusolver-12.0.4.66-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:02c2457eaa9e39de20f880f4bd8820e6a1cfb9f9a34f820eb12a155aa5bc92d2", size = 223467760, upload-time = "2025-09-04T08:33:04.222Z" },
@@ -2070,7 +2107,7 @@ name = "nvidia-cusparse"
 version = "12.6.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f8/94/5c26f33738ae35276672f12615a64bd008ed5be6d1ebcb23579285d960a9/nvidia_cusparse-12.6.3.3-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:80bcc4662f23f1054ee334a15c72b8940402975e0eab63178fc7e670aa59472c", size = 162155568, upload-time = "2025-09-04T08:33:42.864Z" },
@@ -2163,8 +2200,8 @@ name = "opencv-python"
 version = "5.0.0.93"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/79/4c/a438d23e09ce2033c09f7b784ad2fbdb0adf529e434101ed28f142226f98/opencv_python-5.0.0.93.tar.gz", hash = "sha256:66aac3e5b5faa48d4025816592f3af19e4bfc2c68dec067bae2dbb4ca10aa9e2", size = 81802749, upload-time = "2026-07-02T06:59:53.815Z" }
 wheels = [
@@ -2183,8 +2220,8 @@ name = "opencv-python-headless"
 version = "4.11.0.86"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/36/2f/5b2b3ba52c864848885ba988f24b7f105052f68da9ab0e693cc7c25b0b30/opencv-python-headless-4.11.0.86.tar.gz", hash = "sha256:996eb282ca4b43ec6a3972414de0e2331f5d9cda2b41091a49739c19fb843798", size = 95177929, upload-time = "2025-01-16T13:53:40.22Z" }
 wheels = [
@@ -2222,8 +2259,8 @@ name = "pandas"
 version = "3.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "python-dateutil" },
     { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
 ]
@@ -2836,7 +2873,7 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -2901,7 +2938,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lxml" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "typing-extensions" },
     { name = "xlsxwriter" },
 ]
@@ -2971,7 +3008,7 @@ dependencies = [
     { name = "av" },
     { name = "packaging" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "requests" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b6/b1/ad4fc2260a3badd278b38d642f3b987412f1f6682f0ef2b31b0572d5caa8/qwen_vl_utils-0.0.14.tar.gz", hash = "sha256:9c7cad5ae803b3a10f8bb7194deb12aeacdd032f92f4224e880c73587a7346ad", size = 8453, upload-time = "2025-09-23T09:38:57.532Z" }
@@ -3042,12 +3079,12 @@ version = "3.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorlog" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "omegaconf" },
     { name = "opencv-python" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "pyclipper" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -3066,7 +3103,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "rpds-py" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036, upload-time = "2025-10-13T15:30:48.871Z" }
 wheels = [
@@ -3261,8 +3298,8 @@ wheels = [
 
 [package.optional-dependencies]
 torch = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "torch" },
 ]
 
@@ -3273,10 +3310,10 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "joblib" },
     { name = "narwhals" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "threadpoolctl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fa/6f/37092bdb25f712817231799fc5674d8e704066a8a70c1d2d40517e18b4ab/scikit_learn-1.9.0.tar.gz", hash = "sha256:8833266989d3a5110178a9fae30783675460724d0e1efb13b14901d2c660c557", size = 7750767, upload-time = "2026-06-02T11:54:32.706Z" }
@@ -3306,19 +3343,27 @@ name = "scipy"
 version = "1.17.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "(python_full_version < '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader')",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
 ]
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -3372,19 +3417,27 @@ name = "scipy"
 version = "1.18.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline'",
-    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "(python_full_version >= '3.12' and platform_machine != 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader') or (python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader')",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32' and extra != 'extra-10-littraceqa-azure' and extra != 'extra-10-littraceqa-di-pipeline' and extra != 'extra-10-littraceqa-pairwise-reader'",
 ]
 dependencies = [
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -3432,11 +3485,11 @@ version = "5.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "scikit-learn" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "torch" },
     { name = "tqdm" },
     { name = "transformers" },
@@ -3461,8 +3514,8 @@ name = "shapely"
 version = "2.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4d/bc/0989043118a27cccb4e906a46b7565ce36ca7b57f5a18b78f4f1b0f72d9d/shapely-2.1.2.tar.gz", hash = "sha256:2ed4ecb28320a433db18a5bf029986aa8afcfd740745e78847e330d5d94922a9", size = 315489, upload-time = "2025-09-24T13:51:41.432Z" }
 wheels = [
@@ -3631,7 +3684,7 @@ version = "2.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cuda-bindings", marker = "sys_platform == 'linux'" },
-    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "sys_platform == 'linux' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "sys_platform == 'linux' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "filelock" },
     { name = "fsspec" },
     { name = "jinja2" },
@@ -3669,10 +3722,10 @@ name = "torchvision"
 version = "0.26.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "pillow", version = "10.4.0", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "extra == 'extra-10-littraceqa-di-pipeline'" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-10-littraceqa-azure' or extra != 'extra-10-littraceqa-di-pipeline' or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "torch" },
 ]
 wheels = [
@@ -3713,8 +3766,8 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
     { name = "huggingface-hub" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -3950,8 +4003,8 @@ version = "2.26.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numkong" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-azure' and extra == 'extra-10-littraceqa-di-pipeline') or (extra == 'extra-10-littraceqa-di-pipeline' and extra == 'extra-10-littraceqa-pairwise-reader')" },
     { name = "tqdm" },
 ]
 wheels = [

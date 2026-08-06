@@ -109,6 +109,34 @@ def test_duplicate_row_keys_fail_closed_after_official_normalization():
         prediction_to_submission(query, prediction)
 
 
+def test_serializer_uses_first_schema_column_as_implicit_row_key():
+    query = Query(
+        "q1",
+        "question",
+        ["table"],
+        [
+            {"name": "Method", "type": "string", "is_row_key": False},
+            {"name": "Score", "type": "number", "is_row_key": False},
+        ],
+    )
+    prediction = Prediction(
+        query_id="q1",
+        gold_papers=[{"paper_id": "p1"}],
+        evidence=[Evidence("p1", "text_span", EvidenceLocator(page=1))],
+        answer=Answer(
+            table={
+                "rows": [
+                    {"Method": "X", "Score": 1},
+                    {"Method": " x ", "Score": 2},
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="duplicate table row key"):
+        prediction_to_submission(query, prediction)
+
+
 @pytest.mark.parametrize(
     "row",
     [

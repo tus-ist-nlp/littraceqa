@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from littraceqa.candidate_handoff import CandidateHandoff
-from littraceqa.chunk_store import ChunkStore
+from littraceqa.chunk_store import (
+    IMAGE_PATH_ERROR_KEY,
+    IMAGE_PATH_ORIGINAL_KEY,
+    ChunkStore,
+)
 from littraceqa.mineru_record import record_source_type, submission_evidence_eligible
+from littraceqa.mineru_record import validate_image_file
 from littraceqa.submission import OFFICIAL_SOURCE_TYPES
 
 _TABLE_RE = re.compile(r"\b(table|row|column)\b", re.IGNORECASE)
@@ -42,6 +47,15 @@ _VISUAL_IMAGE_REQUIRED_PATTERNS = tuple(
         r"\b(?:image|figure|graph|diagram)\s+"
         r"(?:shows|depicts|displays|illustrates|contains)\b",
         r"\b(?:plotted|graphed)\s+(?:value|ratio|curve|point|result)s?\b",
+        # Explicit ownership/location wording without a numbered Figure, e.g.
+        # q_020: "in their primary method/framework figure". Requiring a
+        # demonstrative/possessive avoids matching topical phrases such as
+        # "performance in figure generation".
+        r"\b(?:in|within)\s+(?:the|this|that|their|its)\s+"
+        r"(?:(?:primary|main|proposed)\s+)?"
+        r"(?:(?:method|framework|architecture)"
+        r"(?:\s*/\s*(?:method|framework|architecture))?\s+)?"
+        r"(?:figure|diagram)\b",
     )
 )
 
@@ -77,7 +91,9 @@ def inspect_corpus(
     readable_image_paths: set[str] = set()
     missing_image_examples: list[str] = []
     unreadable_image_examples: list[str] = []
+    unsafe_image_examples: list[dict[str, str]] = []
     image_digest = hashlib.sha256()
+    unsafe_image_paths: set[str] = set()
 
     for paper_id in sorted(candidate_ids):
         chunks = store.load_paper(paper_id)
@@ -111,6 +127,21 @@ def inspect_corpus(
 
             if source_type in {"table", "figure"}:
                 image_eligible += 1
+                path_error = metadata.get(IMAGE_PATH_ERROR_KEY)
+                if path_error:
+                    original = str(metadata.get(IMAGE_PATH_ORIGINAL_KEY) or "")
+                    image_declared += 1
+                    unsafe_key = original or f"{paper_id}:{chunk.get('chunk_id')}"
+                    if unsafe_key not in unsafe_image_paths:
+                        unsafe_image_paths.add(unsafe_key)
+                        if len(unsafe_image_examples) < 20:
+                            unsafe_image_examples.append(
+                                {
+                                    "path": original,
+                                    "reason": str(path_error),
+                                }
+                            )
+                    continue
                 raw_path = metadata.get("image_path")
                 if not _nonempty_string(raw_path):
                     continue
@@ -127,6 +158,7 @@ def inspect_corpus(
                         missing_image_examples.append(resolved)
                     continue
                 try:
+                    validate_image_file(image_path)
                     file_digest = _sha256_image(image_path)
                     stat = image_path.stat()
                 except (OSError, ValueError):
@@ -213,12 +245,19 @@ def inspect_corpus(
             )
         else:
             errors.append(message)
+    if unsafe_image_paths:
+        errors.append(
+            f"{len(unsafe_image_paths)} table/figure image paths are unsafe; "
+            "every declared image must be rebased inside an explicit image_root "
+            "using paper_id/auto/images/filename"
+        )
     image_missing = len(image_paths_seen) - image_existing - image_unreadable
     image_without_path = image_eligible - image_declared
-    if image_declared and image_existing == 0:
+    if image_paths_seen and image_existing == 0:
+        unique_declared = len(image_paths_seen) + len(unsafe_image_paths)
         errors.append(
             "all declared table/figure images are unavailable "
-            f"(0 of {len(image_paths_seen)} unique paths readable); check "
+            f"(0 of {unique_declared} unique paths readable); check "
             "--image-root. This global configuration failure cannot be "
             "overridden by --allow-missing-required-visual-images"
         )
@@ -269,13 +308,15 @@ def inspect_corpus(
             "eligible_chunks": image_eligible,
             "declared": image_declared,
             "without_path": image_without_path,
-            "unique_declared": len(image_paths_seen),
+            "unique_declared": len(image_paths_seen) + len(unsafe_image_paths),
             "existing": image_existing,
             "missing": image_missing,
             "unreadable": image_unreadable,
+            "unsafe": len(unsafe_image_paths),
             "content_sha256": image_digest.hexdigest() if image_existing else None,
             "missing_examples": missing_image_examples,
             "unreadable_examples": unreadable_image_examples,
+            "unsafe_examples": unsafe_image_examples,
         },
         "warnings": warnings,
         "errors": errors,
@@ -319,27 +360,6 @@ def _nonempty_string(value: Any) -> bool:
 def _sha256_image(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        header = handle.read(16)
-        if not _supported_image_header(header):
-            raise ValueError(f"unsupported/corrupt image: {path}")
-        digest.update(header)
         while block := handle.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
-
-
-def _supported_image_header(header: bytes) -> bool:
-    return bool(
-        header.startswith(
-            (
-                b"\xff\xd8\xff",
-                b"\x89PNG\r\n\x1a\n",
-                b"GIF87a",
-                b"GIF89a",
-                b"BM",
-                b"II*\x00",
-                b"MM\x00*",
-            )
-        )
-        or (header.startswith(b"RIFF") and header[8:12] == b"WEBP")
-    )

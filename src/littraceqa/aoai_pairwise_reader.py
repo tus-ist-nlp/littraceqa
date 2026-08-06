@@ -9,9 +9,11 @@ labels.  It performs exactly two semantic stages:
 2. Give only the accepted original chunks (plus their immediate neighbours)
    back to the LLM and construct the answer.
 
-Long papers are split deterministically inside stage 1.  A failed API call,
-invalid JSON, or invented chunk ID raises an error; it is never converted into
-an ``irrelevant`` decision.
+Stage 1 sends exactly one selected paper context for each query-paper pair.
+Long papers and image-heavy papers are compacted deterministically before that
+single request; they are never partitioned into additional semantic calls.  A
+failed API call, invalid JSON, or invented chunk ID raises an error; it is never
+converted into an ``irrelevant`` decision.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 from littraceqa.di_pipeline.contracts import Answer, Prediction, Query, RetrievalResult
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.mineru_record import (
+    MAX_AOAI_IMAGES_PER_REQUEST,
     coarse_locator,
     readable_image_path,
     record_source_type,
@@ -54,9 +57,7 @@ from littraceqa.pairwise_prompts import (
     render_judgment_prompt,
 )
 
-SUMMARY_MAX_BATCH_ANSWERS = 64
-SUMMARY_MAX_BATCH_ANSWER_CHARS = 32_000
-SUMMARY_MAX_SINGLE_BATCH_ANSWER_CHARS = 4_000
+PAPER_CONTEXT_SELECTOR_VERSION = "query-lexical-v1"
 
 JUDGMENT_LABELS = (
     "direct_answer",
@@ -69,20 +70,61 @@ JUDGMENT_LABELS = (
 RELEVANT_LABELS = frozenset(
     {"direct_answer", "partial_answer", "supporting_only"}
 )
-JUDGMENT_IMAGE_MODES = frozenset({"full", "text_then_relevant_images"})
-IMAGE_REFINE_LABELS = frozenset(
-    {*RELEVANT_LABELS, "mention_only", "unreadable"}
-)
-_LABEL_PRIORITY = {label: index for index, label in enumerate(reversed(JUDGMENT_LABELS))}
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+%/^-]*")
+_OBJECT_REFERENCE_RE = re.compile(
+    r"(?i)\b(figure|fig\.?|table|equation|eq\.?|algorithm|reference|ref\.?|citation)"
+    r"\s*(?:no\.?\s*)?([A-Za-z]?\d+[A-Za-z]?)\b"
+)
+_QUERY_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "this",
+        "to",
+        "was",
+        "were",
+        "what",
+        "which",
+        "with",
+    }
+)
 
 
-class PaperBatch(TypedDict):
-    """One bounded paper slice sent to the judgment model."""
+class PaperContext(TypedDict):
+    """The only selected paper context sent for one Stage-1 judgment."""
 
     text: str
     records_by_id: dict[str, Record]
     image_paths: list[str]
+    compacted: bool
+    total_chunk_count: int
+    selected_chunk_ids: list[str]
+    omitted_chunk_ids: list[str]
+    full_text_characters: int
+    selected_text_characters: int
+    character_limit: int
+    total_readable_image_count: int
+    selected_image_chunk_ids: list[str]
+    omitted_image_chunk_ids: list[str]
+    selection: list[dict[str, Any]]
 
 
 class AnswerContext(TypedDict):
@@ -105,6 +147,7 @@ class CompletionResult(TypedDict, total=False):
     requested_image_count: int
     attached_image_count: int
     image_fallback_reason: str
+    provider_invocation_count: int
 
 
 class ReadingResponseError(RuntimeError):
@@ -112,7 +155,7 @@ class ReadingResponseError(RuntimeError):
 
 
 class JudgmentEvidenceChunkError(ReadingResponseError):
-    """Stage 1 cited a chunk outside its current candidate-paper batch."""
+    """Stage 1 cited a chunk outside its selected candidate-paper context."""
 
 
 class AnswerEvidenceLocatorError(ReadingResponseError):
@@ -142,9 +185,7 @@ def _judgment_call_record(
     phase: str,
     attempt: str,
     parse_error: str | None,
-    batch_index: int,
-    batch_count: int,
-    batch: PaperBatch,
+    context: PaperContext,
 ) -> dict[str, Any]:
     """Build the durable audit record for one judgment model call."""
     return {
@@ -152,105 +193,10 @@ def _judgment_call_record(
         "usage": completion.get("usage"),
         "phase": phase,
         "attempt": attempt,
-        "batch_index": batch_index,
-        "batch_count": batch_count,
-        "chunk_ids": list(batch["records_by_id"]),
-        "image_paths": list(batch["image_paths"]),
+        "context_chunk_ids": list(context["records_by_id"]),
+        "image_paths": list(context["image_paths"]),
         "raw_response": completion["text"],
         "parse_error": parse_error,
-    }
-
-
-def merge_batch_judgments(
-    judgments: list[dict[str, Any]],
-    *,
-    prefer_later_on_label_tie: bool = False,
-) -> dict[str, Any]:
-    """Merge paper batches while giving explicit owner conflicts precedence.
-
-    A positive finding in one slice must not override another slice that proves
-    the candidate is the wrong owning paper.  Ordinary local misses do not veto
-    later direct evidence, and a constraint found later resolves the same
-    normalized item in ``missing_constraints``.
-    """
-    # Hybrid pair merging supplies text_screen first and visual_refine second.
-    # On an equal label, the image-grounded candidate answer wins while evidence
-    # remains unioned in its original text-then-visual order.
-    best_candidates = reversed(judgments) if prefer_later_on_label_tie else judgments
-    ranked_best = max(best_candidates, key=lambda item: _LABEL_PRIORITY[item["label"]])
-    # ``paper_role`` is the structured owner-identity decision.  Do not make
-    # this safety veto depend on the model choosing one of a few English
-    # phrasings in ``blocking_mismatches``.
-    identity_conflicts = [
-        mismatch
-        for item in judgments
-        if str(item.get("paper_role") or "") == "distractor"
-        for mismatch in item.get("blocking_mismatches") or []
-    ]
-    if identity_conflicts:
-        best = next(
-            item
-            for item in judgments
-            if str(item.get("paper_role") or "") == "distractor"
-            and bool(item.get("blocking_mismatches"))
-        )
-        final_label = "irrelevant"
-    else:
-        best = ranked_best
-        final_label = str(best["label"])
-    evidence_judgments = (
-        [item for item in judgments if item["label"] in RELEVANT_LABELS]
-        if final_label in RELEVANT_LABELS
-        else ([best] if identity_conflicts else judgments)
-    )
-    evidence: list[dict[str, Any]] = []
-    seen_chunks: set[str] = set()
-    for item in evidence_judgments:
-        for evidence_item in item["evidence"]:
-            chunk_id = evidence_item["chunk_id"]
-            if chunk_id not in seen_chunks:
-                seen_chunks.add(chunk_id)
-                evidence.append(evidence_item)
-    satisfied_constraints = _ordered_unique(
-        value
-        for item in evidence_judgments
-        for value in item.get("satisfied_constraints") or []
-    )
-    satisfied_keys = {_normalized_constraint(value) for value in satisfied_constraints}
-    missing_constraints = _ordered_unique(
-        value
-        for item in evidence_judgments
-        for value in item.get("missing_constraints") or []
-        if _normalized_constraint(value) not in satisfied_keys
-    )
-    blocking_mismatches = _ordered_unique(
-        value
-        for item in judgments
-        for value in item.get("blocking_mismatches") or []
-    )
-    return {
-        "paper_role": str(best.get("paper_role") or "uncertain"),
-        "label": final_label,
-        "relevant": final_label in RELEVANT_LABELS,
-        "answerable_from_this_paper": final_label in RELEVANT_LABELS
-        and any(bool(item["answerable_from_this_paper"]) for item in judgments),
-        "satisfied_constraints": satisfied_constraints,
-        "missing_constraints": missing_constraints,
-        "blocking_mismatches": blocking_mismatches,
-        "identity_conflict": bool(identity_conflicts),
-        "visual": dict(best.get("visual") or {}),
-        "evidence": evidence,
-        "evidence_chunk_ids": [item["chunk_id"] for item in evidence],
-        "candidate_answer": dict(best["candidate_answer"]),
-        "candidate_answers_by_batch": [
-            item["candidate_answer"]
-            for item in evidence_judgments
-            if item["candidate_answer"]
-        ],
-        "confidence": max(float(item["confidence"]) for item in evidence_judgments),
-        "reason": " | ".join(
-            str(item["reason"]) for item in judgments if item["reason"]
-        ),
     }
 
 
@@ -261,26 +207,39 @@ class PairwiseAOAIReader:
         self,
         chunk_store: ChunkStore,
         llm: LLMClient,
-        max_batch_chars: int = 160_000,
-        batch_overlap_chars: int = 1_000,
-        max_images_per_batch: int = 6,
+        max_paper_context_chars: int = 220_000,
+        max_judgment_prompt_chars: int = 240_000,
+        max_paper_images: int = MAX_AOAI_IMAGES_PER_REQUEST,
         answer_context_chars: int = 220_000,
         answer_neighbor_chunks: int = 1,
-        max_answer_images: int = 12,
+        max_answer_images: int = MAX_AOAI_IMAGES_PER_REQUEST,
         max_evidence: int = 32,
         max_evidence_per_paper: int | None = None,
-        judgment_image_mode: str = "full",
-        image_refine_labels: Iterable[str] | None = None,
     ) -> None:
-        if max_batch_chars < 8_000:
-            raise ValueError("max_batch_chars must be at least 8000")
-        if batch_overlap_chars < 0 or batch_overlap_chars >= max_batch_chars // 2:
-            raise ValueError("batch_overlap_chars is out of range")
-        if max_images_per_batch < 0 or max_answer_images < 0:
-            raise ValueError("image limits must be non-negative")
+        if max_paper_context_chars < 8_000:
+            raise ValueError("max_paper_context_chars must be at least 8000")
+        if max_judgment_prompt_chars < max_paper_context_chars + 8_000:
+            raise ValueError(
+                "max_judgment_prompt_chars must reserve at least 8000 characters "
+                "above max_paper_context_chars"
+            )
+        if (
+            max_paper_images < 0
+            or max_answer_images < 0
+            or max_paper_images > MAX_AOAI_IMAGES_PER_REQUEST
+            or max_answer_images > MAX_AOAI_IMAGES_PER_REQUEST
+        ):
+            raise ValueError(
+                "image limits must be between 0 and "
+                f"{MAX_AOAI_IMAGES_PER_REQUEST} per AOAI request"
+            )
         if answer_context_chars < 8_000:
             raise ValueError("answer_context_chars must be at least 8000")
-        resolved_per_paper = min(4, max_evidence) if max_evidence_per_paper is None else max_evidence_per_paper
+        resolved_per_paper = (
+            min(4, max_evidence)
+            if max_evidence_per_paper is None
+            else max_evidence_per_paper
+        )
         if (
             answer_neighbor_chunks < 0
             or max_evidence < 1
@@ -288,36 +247,16 @@ class PairwiseAOAIReader:
             or resolved_per_paper > max_evidence
         ):
             raise ValueError("invalid answer context limits")
-        if judgment_image_mode not in JUDGMENT_IMAGE_MODES:
-            raise ValueError(
-                "judgment_image_mode must be full or text_then_relevant_images"
-            )
-        requested_refine_labels = (
-            set(IMAGE_REFINE_LABELS)
-            if image_refine_labels is None
-            else set(image_refine_labels)
-        )
-        if not requested_refine_labels or not requested_refine_labels.issubset(
-            IMAGE_REFINE_LABELS
-        ):
-            raise ValueError(
-                "image_refine_labels must be a non-empty subset of direct_answer, "
-                "partial_answer, supporting_only, mention_only, and unreadable"
-            )
         self.chunk_store = chunk_store
         self.llm = llm
-        self.max_batch_chars = max_batch_chars
-        self.batch_overlap_chars = batch_overlap_chars
-        self.max_images_per_batch = max_images_per_batch
+        self.max_paper_context_chars = max_paper_context_chars
+        self.max_judgment_prompt_chars = max_judgment_prompt_chars
+        self.max_paper_images = max_paper_images
         self.answer_context_chars = answer_context_chars
         self.answer_neighbor_chunks = answer_neighbor_chunks
         self.max_answer_images = max_answer_images
         self.max_evidence = max_evidence
         self.max_evidence_per_paper = resolved_per_paper
-        self.judgment_image_mode = judgment_image_mode
-        self.image_refine_labels = tuple(
-            label for label in JUDGMENT_LABELS if label in requested_refine_labels
-        )
 
     # ---- Stage 1: one query x one candidate paper -------------------------
 
@@ -333,11 +272,10 @@ class PairwiseAOAIReader:
             "paper_content_sha256": _records_sha256(records),
             "paper_image_content_sha256": _image_content_sha256(records),
             "limits": {
-                "max_batch_chars": self.max_batch_chars,
-                "batch_overlap_chars": self.batch_overlap_chars,
-                "max_images_per_batch": self.max_images_per_batch,
-                "judgment_image_mode": self.judgment_image_mode,
-                "image_refine_labels": list(self.image_refine_labels),
+                "paper_context_selector_version": PAPER_CONTEXT_SELECTOR_VERSION,
+                "max_paper_context_chars": self.max_paper_context_chars,
+                "max_judgment_prompt_chars": self.max_judgment_prompt_chars,
+                "max_paper_images": self.max_paper_images,
             },
         }
         return _json_sha256(payload)
@@ -354,63 +292,96 @@ class PairwiseAOAIReader:
                 f"{query.query_id}: candidate paper is absent from MinerU corpus: "
                 f"{candidate.paper_id}"
             )
-        text_judgment: dict[str, Any] | None = None
-        visual_judgment: dict[str, Any] | None = None
-        visual_refinement_status = "not_applicable_full"
-        visual_conflict = False
-
-        if self.judgment_image_mode == "full":
-            batches = self._paper_batches(records)
-            batch_judgments, calls = self._judge_batches(
+        context = self._paper_context(query, candidate, records)
+        prompt = self._judgment_prompt(
+            query=query,
+            candidate=candidate,
+            context=context,
+        )
+        if len(prompt) > self.max_judgment_prompt_chars:
+            reduced_limit = max(
+                8_000,
+                self.max_paper_context_chars
+                - (len(prompt) - self.max_judgment_prompt_chars)
+                - 1_000,
+            )
+            context = self._paper_context(
+                query, candidate, records, max_chars=reduced_limit
+            )
+            prompt = self._judgment_prompt(
                 query=query,
                 candidate=candidate,
-                batches=batches,
-                phase="full",
+                context=context,
             )
-            merged = merge_batch_judgments(batch_judgments)
+        if len(prompt) > self.max_judgment_prompt_chars:
+            raise ValueError(
+                f"{query.query_id}/{candidate.paper_id}: rendered judgment prompt "
+                f"has {len(prompt)} characters, exceeding "
+                f"max_judgment_prompt_chars={self.max_judgment_prompt_chars}"
+            )
+        completion = self._complete(prompt, context["image_paths"])
+        calls: list[dict[str, Any]] = []
+        try:
+            parsed = self._parse_judgment(
+                query=query,
+                candidate=candidate,
+                payload_text=completion["text"],
+                allowed_records=context["records_by_id"],
+                attached_image_paths=_completion_attached_paths(
+                    completion, context["image_paths"]
+                ),
+            )
+        except ReadingResponseError as exc:
+            calls.append(
+                _judgment_call_record(
+                    completion,
+                    phase="single_context",
+                    attempt="initial",
+                    parse_error=str(exc),
+                    context=context,
+                )
+            )
+            repair_prompt = self._judgment_evidence_repair_prompt(
+                original_prompt=prompt,
+                rejected_response=completion["text"],
+                error=exc,
+                allowed_chunk_ids=list(context["records_by_id"]),
+            )
+            repair_completion = self._complete(
+                repair_prompt, context["image_paths"]
+            )
+            parsed = self._parse_judgment(
+                query=query,
+                candidate=candidate,
+                payload_text=repair_completion["text"],
+                allowed_records=context["records_by_id"],
+                attached_image_paths=_completion_attached_paths(
+                    repair_completion, context["image_paths"]
+                ),
+            )
+            calls.append(
+                _judgment_call_record(
+                    repair_completion,
+                    phase="single_context",
+                    attempt="evidence_repair",
+                    parse_error=None,
+                    context=context,
+                )
+            )
         else:
-            text_batches = self._paper_batches(records, include_images=False)
-            text_batch_judgments, text_calls = self._judge_batches(
-                query=query,
-                candidate=candidate,
-                batches=text_batches,
-                phase="text_screen",
+            calls.append(
+                _judgment_call_record(
+                    completion,
+                    phase="single_context",
+                    attempt="initial",
+                    parse_error=None,
+                    context=context,
+                )
             )
-            text_judgment = merge_batch_judgments(text_batch_judgments)
-            merged = text_judgment
-            batch_judgments = list(text_batch_judgments)
-            calls = list(text_calls)
 
-            should_refine = any(
-                item["label"] in self.image_refine_labels
-                for item in text_batch_judgments
-            )
-            if not should_refine:
-                visual_refinement_status = "skipped_label"
-            else:
-                visual_batches = [
-                    batch
-                    for batch in self._paper_batches(records, include_images=True)
-                    if batch["image_paths"]
-                ]
-                if not visual_batches:
-                    visual_refinement_status = "skipped_no_images"
-                else:
-                    visual_batch_judgments, visual_calls = self._judge_batches(
-                        query=query,
-                        candidate=candidate,
-                        batches=visual_batches,
-                        phase="visual_refine",
-                    )
-                    visual_judgment = merge_batch_judgments(visual_batch_judgments)
-                    visual_refinement_status = "complete"
-                    visual_conflict = not bool(visual_judgment["relevant"])
-                    merged = merge_batch_judgments(
-                        [text_judgment, visual_judgment],
-                        prefer_later_on_label_tie=True,
-                    )
-                    batch_judgments.extend(visual_batch_judgments)
-                    calls.extend(visual_calls)
+        parsed["relevant"] = parsed["label"] in RELEVANT_LABELS
+        parsed["identity_conflict"] = parsed["paper_role"] == "distractor"
+        parsed["visual_conflict"] = False
 
         result = {
             "query_id": query.query_id,
@@ -422,204 +393,248 @@ class PairwiseAOAIReader:
             "paper_content_sha256": _records_sha256(records),
             "paper_image_content_sha256": _image_content_sha256(records),
             "paper_chunk_count": len(records),
-            "batch_count": len(batch_judgments),
-            "judgment_image_mode": self.judgment_image_mode,
-            "visual_refinement_status": visual_refinement_status,
-            "visual_conflict": visual_conflict,
-            **merged,
-            "batch_judgments": batch_judgments,
+            "paper_context_selector_version": PAPER_CONTEXT_SELECTOR_VERSION,
+            "paper_context_compacted": context["compacted"],
+            "context_chunk_count": len(context["selected_chunk_ids"]),
+            "omitted_chunk_count": len(context["omitted_chunk_ids"]),
+            "context_chunk_ids": context["selected_chunk_ids"],
+            "omitted_chunk_ids": context["omitted_chunk_ids"],
+            "paper_full_text_characters": context["full_text_characters"],
+            "paper_context_characters": context["selected_text_characters"],
+            "paper_context_character_limit": context["character_limit"],
+            "paper_image_compacted": (
+                context["total_readable_image_count"] > len(context["image_paths"])
+            ),
+            "paper_readable_image_count": context["total_readable_image_count"],
+            "attached_image_count": len(context["image_paths"]),
+            "attached_image_chunk_ids": context["selected_image_chunk_ids"],
+            "omitted_image_chunk_ids": context["omitted_image_chunk_ids"],
+            "paper_context_selection": context["selection"],
+            "base_judgment_call_count": 1,
+            "logical_judgment_attempt_count": len(calls),
+            "judgment_call_count": sum(
+                int(call.get("provider_invocation_count") or 1) for call in calls
+            ),
+            "provider_invocation_count": sum(
+                int(call.get("provider_invocation_count") or 1) for call in calls
+            ),
+            **parsed,
+            "judgment": parsed,
             "calls": calls,
         }
-        if text_judgment is not None:
-            result["text_judgment"] = text_judgment
-        if visual_judgment is not None:
-            result["visual_judgment"] = visual_judgment
         return result
 
-    def _judge_batches(
+    def _paper_context(
         self,
-        *,
         query: Query,
         candidate: CandidatePaper,
-        batches: list[PaperBatch],
-        phase: str,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        batch_judgments: list[dict[str, Any]] = []
-        calls: list[dict[str, Any]] = []
-        for batch_index, batch in enumerate(batches, start=1):
-            prompt = self._judgment_prompt(
-                query=query,
-                candidate=candidate,
-                batch=batch,
-                batch_index=batch_index,
-                batch_count=len(batches),
-            )
-            completion = self._complete(prompt, batch["image_paths"])
+        records: list[Record],
+        *,
+        max_chars: int | None = None,
+    ) -> PaperContext:
+        """Select one deterministic, query-focused context for a whole paper."""
 
-            try:
-                parsed = self._parse_judgment(
-                    query=query,
-                    candidate=candidate,
-                    payload_text=completion["text"],
-                    allowed_records=batch["records_by_id"],
-                    batch_index=batch_index,
-                    attached_image_count=int(
-                        completion.get("attached_image_count") or 0
-                    ),
-                )
-            except ReadingResponseError as exc:
-                calls.append(
-                    _judgment_call_record(
-                        completion,
-                        phase=phase,
-                        attempt="initial",
-                        parse_error=str(exc),
-                        batch_index=batch_index,
-                        batch_count=len(batches),
-                        batch=batch,
-                    )
-                )
-                repair_prompt = self._judgment_evidence_repair_prompt(
-                    original_prompt=prompt,
-                    rejected_response=completion["text"],
-                    error=exc,
-                    allowed_chunk_ids=list(batch["records_by_id"]),
-                )
-                repair_completion = self._complete(
-                    repair_prompt, batch["image_paths"]
-                )
-                # Parse with the exact same validator. A second invalid ID or
-                # any other malformed repair remains a hard failure.
-                parsed = self._parse_judgment(
-                    query=query,
-                    candidate=candidate,
-                    payload_text=repair_completion["text"],
-                    allowed_records=batch["records_by_id"],
-                    batch_index=batch_index,
-                    attached_image_count=int(
-                        repair_completion.get("attached_image_count") or 0
-                    ),
-                )
-                calls.append(
-                    _judgment_call_record(
-                        repair_completion,
-                        phase=phase,
-                        attempt="evidence_repair",
-                        parse_error=None,
-                        batch_index=batch_index,
-                        batch_count=len(batches),
-                        batch=batch,
-                    )
-                )
-            else:
-                calls.append(
-                    _judgment_call_record(
-                        completion,
-                        phase=phase,
-                        attempt="initial",
-                        parse_error=None,
-                        batch_index=batch_index,
-                        batch_count=len(batches),
-                        batch=batch,
-                    )
-                )
-            parsed["phase"] = phase
-            batch_judgments.append(parsed)
-        return batch_judgments, calls
-
-    def _paper_batches(
-        self, records: list[Record], *, include_images: bool = True
-    ) -> list[PaperBatch]:
-        segments: list[tuple[Record, str]] = []
-        # Reserve space for instructions and the query.  A single oversized
-        # MinerU chunk is sliced, while retaining its original chunk_id so the
-        # evidence locator remains mechanically verifiable.
-        segment_chars = max(4_000, self.max_batch_chars - 12_000)
+        require_production_query(query)
+        context_char_limit = self.max_paper_context_chars if max_chars is None else max_chars
+        if context_char_limit < 8_000:
+            raise ValueError("paper context character limit must be at least 8000")
+        if not records:
+            raise ValueError("paper has no readable MinerU chunks")
+        chunk_ids: list[str] = []
         for record in records:
             chunk_id = str(record.get("chunk_id") or "")
             if not chunk_id:
                 raise ValueError(
                     f"MinerU record has no chunk_id: paper_id={record.get('paper_id')!r}"
                 )
-            text = str(record.get("text") or "")
-            pieces = _split_text(text, segment_chars, self.batch_overlap_chars)
-            for piece_index, piece in enumerate(pieces, start=1):
-                segments.append(
-                    (
-                        record,
-                        self._format_record(
-                            record,
-                            text=piece,
-                            segment=(piece_index, len(pieces)),
-                        ),
-                    )
+            if chunk_id in chunk_ids:
+                raise ValueError(
+                    f"duplicate MinerU chunk_id in {candidate.paper_id}: {chunk_id}"
                 )
+            chunk_ids.append(chunk_id)
 
-        batches: list[PaperBatch] = []
-        parts: list[str] = []
-        records_by_id: dict[str, Record] = {}
-        image_paths: list[str] = []
-        used_chars = 0
+        focus = _query_selection_focus(query)
+        scores, reasons = _paper_record_scores(
+            records, focus, source_question=query.question
+        )
+        full_parts = [
+            self._format_record(record, text=str(record.get("text") or ""))
+            for record in records
+        ]
+        full_text = "\n\n".join(full_parts)
 
-        def flush() -> None:
-            nonlocal parts, records_by_id, image_paths, used_chars
-            if not parts:
-                return
-            batches.append(
-                {
-                    "text": "\n\n".join(parts),
-                    "records_by_id": records_by_id,
-                    "image_paths": image_paths,
-                }
+        explicit_indices = [
+            index
+            for index, item_reasons in enumerate(reasons)
+            if "explicit_object_reference" in item_reasons
+        ]
+        title_indices = [
+            index
+            for index, record in enumerate(records)
+            if index == 0 or record_source_type(record) == "title_abstract"
+        ]
+        image_indices = _ranked_image_record_indices(
+            records,
+            scores=scores,
+            reasons=reasons,
+            limit=self.max_paper_images,
+            question=query.question,
+        )
+
+        if len(full_text) <= context_char_limit:
+            selected_indices = list(range(len(records)))
+            rendered_by_index = dict(enumerate(full_parts))
+            compacted = False
+        else:
+            compacted = True
+            # Exact requested objects are non-negotiable.  The title/abstract
+            # anchors paper identity, and each selected image needs its source
+            # chunk in the same request.  All remaining chunks compete by a
+            # deterministic query-only score; immediate neighbours are mildly
+            # promoted to preserve local reading context.
+            forced = _ordered_unique_ints(
+                [*explicit_indices, *title_indices, *image_indices]
             )
-            parts = []
-            records_by_id = {}
-            image_paths = []
+            ranked = sorted(
+                range(len(records)), key=lambda index: (-scores[index], index)
+            )
+            neighbour_indices: list[int] = []
+            for index in [*explicit_indices, *ranked[:8]]:
+                if index > 0:
+                    neighbour_indices.append(index - 1)
+                if index + 1 < len(records):
+                    neighbour_indices.append(index + 1)
+            priority = _ordered_unique_ints(
+                [*forced, *neighbour_indices, *ranked]
+            )
+            selected: set[int] = set()
+            rendered_by_index: dict[int, str] = {}
             used_chars = 0
+            forced_set = set(forced)
+            forced_remaining = len(forced)
+            for index in priority:
+                record = records[index]
+                separator_chars = 2 if selected else 0
+                available = context_char_limit - used_chars - separator_chars
+                if available <= 256:
+                    break
+                full_rendered = full_parts[index]
+                is_forced = index in forced_set
+                if is_forced:
+                    # Do not let one giant essential chunk consume the space
+                    # needed by later explicit objects or selected images.
+                    fair_share = max(512, available // max(1, forced_remaining))
+                    target = min(available, max(512, fair_share))
+                    rendered = _bounded_formatted_record(
+                        self,
+                        record,
+                        focus=focus,
+                        max_chars=target,
+                    )
+                    forced_remaining -= 1
+                elif len(full_rendered) <= available:
+                    rendered = full_rendered
+                else:
+                    # Continue looking: a later, shorter high-scoring record may
+                    # still fit.  Non-essential chunks are never split into a
+                    # second request.
+                    continue
+                if len(rendered) > available:
+                    continue
+                selected.add(index)
+                rendered_by_index[index] = rendered
+                used_chars += separator_chars + len(rendered)
 
-        for record, formatted in segments:
-            image_path = readable_image_path(record) if include_images else ""
-            adds_image = bool(image_path and image_path not in image_paths)
-            exceeds_chars = bool(parts and used_chars + len(formatted) > self.max_batch_chars)
-            exceeds_images = bool(
-                parts
-                and adds_image
-                and len(image_paths) >= self.max_images_per_batch
-            )
-            if exceeds_chars or exceeds_images:
-                flush()
-            parts.append(formatted)
-            used_chars += len(formatted)
-            chunk_id = str(record["chunk_id"])
-            records_by_id[chunk_id] = record
-            if (
-                image_path
-                and image_path not in image_paths
-                and len(image_paths) < self.max_images_per_batch
-            ):
+            if not selected:
+                raise ValueError(
+                    f"{query.query_id}/{candidate.paper_id}: paper context selection "
+                    "could not fit any chunk"
+                )
+            selected_indices = sorted(selected)
+
+        selected_set = set(selected_indices)
+        selected_parts = [rendered_by_index[index] for index in selected_indices]
+        text = "\n\n".join(selected_parts)
+        if len(text) > context_char_limit:
+            raise AssertionError("paper context exceeds configured character limit")
+        selected_image_indices = [
+            index for index in image_indices if index in selected_set
+        ]
+        image_paths: list[str] = []
+        for index in selected_image_indices:
+            image_path = readable_image_path(records[index])
+            if image_path and image_path not in image_paths:
                 image_paths.append(image_path)
-        flush()
-        if not batches:
-            raise ValueError("paper has no readable MinerU chunks")
-        return batches
+
+        readable_image_paths = {
+            path
+            for record in records
+            if (path := readable_image_path(record))
+        }
+        attached_image_paths = set(image_paths)
+        selected_image_chunk_ids = [
+            chunk_ids[index]
+            for index in selected_indices
+            if (path := readable_image_path(records[index]))
+            and path in attached_image_paths
+        ]
+        omitted_image_chunk_ids = [
+            chunk_ids[index]
+            for index, record in enumerate(records)
+            if (path := readable_image_path(record))
+            and path not in attached_image_paths
+        ]
+
+        records_by_id = {
+            chunk_ids[index]: records[index] for index in selected_indices
+        }
+        omitted_ids = [
+            chunk_id
+            for index, chunk_id in enumerate(chunk_ids)
+            if index not in selected_set
+        ]
+        selection = [
+            {
+                "chunk_id": chunk_ids[index],
+                "score": round(scores[index], 6),
+                "reasons": reasons[index] or ["original_order_fallback"],
+                "text_characters": len(rendered_by_index[index]),
+                "image_attached": index in selected_image_indices,
+            }
+            for index in selected_indices
+        ]
+        return {
+            "text": text,
+            "records_by_id": records_by_id,
+            "image_paths": image_paths,
+            "compacted": compacted,
+            "total_chunk_count": len(records),
+            "selected_chunk_ids": list(records_by_id),
+            "omitted_chunk_ids": omitted_ids,
+            "full_text_characters": len(full_text),
+            "selected_text_characters": len(text),
+            "character_limit": context_char_limit,
+            "total_readable_image_count": len(readable_image_paths),
+            "selected_image_chunk_ids": selected_image_chunk_ids,
+            "omitted_image_chunk_ids": omitted_image_chunk_ids,
+            "selection": selection,
+        }
 
     def _judgment_prompt(
         self,
         *,
         query: Query,
         candidate: CandidatePaper,
-        batch: PaperBatch,
-        batch_index: int,
-        batch_count: int,
+        context: PaperContext,
     ) -> str:
-        image_legend = self._image_legend(batch["records_by_id"], batch["image_paths"])
+        image_legend = self._image_legend(
+            context["records_by_id"], context["image_paths"]
+        )
         return render_judgment_prompt(
             query=query,
             query_payload=_production_query_payload(query),
             candidate_payload=_candidate_payload(candidate),
-            paper_text=batch["text"],
-            batch_index=batch_index,
-            batch_count=batch_count,
+            paper_text=context["text"],
             image_legend=image_legend,
         )
 
@@ -630,25 +645,24 @@ class PairwiseAOAIReader:
         candidate: CandidatePaper,
         payload_text: str,
         allowed_records: dict[str, Record],
-        batch_index: int,
-        attached_image_count: int = 0,
+        attached_image_paths: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         payload = parse_json_object(payload_text)
         if not isinstance(payload, dict):
             raise ReadingResponseError(
-                f"{query.query_id}/{candidate.paper_id}/batch {batch_index}: "
+                f"{query.query_id}/{candidate.paper_id}: "
                 "judgment response is not a JSON object"
             )
         label = str(payload.get("label") or "")
         if label not in JUDGMENT_LABELS:
             raise ReadingResponseError(
-                f"{query.query_id}/{candidate.paper_id}/batch {batch_index}: "
+                f"{query.query_id}/{candidate.paper_id}: "
                 f"invalid judgment label {label!r}"
             )
         answerable = payload.get("answerable_from_this_paper")
         if not isinstance(answerable, bool):
             raise ReadingResponseError(
-                f"{query.query_id}/{candidate.paper_id}/batch {batch_index}: "
+                f"{query.query_id}/{candidate.paper_id}: "
                 "answerable_from_this_paper must be boolean"
             )
         paper_role = str(payload.get("paper_role") or "uncertain")
@@ -690,7 +704,10 @@ class PairwiseAOAIReader:
             raise ReadingResponseError(
                 "visual.required=false requires status=not_needed"
             )
-        if visual_status == "inspected" and attached_image_count < 1:
+        attached_images = {
+            str(Path(path).resolve()) for path in (attached_image_paths or [])
+        }
+        if visual_status == "inspected" and not attached_images:
             raise ReadingResponseError(
                 "visual.status=inspected requires an actually attached image"
             )
@@ -749,6 +766,18 @@ class PairwiseAOAIReader:
             raise ReadingResponseError(
                 f"{query.query_id}/{candidate.paper_id}: {label} requires evidence"
             )
+        if visual_status == "inspected":
+            cited_images = {
+                str(Path(path).resolve())
+                for item in evidence
+                if (record := allowed_records.get(str(item["chunk_id"]))) is not None
+                if (path := readable_image_path(record))
+            }
+            if not cited_images.intersection(attached_images):
+                raise ReadingResponseError(
+                    "visual.status=inspected requires evidence from the actually "
+                    "attached source image"
+                )
         confidence = payload.get("confidence")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             raise ReadingResponseError("judgment confidence must be a number")
@@ -791,7 +820,7 @@ class PairwiseAOAIReader:
             "If no allowed chunk supports a relevant label, return the appropriate "
             "non-relevant label with empty evidence instead.\n"
             f"Validation error: {error}\n"
-            f"Allowed batch chunk_ids: {_json_dumps(allowed_chunk_ids)}\n"
+            f"Allowed selected-context chunk_ids: {_json_dumps(allowed_chunk_ids)}\n"
             "<rejected_response>\n"
             + rejected_response
             + "\n</rejected_response>\nReturn one corrected JSON object only."
@@ -805,29 +834,23 @@ class PairwiseAOAIReader:
         require_production_query(query)
         stable_judgments = [
             {
-                **{
-                    key: judgment.get(key)
-                    for key in (
-                        "paper_id",
-                        "rank",
-                        "cache_key",
-                        "label",
-                        "relevant",
-                        "satisfied_constraints",
-                        "missing_constraints",
-                        "blocking_mismatches",
-                        "evidence",
-                        "candidate_answer",
-                        "reason",
-                        "visual_conflict",
-                        "paper_role",
-                        "identity_conflict",
-                        "visual",
-                    )
-                },
-                "candidate_answers_by_batch": _bounded_candidate_answers_by_batch(
-                    judgment.get("candidate_answers_by_batch")
-                ),
+                key: judgment.get(key)
+                for key in (
+                    "paper_id",
+                    "rank",
+                    "cache_key",
+                    "label",
+                    "relevant",
+                    "satisfied_constraints",
+                    "missing_constraints",
+                    "blocking_mismatches",
+                    "evidence",
+                    "candidate_answer",
+                    "reason",
+                    "paper_role",
+                    "identity_conflict",
+                    "visual",
+                )
             }
             for judgment in sorted(
                 judgments, key=lambda item: (int(item.get("rank") or 0), item.get("paper_id"))
@@ -877,6 +900,12 @@ class PairwiseAOAIReader:
         context = self._answer_context(query, relevant)
         prompt = self._answer_prompt(query, relevant, context)
         relevant_paper_ids = {str(item["paper_id"]) for item in relevant}
+        required_visual_paper_ids = {
+            str(item["paper_id"])
+            for item in relevant
+            if isinstance(item.get("visual"), dict)
+            and item["visual"].get("required") is True
+        }
         completion = self._complete(prompt, context["image_paths"])
         attempts: list[dict[str, Any]] = []
         try:
@@ -888,6 +917,7 @@ class PairwiseAOAIReader:
                 attached_image_paths=_completion_attached_paths(
                     completion, context["image_paths"]
                 ),
+                required_visual_paper_ids=required_visual_paper_ids,
             )
         except ReadingResponseError as exc:
             attempts.append(
@@ -914,6 +944,7 @@ class PairwiseAOAIReader:
                 attached_image_paths=_completion_attached_paths(
                     completion, context["image_paths"]
                 ),
+                required_visual_paper_ids=required_visual_paper_ids,
             )
         attempts.append(
             {
@@ -950,6 +981,16 @@ class PairwiseAOAIReader:
             "completeness": payload.get("completeness"),
             "raw_response": completion["text"],
             "call": {key: value for key, value in completion.items() if key != "text"},
+            "base_answer_call_count": 1,
+            "logical_answer_attempt_count": len(attempts),
+            "answer_call_count": sum(
+                int(attempt["call"].get("provider_invocation_count") or 1)
+                for attempt in attempts
+            ),
+            "provider_invocation_count": sum(
+                int(attempt["call"].get("provider_invocation_count") or 1)
+                for attempt in attempts
+            ),
             "attempts": attempts,
             "prediction": prediction.to_dict(),
         }
@@ -1143,11 +1184,6 @@ class PairwiseAOAIReader:
     ) -> str:
         relevant_summary: list[dict[str, Any]] = []
         for item in relevant:
-            batch_answers = _bounded_candidate_answers_by_batch(
-                item.get("candidate_answers_by_batch")
-            )
-            distinct_batch_answers = {_json_dumps(answer) for answer in batch_answers}
-            batch_answer_conflict = len(distinct_batch_answers) > 1
             summary_item = {
                 "paper_id": item["paper_id"],
                 "title": str(item.get("title") or ""),
@@ -1157,18 +1193,9 @@ class PairwiseAOAIReader:
                 "satisfied_constraints": item.get("satisfied_constraints") or [],
                 "missing_constraints": item.get("missing_constraints") or [],
                 "blocking_mismatches": item.get("blocking_mismatches") or [],
-                # A lossy merged answer can anchor stage 2 to the wrong visual
-                # batch.  When batches disagree, expose the disagreement but
-                # deliberately withhold that representative shortcut.
-                "candidate_answer": (
-                    {} if batch_answer_conflict else item.get("candidate_answer") or {}
-                ),
-                "candidate_answers_by_batch": batch_answers,
+                "candidate_answer": item.get("candidate_answer") or {},
                 "reason": str(item.get("reason") or ""),
-                "visual_conflict": bool(item.get("visual_conflict", False)),
             }
-            if batch_answer_conflict:
-                summary_item["batch_answer_conflict"] = True
             relevant_summary.append(summary_item)
         image_legend = self._image_legend(
             context["records_by_id"], context["image_paths"]
@@ -1221,6 +1248,7 @@ class PairwiseAOAIReader:
         relevant_paper_ids: set[str],
         context_records: dict[str, Record],
         attached_image_paths: list[str] | None = None,
+        required_visual_paper_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         payload = parse_json_object(payload_text)
         if not isinstance(payload, dict):
@@ -1423,12 +1451,6 @@ class PairwiseAOAIReader:
                             f"derivation.facts[{fact_index}] invented/cross-cited "
                             f"chunk {chunk_id!r}"
                         )
-        _validate_visual_grounding(
-            query,
-            derivation,
-            context_records=context_records,
-            attached_image_paths=attached_image_paths or [],
-        )
         try:
             validated_derivation = validate_answer_semantics(
                 query,
@@ -1437,6 +1459,42 @@ class PairwiseAOAIReader:
             )
         except DerivationValidationError as exc:
             raise ReadingResponseError(f"{query.query_id}: {exc}") from exc
+        fact_pairs = {
+            (str(fact["paper_id"]), str(chunk_id))
+            for fact in validated_derivation["facts"]
+            for chunk_id in fact["chunk_ids"]
+        }
+        if fact_pairs != paper_pairs:
+            unsupported_facts = sorted(fact_pairs - paper_pairs)
+            unrelated_evidence = sorted(paper_pairs - fact_pairs)
+            raise ReadingResponseError(
+                f"{query.query_id}: derivation facts and submitted evidence disagree; "
+                f"unsupported_facts={unsupported_facts}, "
+                f"unrelated_evidence={unrelated_evidence}"
+            )
+        fact_paper_ids = {paper_id for paper_id, _ in fact_pairs}
+        if not fact_paper_ids.issubset(seen_relevance):
+            raise ReadingResponseError(
+                f"{query.query_id}: every derivation fact paper must appear in "
+                "paper_relevance"
+            )
+        # Stage 1 is deliberately recall-oriented, so an accepted paper can be a
+        # visual false positive that Stage 2 correctly omits.  Enforce Stage-1's
+        # paper-specific visual requirement only for papers that survive into the
+        # final submitted facts/evidence.  ``fact_pairs == paper_pairs`` above
+        # guarantees these are exactly the evidence-support papers.  The separate
+        # query-level explicit-visual check remains unconditional inside
+        # ``_validate_visual_grounding``.
+        used_required_visual_paper_ids = set(
+            required_visual_paper_ids or ()
+        ).intersection(fact_paper_ids)
+        _validate_visual_grounding(
+            query,
+            validated_derivation,
+            context_records=context_records,
+            attached_image_paths=attached_image_paths or [],
+            required_visual_paper_ids=used_required_visual_paper_ids,
+        )
         _validate_support_coverage(query, answer, validated_support)
         completeness = payload.get("completeness")
         if not isinstance(completeness, dict) or set(completeness) != {
@@ -1560,10 +1618,13 @@ class PairwiseAOAIReader:
         self, prompt: str, image_paths: list[str] | None = None
     ) -> CompletionResult:
         started = time.monotonic()
+        provider_invocation_count = 0
 
         def invoke(
             effective_prompt: str, paths: list[str] | None
         ) -> CompletionResult:
+            nonlocal provider_invocation_count
+            provider_invocation_count += 1
             complete_with_metadata = getattr(
                 self.llm, "complete_with_metadata", None
             )
@@ -1595,7 +1656,7 @@ class PairwiseAOAIReader:
             if not image_paths or not _is_image_content_policy_violation(exc):
                 raise
             # Do not retry or transform rejected image content.  Preserve the
-            # paper-level run by judging the same batch from text alone, and
+            # paper-level run by judging the same selected context from text alone, and
             # make the degraded modality explicit in the checkpoint metadata.
             fallback_prompt = (
                 prompt
@@ -1613,6 +1674,10 @@ class PairwiseAOAIReader:
         result.setdefault("latency_seconds", time.monotonic() - started)
         result.setdefault("requested_image_count", len(image_paths or []))
         result.setdefault("attached_image_count", len(image_paths or []))
+        # This counts explicit adapter invocations, including the image-policy
+        # text-only fallback. Provider-SDK HTTP retries remain visible through
+        # provider telemetry rather than this application-level counter.
+        result["provider_invocation_count"] = provider_invocation_count
         result["prompt_sha256"] = hashlib.sha256(
             sent_prompt.encode("utf-8")
         ).hexdigest()
@@ -1624,7 +1689,6 @@ class PairwiseAOAIReader:
         record: Record,
         *,
         text: str,
-        segment: tuple[int, int] | None = None,
         selected: bool | None = None,
     ) -> str:
         metadata = record.get("metadata") or {}
@@ -1647,8 +1711,6 @@ class PairwiseAOAIReader:
             "source_type": record_source_type(record),
             "locator": locator,
         }
-        if segment and segment[1] > 1:
-            header["segment"] = f"{segment[0]}/{segment[1]}"
         if selected is not None:
             header["stage1_selected"] = selected
             header["submission_eligible"] = submission_evidence_eligible(record)
@@ -1674,8 +1736,349 @@ def _production_query_payload(query: Query) -> dict[str, Any]:
     return query.to_dict()
 
 
-def _normalized_constraint(value: str) -> str:
-    return " ".join(str(value).strip().casefold().split())
+def _query_selection_focus(query: Query) -> str:
+    """Build selector input exclusively from fields observable at test time."""
+
+    parts = [query.question]
+    parts.extend(str(value) for value in (query.options or {}).values())
+    for column in query.table_schema or []:
+        if isinstance(column, dict):
+            parts.extend(
+                str(column[key])
+                for key in ("name", "type")
+                if column.get(key) is not None
+            )
+    return "\n".join(parts)
+
+
+def _selection_tokens(text: str) -> list[str]:
+    """Tokenize compounds and add a few morphology-safe matching forms."""
+
+    output: list[str] = []
+    aliases = {
+        "increase": ("improvement", "performance", "comparison", "delta"),
+        "increases": ("improvement", "performance", "comparison", "delta"),
+        "improve": ("improvement", "performance", "delta"),
+        "improves": ("improvement", "performance", "delta"),
+        "outperform": ("performance", "comparison", "delta"),
+        "outperforms": ("performance", "comparison", "delta"),
+        "avg": ("average",),
+        "average": ("avg",),
+    }
+    for raw_token in _WORD_RE.findall(text):
+        raw = raw_token.casefold().removesuffix("'s")
+        pieces = re.findall(
+            r"[a-z]+[0-9]*(?:\.[0-9]+)*|[0-9]+(?:\.[0-9]+)*(?:[a-z]+)?",
+            raw,
+        )
+        candidates = [raw, *pieces]
+        for token in list(candidates):
+            if token.endswith("ing") and len(token) > 5:
+                candidates.extend((token[:-3], token[:-3] + "e"))
+            elif token.endswith("ed") and len(token) > 4:
+                candidates.extend((token[:-2], token[:-1]))
+            elif token.endswith("s") and len(token) > 4:
+                candidates.append(token[:-1])
+            candidates.extend(aliases.get(token, ()))
+        for token in candidates:
+            if (
+                (len(token) >= 2 or token.isdigit())
+                and token not in _QUERY_STOPWORDS
+                and token not in output
+            ):
+                output.append(token)
+    return output
+
+
+def _canonical_object_kind(raw_kind: str) -> str:
+    kind = raw_kind.casefold().rstrip(".")
+    if kind in {"fig", "figure"}:
+        return "figure"
+    if kind in {"eq", "equation"}:
+        return "equation"
+    if kind in {"ref", "reference", "citation"}:
+        return "reference"
+    return kind
+
+
+def _explicit_object_keys(text: str) -> set[tuple[str, str]]:
+    return {
+        (_canonical_object_kind(match.group(1)), match.group(2).casefold())
+        for match in _OBJECT_REFERENCE_RE.finditer(text)
+    }
+
+
+def _record_object_keys(record: Record) -> set[tuple[str, str]]:
+    metadata = record.get("metadata") or {}
+    keys: set[tuple[str, str]] = set()
+    for field, kind in (
+        ("figure_id", "figure"),
+        ("table_id", "table"),
+        ("equation_id", "equation"),
+        ("algorithm_id", "algorithm"),
+        ("citation_id", "reference"),
+    ):
+        value = metadata.get(field)
+        if value is not None:
+            parsed = _explicit_object_keys(f"{kind} {value}")
+            if parsed:
+                keys.update(parsed)
+            else:
+                identifier = re.sub(r"(?i)^(?:figure|fig\.?|table|equation|eq\.?|"
+                                    r"algorithm|reference|ref\.?|citation)\s*", "", str(value))
+                if identifier:
+                    keys.add((kind, identifier.strip().casefold()))
+
+    source_type = record_source_type(record)
+    if source_type in {"figure", "table", "equation_algorithm", "citation_context"}:
+        keys.update(_explicit_object_keys(str(record.get("text") or "")[:2_000]))
+    return keys
+
+
+def _requested_source_types(focus: str) -> set[str]:
+    lower = focus.casefold()
+    requested: set[str] = set()
+    if requires_visual_image(focus):
+        requested.add("figure")
+    if re.search(r"\b(?:table|row|column)s?\b", lower):
+        requested.add("table")
+    if re.search(r"\b(?:equation|formula)s?\b|\beq\.\s*\d", lower):
+        requested.add("equation_algorithm")
+    if re.search(r"\balgorithms?\b", lower):
+        requested.add("equation_algorithm")
+    if re.search(
+        r"\b(?:cited|citation|citations|bibliography|bibliographic)\b|"
+        r"\breferences?\b(?![- ]free)",
+        lower,
+    ):
+        requested.add("citation_context")
+    return requested
+
+
+def _paper_record_scores(
+    records: list[Record], focus: str, *, source_question: str | None = None
+) -> tuple[list[float], list[list[str]]]:
+    """Score records deterministically with query-only IDF-weighted overlap."""
+
+    query_tokens = _selection_tokens(focus)
+    query_counts: dict[str, int] = {}
+    for token in query_tokens:
+        query_counts[token] = query_counts.get(token, 0) + 1
+    record_token_sets: list[set[str]] = []
+    record_token_counts: list[dict[str, int]] = []
+    document_frequency: dict[str, int] = {}
+    for record in records:
+        metadata = record.get("metadata") or {}
+        searchable = " ".join(
+            (
+                str(record.get("text") or ""),
+                str(record_source_type(record)),
+                str(metadata.get("section") or ""),
+                str(metadata.get("table_id") or ""),
+                str(metadata.get("figure_id") or ""),
+                str(metadata.get("equation_id") or ""),
+                str(metadata.get("algorithm_id") or ""),
+                str(metadata.get("citation_id") or ""),
+            )
+        )
+        counts: dict[str, int] = {}
+        for token in _selection_tokens(searchable):
+            counts[token] = counts.get(token, 0) + 1
+        token_set = set(counts)
+        record_token_counts.append(counts)
+        record_token_sets.append(token_set)
+        for token in token_set.intersection(query_counts):
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+
+    explicit_keys = _explicit_object_keys(focus)
+    requested_sources = _requested_source_types(source_question or focus)
+    count = len(records)
+    scores: list[float] = []
+    all_reasons: list[list[str]] = []
+    for index, record in enumerate(records):
+        score = 0.0
+        reasons: list[str] = []
+        for token, query_count in query_counts.items():
+            term_count = record_token_counts[index].get(token, 0)
+            if not term_count:
+                continue
+            inverse_frequency = math.log(
+                (count + 1) / (document_frequency.get(token, 0) + 1)
+            )
+            numeric_boost = 4.0 if any(character.isdigit() for character in token) else 1.0
+            score += (
+                inverse_frequency
+                * numeric_boost
+                * min(2, query_count)
+                * (1.0 + min(term_count, 4) * 0.15)
+            )
+        if score:
+            reasons.append("query_lexical_overlap")
+        source_type = record_source_type(record)
+        if source_type in requested_sources:
+            score += 80.0
+            reasons.append("requested_source_type")
+        if explicit_keys.intersection(_record_object_keys(record)):
+            score += 1_000_000.0
+            reasons.append("explicit_object_reference")
+        if index == 0 or source_type == "title_abstract":
+            score += 8.0
+            reasons.append("paper_identity_anchor")
+        scores.append(score)
+        all_reasons.append(reasons)
+    return scores, all_reasons
+
+
+def _ranked_image_record_indices(
+    records: list[Record],
+    *,
+    scores: list[float],
+    reasons: list[list[str]],
+    limit: int,
+    question: str,
+) -> list[int]:
+    if limit <= 0:
+        return []
+    explicit_indices = {
+        index
+        for index, item_reasons in enumerate(reasons)
+        if "explicit_object_reference" in item_reasons
+        and readable_image_path(records[index])
+    }
+    explicit_visual = requires_visual_image(question)
+    explicit_image_source = bool(
+        _requested_source_types(question).intersection({"figure", "table"})
+    )
+    implicit_visual_value = bool(
+        re.search(
+            r"(?i)\b(?:score|accuracy|performance|benchmark|value|rate|"
+            r"percentage|percent|standard deviation|nrmse|fid|map|gamma|"
+            r"how much|how many|"
+            r"more(?:\s+[a-z0-9&-]+){0,4}\s+than|"
+            r"(?:less|fewer)(?:\s+[a-z0-9&-]+){0,4}\s+than|"
+            r"increase[sd]?|improv(?:e[sd]?|ement)|outperform(?:s|ed)?|"
+            r"highest|lowest|largest|smallest|best|worst|avg(?:erage)?@?\d*)\b",
+            question,
+        )
+    )
+    if explicit_indices:
+        selection_limit = min(limit, max(len(explicit_indices), 2))
+    elif explicit_visual or explicit_image_source:
+        # An unnumbered "main figure/table" can appear late in a long paper;
+        # retain the configured safety cap while still ranking query-relevant
+        # visuals first.
+        selection_limit = limit
+    elif implicit_visual_value:
+        selection_limit = min(limit, 7)
+    else:
+        # A one-call design cannot inspect every decorative figure cheaply.
+        # Text/citation questions get no speculative images; the selected
+        # captions/table bodies remain available as text.
+        return []
+
+    contextual_scores: list[float] = []
+    for index, score in enumerate(scores):
+        neighbours = [
+            scores[neighbour]
+            for neighbour in range(max(0, index - 2), min(len(scores), index + 3))
+            if neighbour != index
+        ]
+        contextual_scores.append(score + 0.65 * max(neighbours, default=0.0))
+    candidates = sorted(
+        (
+            index
+            for index, record in enumerate(records)
+            if readable_image_path(record)
+        ),
+        key=lambda index: (
+            "explicit_object_reference" not in reasons[index],
+            -contextual_scores[index],
+            index,
+        ),
+    )
+    structural_fallback_indices: set[int] = set()
+    if not explicit_indices:
+        requested_sources = _requested_source_types(question)
+        early_source_types = (
+            requested_sources.intersection({"figure", "table"})
+            if explicit_image_source
+            else {"figure", "table"}
+        )
+        early_structural = sorted(
+            (
+                index
+                for index in candidates
+                if record_source_type(records[index]) in early_source_types
+            ),
+            key=lambda index: (
+                int((records[index].get("metadata") or {}).get("page") or 10**9),
+                index,
+            ),
+        )
+        if explicit_visual or explicit_image_source:
+            # "primary/main figure/table" often has a generic caption whose
+            # lexical score is weak. Reserve three slots for early structural
+            # objects, then fill the remaining configured cap by relevance.
+            structural_fallback_indices.update(early_structural[:3])
+            candidates = _ordered_unique_ints([*early_structural[:3], *candidates])
+        elif implicit_visual_value:
+            # Quantitative questions without an explicit locator get the five
+            # strongest query matches plus two early-figure fallbacks. Numeric
+            # tables normally rank lexically; charts whose labels only exist in
+            # pixels need the extra structural coverage (for example Figure 2
+            # with category counts).
+            early_figures = [
+                index
+                for index in early_structural
+                if record_source_type(records[index]) == "figure"
+            ]
+            structural_fallback_indices.update(early_figures[:2])
+            candidates = _ordered_unique_ints(
+                [*candidates[:5], *early_figures[:2], *candidates[5:]]
+            )
+    selected: list[int] = []
+    seen_paths: set[str] = set()
+    for index in candidates:
+        if (
+            index not in explicit_indices
+            and index not in structural_fallback_indices
+            and contextual_scores[index] <= 0.0
+        ):
+            continue
+        path = readable_image_path(records[index])
+        if not path or path in seen_paths:
+            continue
+        selected.append(index)
+        seen_paths.add(path)
+        if len(selected) >= selection_limit:
+            break
+    return selected
+
+
+def _ordered_unique_ints(values: Iterable[int]) -> list[int]:
+    output: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            output.append(value)
+    return output
+
+
+def _bounded_formatted_record(
+    reader: PairwiseAOAIReader,
+    record: Record,
+    *,
+    focus: str,
+    max_chars: int,
+) -> str:
+    empty = reader._format_record(record, text="")
+    if len(empty) >= max_chars:
+        return empty[:max_chars]
+    excerpt = _focused_excerpt(
+        str(record.get("text") or ""), focus, max_chars - len(empty)
+    )
+    return reader._format_record(record, text=excerpt)[:max_chars]
 
 
 def _validate_support_coverage(
@@ -1739,6 +2142,7 @@ def _validate_visual_grounding(
     *,
     context_records: dict[str, Record],
     attached_image_paths: list[str],
+    required_visual_paper_ids: set[str] | None = None,
 ) -> None:
     """Reject image-derived claims when their source image was not attached."""
 
@@ -1753,6 +2157,17 @@ def _validate_visual_grounding(
         for fact in facts
         if isinstance(fact, dict) and fact.get("value_kind") == "visual"
     ]
+    visual_fact_paper_ids = {
+        str(fact.get("paper_id") or "") for fact in visual_facts
+    }
+    missing_visual_papers = sorted(
+        set(required_visual_paper_ids or ()) - visual_fact_paper_ids
+    )
+    if missing_visual_papers:
+        raise ReadingResponseError(
+            "stage-1 marked visual evidence as required, but stage 2 has no "
+            f"visual fact for papers: {missing_visual_papers}"
+        )
     for index, fact in enumerate(visual_facts):
         source_images = {
             str(Path(path).resolve())
@@ -1781,41 +2196,52 @@ def _candidate_payload(candidate: CandidatePaper) -> dict[str, Any]:
     }
 
 
-def _split_text(text: str, max_chars: int, overlap: int) -> list[str]:
-    if len(text) <= max_chars:
-        return [text]
-    pieces: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(len(text), start + max_chars)
-        pieces.append(text[start:end])
-        if end >= len(text):
-            break
-        start = max(start + 1, end - overlap)
-    return pieces
-
-
 def _focused_excerpt(text: str, focus: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
     if len(text) <= max_chars:
         return text
     tokens = {
-        token.lower()
-        for token in _WORD_RE.findall(focus)
-        if len(token) >= 3
+        token for token in _selection_tokens(focus) if len(token) >= 3
     }
     lower = text.lower()
     positions: list[int] = []
     for token in tokens:
-        position = lower.find(token)
-        if position >= 0:
+        start = 0
+        for _ in range(12):
+            position = lower.find(token, start)
+            if position < 0:
+                break
             positions.append(position)
+            start = position + max(1, len(token))
     if not positions:
-        return text[:max_chars] + " …"
-    center = min(positions)
-    start = max(0, center - max_chars // 3)
-    end = min(len(text), start + max_chars)
-    start = max(0, end - max_chars)
-    return ("… " if start else "") + text[start:end] + (" …" if end < len(text) else "")
+        return text[:max_chars]
+
+    def window_start(center: int) -> int:
+        start = max(0, center - max_chars // 3)
+        return max(0, min(start, len(text) - max_chars))
+
+    candidate_starts = sorted({window_start(position) for position in positions})
+
+    def window_score(start: int) -> tuple[float, int]:
+        window = lower[start : start + max_chars]
+        score = sum(
+            (4.0 if any(character.isdigit() for character in token) else 1.0)
+            * min(3.0, 0.5 + len(token) / 5.0)
+            for token in tokens
+            if token in window
+        )
+        return score, -start
+
+    start = max(candidate_starts, key=window_score)
+    prefix = "… " if start else ""
+    content_budget = max_chars - len(prefix)
+    end = min(len(text), start + content_budget)
+    start = max(0, end - content_budget)
+    suffix = " …" if end < len(text) and content_budget >= 2 else ""
+    if suffix:
+        end = max(start, end - len(suffix))
+    return (prefix + text[start:end] + suffix)[:max_chars]
 
 
 def _records_sha256(records: list[Record]) -> str:
@@ -1861,59 +2287,6 @@ def _json_dumps(payload: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-
-
-def _bounded_candidate_answers_by_batch(value: Any) -> list[dict[str, Any]]:
-    """Keep stage-1 answer hints useful without allowing prompt-size blow-ups."""
-
-    if not isinstance(value, list):
-        return []
-
-    output: list[dict[str, Any]] = []
-    serialized_chars = 2  # JSON list brackets.
-    for candidate in value:
-        if len(output) >= SUMMARY_MAX_BATCH_ANSWERS:
-            break
-        if not isinstance(candidate, dict):
-            continue
-        try:
-            rendered = _json_dumps(candidate)
-        except (TypeError, ValueError):
-            continue
-
-        bounded_candidate = candidate
-        if len(rendered) > SUMMARY_MAX_SINGLE_BATCH_ANSWER_CHARS:
-            # Binary-search the longest escaped JSON prefix that still fits the
-            # per-answer cap. The marker makes it impossible to mistake the
-            # diagnostic prefix for a complete stage-1 answer.
-            low = 0
-            high = len(rendered)
-            bounded_candidate = {"_truncated": True, "_json_prefix": ""}
-            bounded_rendered = _json_dumps(bounded_candidate)
-            while low <= high:
-                middle = (low + high) // 2
-                proposal = {
-                    "_truncated": True,
-                    "_json_prefix": rendered[:middle],
-                }
-                proposal_rendered = _json_dumps(proposal)
-                if len(proposal_rendered) <= SUMMARY_MAX_SINGLE_BATCH_ANSWER_CHARS:
-                    bounded_candidate = proposal
-                    bounded_rendered = proposal_rendered
-                    low = middle + 1
-                else:
-                    high = middle - 1
-            rendered = bounded_rendered
-
-        separator_chars = 1 if output else 0
-        if (
-            serialized_chars + separator_chars + len(rendered)
-            > SUMMARY_MAX_BATCH_ANSWER_CHARS
-        ):
-            break
-        output.append(bounded_candidate)
-        serialized_chars += separator_chars + len(rendered)
-    return output
 
 
 def _string_list(value: Any) -> list[str]:

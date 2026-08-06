@@ -44,10 +44,41 @@ def _derivation(
     facts: list[dict[str, Any]],
     operations: list[dict[str, Any]],
     final_answer: str,
+    *,
+    answer_bindings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if answer_bindings is None:
+        if operations:
+            answer_bindings = [
+                {
+                    "answer_path": operation["answer_binding"]["answer_path"],
+                    "source_type": "operation",
+                    "source_id": operation["id"],
+                    **(
+                        {
+                            "answer_fragment": operation["answer_binding"][
+                                "answer_fragment"
+                            ]
+                        }
+                        if "answer_fragment" in operation["answer_binding"]
+                        else {}
+                    ),
+                }
+                for operation in operations
+            ]
+        else:
+            answer_bindings = [
+                {
+                    "answer_path": "answer.freeform.text",
+                    "source_type": "fact",
+                    "source_id": facts[0]["id"],
+                    "answer_fragment": final_answer,
+                }
+            ]
     return {
         "facts": facts,
         "operations": operations,
+        "answer_bindings": answer_bindings,
         "final_semantic_answer": final_answer,
     }
 
@@ -372,7 +403,19 @@ def test_variable_mc_label_and_exact_option_text_are_required() -> None:
         ["multiple_choice"],
         options={"A": "Alpha", "B": "Beta", "E": "Epsilon"},
     )
-    derivation = _derivation([_fact()], [], "Epsilon")
+    derivation = _derivation(
+        [_fact(value="Epsilon")],
+        [],
+        "Epsilon",
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "f1",
+                "answer_fragment": "Epsilon",
+            }
+        ],
+    )
     answer = {
         "multiple_choice": {
             "label": "E",
@@ -384,6 +427,169 @@ def test_variable_mc_label_and_exact_option_text_are_required() -> None:
     answer["multiple_choice"]["selected_option_text"] = "Epsilon "
     with pytest.raises(DerivationValidationError, match="exactly equal"):
         validate_answer_semantics(query, derivation=derivation, answer=answer)
+
+
+def test_combined_freeform_and_mc_bind_independent_surface_forms() -> None:
+    query = Query(
+        "q",
+        "By how much does the method improve?",
+        ["freeform", "multiple_choice"],
+        options={"A": "10.2", "D": "20.6"},
+    )
+    freeform = "The method improves Avg@64 from 11.7 to 32.3, or 20.6 points."
+    derivation = _derivation(
+        [_fact("improvement", "20.6")],
+        [],
+        freeform,
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "fact",
+                "source_id": "improvement",
+                "answer_fragment": "20.6",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "improvement",
+                "answer_fragment": "20.6",
+            },
+        ],
+    )
+    answer = {
+        "freeform": {"text": freeform},
+        "multiple_choice": {"label": "D", "selected_option_text": "20.6"},
+    }
+
+    validated = validate_answer_semantics(
+        query, derivation=derivation, answer=answer
+    )
+    assert validated["final_semantic_answer"] == freeform
+    assert len(validated["answer_bindings"]) == 2
+
+
+def test_combined_freeform_and_mc_cannot_bind_different_conclusions() -> None:
+    query = Query(
+        "q",
+        "Which result is supported?",
+        ["freeform", "multiple_choice"],
+        options={"A": "Alpha", "B": "Beta"},
+    )
+    derivation = _derivation(
+        [_fact("freeform_result", "Alpha"), _fact("mc_result", "Beta")],
+        [],
+        "Alpha",
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "fact",
+                "source_id": "freeform_result",
+                "answer_fragment": "Alpha",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "mc_result",
+                "answer_fragment": "Beta",
+            },
+        ],
+    )
+
+    with pytest.raises(DerivationValidationError, match="must share at least one"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={
+                "freeform": {"text": "Alpha"},
+                "multiple_choice": {
+                    "label": "B",
+                    "selected_option_text": "Beta",
+                },
+            },
+        )
+
+
+def test_mc_only_still_requires_final_to_equal_selected_option() -> None:
+    query = Query(
+        "q",
+        "Which option?",
+        ["multiple_choice"],
+        options={"A": "Alpha", "B": "Beta"},
+    )
+    derivation = _derivation(
+        [_fact("selected", "Beta")],
+        [],
+        "A longer answer about Beta",
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "selected",
+                "answer_fragment": "Beta",
+            }
+        ],
+    )
+    with pytest.raises(
+        DerivationValidationError,
+        match="exactly equal selected_option_text",
+    ):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={
+                "multiple_choice": {
+                    "label": "B",
+                    "selected_option_text": "Beta",
+                }
+            },
+        )
+
+
+def test_lookup_binding_rejects_fact_final_answer_contradiction() -> None:
+    query = Query("q", "What is reported?", ["freeform"])
+    derivation = _derivation(
+        [_fact("reported", "42")],
+        [],
+        "99",
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "fact",
+                "source_id": "reported",
+                "answer_fragment": "99",
+            }
+        ],
+    )
+    with pytest.raises(DerivationValidationError, match="sourced fact value"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={"freeform": {"text": "99"}},
+        )
+
+
+def test_lookup_binding_rejects_string_fact_embedded_inside_another_number() -> None:
+    query = Query("q", "What is reported?", ["freeform"])
+    derivation = _derivation(
+        [_fact("reported", "42")],
+        [],
+        "142",
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "fact",
+                "source_id": "reported",
+                "answer_fragment": "142",
+            }
+        ],
+    )
+
+    with pytest.raises(DerivationValidationError, match="sourced fact value"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={"freeform": {"text": "142"}},
+        )
 
 
 def test_argmax_candidates_must_match_fact_label_values() -> None:
@@ -453,6 +659,36 @@ def test_argmax_result_must_match_candidate_values_and_answer() -> None:
     assert validated["operations"][0]["result"] == "B"
 
 
+def test_argmax_binding_rejects_winner_label_inside_a_larger_token() -> None:
+    query = Query("q", "Which is largest?", ["freeform"])
+    facts = [
+        _fact("cedar", {"label": "Cedar", "value": 17}),
+        _fact("flint", {"label": "Flint", "value": 24}),
+        _fact("quartz", {"label": "Quartz", "value": 19}),
+    ]
+    operation = {
+        "id": "largest",
+        "kind": "argmax",
+        "fact_ids": ["cedar", "flint", "quartz"],
+        "candidates": [
+            {"label": "Cedar", "value": 17},
+            {"label": "Flint", "value": 24},
+            {"label": "Quartz", "value": 19},
+        ],
+        "result": "Flint",
+        "answer_binding": _binding(
+            "answer.freeform.text", "Flint", "SuperFlint"
+        ),
+    }
+
+    with pytest.raises(DerivationValidationError, match="does not express expected"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "SuperFlint"),
+            answer={"freeform": {"text": "SuperFlint"}},
+        )
+
+
 def test_fact_contract_requires_unique_ids_names_and_typed_value() -> None:
     query = Query("q", "What is reported?", ["freeform"])
     invalid = _fact()
@@ -480,6 +716,14 @@ def test_fact_contract_requires_unique_ids_names_and_typed_value() -> None:
                 "value",
             ),
             answer={"freeform": {"text": "value"}},
+        )
+
+    computed = _fact(value="99", value_kind="computed")
+    with pytest.raises(DerivationValidationError, match="value_kind must be one of"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation([computed], [], "99"),
+            answer={"freeform": {"text": "99"}},
         )
 
 
@@ -534,7 +778,25 @@ def test_typed_table_answer_binding_requires_exact_value() -> None:
         "answer_binding": _binding("answer.table.rows[0].Panel Count", 3),
     }
     derivation = _derivation(
-        [_fact("panels", items, value_kind="visual")], [operation], "3"
+        [
+            _fact("method", "Nova"),
+            _fact("panels", items, value_kind="visual"),
+        ],
+        [operation],
+        "3",
+        answer_bindings=[
+            {
+                "answer_path": "answer.table.rows[0].Method",
+                "source_type": "fact",
+                "source_id": "method",
+                "answer_fragment": "Nova",
+            },
+            {
+                "answer_path": "answer.table.rows[0].Panel Count",
+                "source_type": "operation",
+                "source_id": "count",
+            },
+        ],
     )
     answer = {"table": {"rows": [{"Method": "Nova", "Panel Count": 3}]}}
     assert validate_answer_semantics(query, derivation=derivation, answer=answer)
@@ -569,6 +831,33 @@ def test_table_schema_requires_native_types_and_exact_columns() -> None:
         )
     with pytest.raises(DerivationValidationError, match="duplicate table row key"):
         validate_table_rows(query, [rows[0], {**rows[0], "Score": 1.0}])
+
+
+def test_table_implicit_row_key_matches_official_normalization() -> None:
+    query = Query(
+        "q",
+        "Return rows.",
+        ["table"],
+        table_schema=[
+            {"name": "Method", "type": "string", "is_row_key": False},
+            {"name": "Score", "type": "number", "is_row_key": False},
+        ],
+    )
+
+    with pytest.raises(DerivationValidationError, match="duplicate table row key"):
+        validate_table_rows(
+            query,
+            [
+                {"Method": "Nova X", "Score": 1.0},
+                {"Method": " ‘nova   x’ ", "Score": 2.0},
+            ],
+        )
+
+    # The official scorer's implicit fallback permits one empty-string key;
+    # only explicitly declared row-key columns have a non-empty requirement.
+    assert validate_table_rows(query, [{"Method": "", "Score": 1.0}]) == [
+        {"Method": "", "Score": 1.0}
+    ]
 
 
 def test_lookup_final_answer_must_equal_freeform() -> None:
