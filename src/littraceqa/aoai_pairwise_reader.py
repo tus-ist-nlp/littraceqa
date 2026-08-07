@@ -73,9 +73,14 @@ from littraceqa.pairwise_prompts import (
     render_answer_prompt,
     render_judgment_prompt,
 )
+from littraceqa.query_requirements import (
+    QUERY_REQUIREMENTS_VERSION,
+    unaccounted_explicit_table_items,
+)
 
 PAPER_CONTEXT_SELECTOR_VERSION = "query-lexical-v3-exact-object-multipanel"
 NAMED_OWNER_RESOLVER_VERSION = "named-owner-v2-grammatical-local-object-only"
+ANSWER_IMAGE_HANDOFF_VERSION = "answer-purpose-image-first-v1"
 MAX_ANSWER_REPAIR_ATTEMPTS = 3
 
 JUDGMENT_LABELS = (
@@ -454,6 +459,8 @@ class AnswerContext(TypedDict):
     text: str
     records_by_id: dict[str, Record]
     image_paths: list[str]
+    answer_evidence_image_chunk_ids: list[str]
+    attached_answer_evidence_image_chunk_ids: list[str]
 
 
 class CompletionResult(TypedDict, total=False):
@@ -2420,6 +2427,8 @@ class PairwiseAOAIReader:
         return _json_sha256(
             {
                 "prompt_version": ANSWER_PROMPT_VERSION,
+                "image_handoff_version": ANSWER_IMAGE_HANDOFF_VERSION,
+                "query_requirements_version": QUERY_REQUIREMENTS_VERSION,
                 "few_shot_examples": example_manifest(query)["answer"],
                 "query": _production_query_payload(query),
                 "judgments": stable_judgments,
@@ -2576,6 +2585,13 @@ class PairwiseAOAIReader:
             "accepted_paper_ids": [str(item["paper_id"]) for item in relevant],
             "context_chunk_ids": list(context["records_by_id"]),
             "image_paths": list(context["image_paths"]),
+            "image_handoff_version": ANSWER_IMAGE_HANDOFF_VERSION,
+            "answer_evidence_image_chunk_ids": list(
+                context["answer_evidence_image_chunk_ids"]
+            ),
+            "attached_answer_evidence_image_chunk_ids": list(
+                context["attached_answer_evidence_image_chunk_ids"]
+            ),
             "parsed_response": payload,
             "semantic_multiple_choice": payload.get("answer", {}).get(
                 "multiple_choice"
@@ -2608,6 +2624,7 @@ class PairwiseAOAIReader:
         seen_primary: set[str] = set()
         seen_neighbours: set[str] = set()
         evidence_quotes: dict[str, list[str]] = {}
+        answer_image_records_by_paper: dict[str, list[Record]] = {}
 
         def add_neighbour(record: Record) -> None:
             chunk_id = str(record.get("chunk_id") or "")
@@ -2636,6 +2653,13 @@ class PairwiseAOAIReader:
                 quote = str(evidence.get("quote_or_value") or "")
                 cited_records.append(record)
                 evidence_quotes.setdefault(chunk_id, []).append(quote)
+                if (
+                    str(evidence.get("purpose") or "answer") == "answer"
+                    and readable_image_path(record)
+                ):
+                    answer_image_records_by_paper.setdefault(paper_id, []).append(
+                        record
+                    )
                 if chunk_id not in seen_primary:
                     seen_primary.add(chunk_id)
                     primary.append((record, quote))
@@ -2742,7 +2766,7 @@ class PairwiseAOAIReader:
                 and item["visual"].get("required") is True
             )
         }
-        image_records_by_paper = {
+        visual_image_records_by_paper = {
             paper_id: [
                 record
                 for record, _ in paper_records
@@ -2751,34 +2775,53 @@ class PairwiseAOAIReader:
             for paper_id, paper_records in by_paper.items()
             if paper_id in visual_required_paper_ids
         }
-        primary_image_records: list[Record] = []
-        for label in ("direct_answer", "partial_answer", "supporting_only"):
-            label_papers = sorted(
-                (
-                    paper_id
-                    for paper_id in image_records_by_paper
-                    if image_records_by_paper[paper_id]
-                    and paper_image_priority.get(paper_id, ("", 0))[0] == label
-                ),
-                key=lambda paper_id: (
-                    paper_image_priority[paper_id][1],
-                    paper_id,
-                ),
-            )
-            # Preserve strict label priority (all direct images precede all
-            # partial images), but share each label's image budget fairly:
-            # every paper gets image 1 in rank order before any gets image 2.
-            image_position = 0
-            while label_papers:
-                added = False
-                for paper_id in label_papers:
-                    paper_records = image_records_by_paper[paper_id]
-                    if image_position < len(paper_records):
-                        primary_image_records.append(paper_records[image_position])
-                        added = True
-                if not added:
-                    break
-                image_position += 1
+
+        def prioritized_image_records(
+            records_by_paper: dict[str, list[Record]],
+        ) -> list[Record]:
+            """Order images by semantic label, rank, and fair paper rotation."""
+
+            prioritized: list[Record] = []
+            for label in ("direct_answer", "partial_answer", "supporting_only"):
+                label_papers = sorted(
+                    (
+                        paper_id
+                        for paper_id, paper_records in records_by_paper.items()
+                        if paper_records
+                        and paper_image_priority.get(paper_id, ("", 0))[0] == label
+                    ),
+                    key=lambda paper_id: (
+                        paper_image_priority[paper_id][1],
+                        paper_id,
+                    ),
+                )
+                # Preserve strict label priority, but share each label's image
+                # budget fairly: every paper gets image 1 in rank order before
+                # any paper gets image 2.
+                image_position = 0
+                while label_papers:
+                    added = False
+                    for paper_id in label_papers:
+                        paper_records = records_by_paper[paper_id]
+                        if image_position < len(paper_records):
+                            prioritized.append(paper_records[image_position])
+                            added = True
+                    if not added:
+                        break
+                    image_position += 1
+            return prioritized
+
+        # Stage 1's purpose field is the strongest handoff signal.  Reserve
+        # image slots for every answer-purpose table/figure before considering
+        # other cited visuals or neighbouring context.  In particular, do not
+        # discard these images merely because Stage 1 could also read the OCR
+        # text and therefore reported visual.required=false.
+        answer_image_records = prioritized_image_records(
+            answer_image_records_by_paper
+        )
+        visual_image_records = prioritized_image_records(
+            visual_image_records_by_paper
+        )
         if len(by_paper) > self.max_answer_papers:
             raise ReadingResponseError(
                 f"{query.query_id}: {len(by_paper)} accepted papers exceed "
@@ -2799,7 +2842,27 @@ class PairwiseAOAIReader:
             if not added:
                 break
             position += 1
-        primary = round_robin
+        # The ordinary evidence cap controls what the final answer may cite, not
+        # whether Stage 2 can re-read the finite set of images already chosen as
+        # Stage-1 answer evidence.  Prepend the image records that can fit in the
+        # AOAI request, then retain the complete ordinary round-robin selection.
+        # This prevents a late evidence item in one paper from losing its image
+        # before attachment solely because text evidence filled the context cap.
+        primary = []
+        primary_chunk_ids: set[str] = set()
+        for record in answer_image_records[: self.max_answer_images]:
+            chunk_id = str(record.get("chunk_id") or "")
+            if not chunk_id or chunk_id in primary_chunk_ids:
+                continue
+            primary_chunk_ids.add(chunk_id)
+            quotes = evidence_quotes.get(chunk_id) or [""]
+            primary.append((record, quotes[0]))
+        for record, quote in round_robin:
+            chunk_id = str(record.get("chunk_id") or "")
+            if not chunk_id or chunk_id in primary_chunk_ids:
+                continue
+            primary_chunk_ids.add(chunk_id)
+            primary.append((record, quote))
         if not primary:
             raise ReadingResponseError(
                 f"{query.query_id}: accepted judgments contain no evidence chunks"
@@ -2875,17 +2938,34 @@ class PairwiseAOAIReader:
                 if image_path and image_path not in image_paths:
                     image_paths.append(image_path)
 
-        # Images explicitly cited by stage 1 are more valuable than images from
-        # neighbouring context.  Prioritize direct answers, then partial answers,
-        # then supporting papers; rank breaks ties while evidence order remains
-        # stable within each paper.  This prevents a direct paper's later figure
-        # from being starved by the first figure of many accepted papers.
-        add_images(primary_image_records)
+        # Answer-purpose images are a lossless Stage-1-to-Stage-2 handoff and
+        # therefore consume the finite AOAI image budget first.  Broader visual
+        # evidence and neighbouring images are supplemental.
+        add_images(answer_image_records)
+        add_images(visual_image_records)
         add_images(record for record, _ in neighbours)
+        attached_image_paths = set(image_paths)
+        answer_evidence_image_chunk_ids = _ordered_unique(
+            str(record.get("chunk_id") or "")
+            for record in answer_image_records
+            if str(record.get("chunk_id") or "")
+        )
+        attached_answer_evidence_image_chunk_ids = [
+            chunk_id
+            for chunk_id in answer_evidence_image_chunk_ids
+            if (
+                (record := records_by_id.get(chunk_id)) is not None
+                and readable_image_path(record) in attached_image_paths
+            )
+        ]
         return {
             "text": "\n\n".join(parts),
             "records_by_id": records_by_id,
             "image_paths": image_paths,
+            "answer_evidence_image_chunk_ids": answer_evidence_image_chunk_ids,
+            "attached_answer_evidence_image_chunk_ids": (
+                attached_answer_evidence_image_chunk_ids
+            ),
         }
 
     def _answer_prompt(
@@ -3066,6 +3146,17 @@ class PairwiseAOAIReader:
                 "or bare label such as '(a)' is not itself a subfigure. Do not invent "
                 "panel letters that are not visible in the pixels."
             )
+        table_inventory_repair = ""
+        if "explicitly requested table item" in error_corpus:
+            table_inventory_repair = (
+                " This is an explicit table-row completeness error. Re-read the "
+                "Stage-1 candidate hypotheses and their original source chunks or "
+                "attached table images. Account for every named item exactly once: "
+                "return a fully source-grounded row, or copy the exact item name into "
+                "completeness.missing when the supplied evidence truly cannot support "
+                "it. A visibly printed dash is a source value and must remain a row; "
+                "never invent a numeric replacement."
+            )
         error_history = _json_dumps(list(dict.fromkeys(prior_errors or [error_text])))
         return (
             original_prompt
@@ -3092,6 +3183,7 @@ class PairwiseAOAIReader:
             + citation_count_repair
             + minimal_freeform_repair
             + visual_count_repair
+            + table_inventory_repair
             + "\n"
             f"Correction attempt: {repair_attempt}/{MAX_ANSWER_REPAIR_ATTEMPTS}\n"
             f"Validation error: {error}\n"
@@ -3395,6 +3487,17 @@ class PairwiseAOAIReader:
             "answered_parts": _ordered_unique(value.strip() for value in answered_parts),
             "missing": _ordered_unique(value.strip() for value in missing_parts),
         }
+        unaccounted_items = unaccounted_explicit_table_items(
+            query,
+            answer.get("table", {}).get("rows", []),
+            completeness["missing"],
+        )
+        if unaccounted_items:
+            raise ReadingResponseError(
+                f"{query.query_id}: explicitly requested table item(s) are absent "
+                "from both answer.table.rows and completeness.missing: "
+                f"{list(unaccounted_items)}"
+            )
         payload["papers"] = validated_papers
         payload["paper_relevance"] = validated_relevance
         payload["support"] = validated_support

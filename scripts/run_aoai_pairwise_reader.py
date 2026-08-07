@@ -93,6 +93,7 @@ _RUNTIME_FILES = (
     ROOT / "src/littraceqa/mineru_record.py",
     ROOT / "src/littraceqa/pairwise_run_store.py",
     ROOT / "src/littraceqa/pairwise_prompts.py",
+    ROOT / "src/littraceqa/query_requirements.py",
     ROOT / "src/littraceqa/submission.py",
     ROOT / "src/littraceqa/di_pipeline/__init__.py",
     ROOT / "src/littraceqa/di_pipeline/agent/__init__.py",

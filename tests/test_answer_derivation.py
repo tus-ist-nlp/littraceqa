@@ -1519,3 +1519,397 @@ def test_lookup_final_answer_must_equal_freeform() -> None:
             derivation=_derivation([_fact("reported", "42")], [], "42"),
             answer={"freeform": {"text": "41"}},
         )
+
+
+def test_delta_query_rejects_computed_value_disguised_as_text_fact() -> None:
+    query = Query(
+        "delta",
+        "By how much does the method increase the score?",
+        ["freeform", "multiple_choice"],
+        options={"A": "10.2", "D": "20.6"},
+    )
+    derivation = _derivation(
+        [_fact("claimed_delta", "20.6", value_kind="text")],
+        [],
+        "20.6",
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "fact",
+                "source_id": "claimed_delta",
+                "answer_fragment": "20.6",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "claimed_delta",
+                "answer_fragment": "20.6",
+            },
+        ],
+    )
+
+    with pytest.raises(DerivationValidationError, match="numeric delta"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={
+                "freeform": {"text": "20.6"},
+                "multiple_choice": {
+                    "label": "D",
+                    "selected_option_text": "20.6",
+                },
+            },
+        )
+
+
+def test_delta_query_accepts_operand_grounded_subtraction_for_both_outputs() -> None:
+    query = Query(
+        "delta",
+        "By how much does the method increase the score?",
+        ["freeform", "multiple_choice"],
+        options={"A": "10.2", "D": "20.6"},
+    )
+    facts = [
+        _fact("after", 32.3, value_kind="visual"),
+        _fact("before", 11.7, value_kind="visual"),
+    ]
+    operation = {
+        "id": "increase",
+        "kind": "subtract",
+        "fact_ids": ["after", "before"],
+        "operands": [32.3, 11.7],
+        "result": 20.6,
+        "answer_binding": _binding("answer.multiple_choice", 20.6, "20.6"),
+    }
+    derivation = _derivation(
+        facts,
+        [operation],
+        "20.6",
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "operation",
+                "source_id": "increase",
+                "answer_fragment": "20.6",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "operation",
+                "source_id": "increase",
+                "answer_fragment": "20.6",
+            },
+        ],
+    )
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer={
+            "freeform": {"text": "20.6"},
+            "multiple_choice": {"label": "D", "selected_option_text": "20.6"},
+        },
+    )
+
+    assert validated["operations"][0]["result"] == 20.6
+
+
+def _two_value_option_case(
+    *, bind_first_value: bool
+) -> tuple[Query, dict[str, Any], dict[str, Any]]:
+    query = Query(
+        "two_values",
+        "What values are reported for the two weighting rules?",
+        ["multiple_choice"],
+        options={
+            "A": "1/t^2+1: 5.51, 1/t^2+1/sigma^2: 190.80",
+            "B": "1/t^2+1: 20.65, 1/t^2+1/sigma^2: 3.18",
+            "D": "1/t^2+1: 190.80, 1/t^2+1/sigma^2: 5.51",
+        },
+    )
+    selected_text = query.options["D"]
+    bindings = [
+        {
+            "answer_path": "answer.multiple_choice",
+            "source_type": "fact",
+            "source_id": "second_value",
+            "answer_fragment": "5.51",
+        }
+    ]
+    if bind_first_value:
+        bindings.append(
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "first_value",
+                "answer_fragment": "190.80",
+            }
+        )
+    derivation = _derivation(
+        [_fact("first_value", 190.80), _fact("second_value", 5.51)],
+        [],
+        selected_text,
+        answer_bindings=bindings,
+    )
+    answer = {
+        "multiple_choice": {"label": "D", "selected_option_text": selected_text}
+    }
+    return query, derivation, answer
+
+
+def test_compound_multiple_choice_rejects_binding_only_one_numeric_component() -> None:
+    query, derivation, answer = _two_value_option_case(bind_first_value=False)
+
+    with pytest.raises(
+        DerivationValidationError,
+        match="ungrounded distinguishing numeric component",
+    ):
+        validate_answer_semantics(query, derivation=derivation, answer=answer)
+
+
+def test_compound_mc_accepts_all_values_and_ignores_formula_constants() -> None:
+    query, derivation, answer = _two_value_option_case(bind_first_value=True)
+
+    validated = validate_answer_semantics(
+        query, derivation=derivation, answer=answer
+    )
+
+    assert len(validated["answer_bindings"]) == 2
+
+
+def test_mc_numeric_grounding_ignores_numbers_inside_dataset_identifiers() -> None:
+    query = Query(
+        "dataset_suffix",
+        "What k values are used for CIFAR-10 and ImageNet-256?",
+        ["multiple_choice"],
+        options={
+            "A": "CIFAR-10: k=10, ImageNet-256: k=14",
+            "B": "CIFAR-10: k=15, ImageNet-256: k=12",
+            "C": "Both use k=12",
+        },
+    )
+    selected_text = query.options["B"]
+    derivation = _derivation(
+        [_fact("cifar_k", 15), _fact("imagenet_k", 12)],
+        [],
+        selected_text,
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "cifar_k",
+                "answer_fragment": "k=15",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "imagenet_k",
+                "answer_fragment": "k=12",
+            },
+        ],
+    )
+
+    assert validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer={
+            "multiple_choice": {"label": "B", "selected_option_text": selected_text}
+        },
+    )
+
+
+def test_match_query_requires_vector_comparison_not_a_status_text_fact() -> None:
+    query = Query(
+        "vector_match",
+        "What channel means do the two systems use, and do they match?",
+        ["multiple_choice"],
+        options={
+            "A": "They use the same values: [0.865, -0.278, 0.216, 0.374]",
+            "C": (
+                "First: [1.56, -0.695, 0.483, 0.729]; "
+                "second: [0.865, -0.278, 0.216, 0.374] — different values"
+            ),
+        },
+    )
+    selected_text = query.options["A"]
+    derivation = _derivation(
+        [_fact("match_status", "same", value_kind="text")],
+        [],
+        selected_text,
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "match_status",
+                "answer_fragment": "same",
+            }
+        ],
+    )
+
+    with pytest.raises(DerivationValidationError, match="equality comparison"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={
+                "multiple_choice": {
+                    "label": "A",
+                    "selected_option_text": selected_text,
+                }
+            },
+        )
+
+
+def test_matching_loss_noun_phrase_is_not_misclassified_as_equality_question() -> None:
+    query = Query(
+        "matching_loss",
+        (
+            "What kernel form is used for the moment matching loss, and what "
+            "is its width expression?"
+        ),
+        ["multiple_choice"],
+        options={
+            "A": "RBF with w(s,t) = 1/|c_skip(s,t)|",
+            "B": "Laplace with w(s,t) = 1/|c_out(s,t)|",
+            "C": "Laplace with w(s,t) = |c_out(s,t)|",
+        },
+    )
+    selected_text = query.options["B"]
+    derivation = _derivation(
+        [_fact("kernel", "Laplace"), _fact("width", "1/|c_out(s,t)|")],
+        [],
+        selected_text,
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "kernel",
+                "answer_fragment": "Laplace",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "width",
+                "answer_fragment": "1/|c_out(s,t)|",
+            },
+        ],
+    )
+
+    assert validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer={
+            "multiple_choice": {"label": "B", "selected_option_text": selected_text}
+        },
+    )
+
+
+def test_vector_comparison_and_rounded_compound_values_are_fully_grounded() -> None:
+    query = Query(
+        "vector_match",
+        "What channel means do the two systems use, and do they match?",
+        ["multiple_choice"],
+        options={
+            "A": "They use the same values: [0.865, -0.278, 0.216, 0.374]",
+            "C": (
+                "First: [1.56, -0.695, 0.483, 0.729]; "
+                "second: [0.865, -0.278, 0.216, 0.374] — different values"
+            ),
+        },
+    )
+    selected_text = query.options["C"]
+    first = [1.56, -0.695, 0.483, 0.729]
+    second = [0.86488, -0.27787343, 0.21616915, 0.3738409]
+    operation = {
+        "id": "means_match",
+        "kind": "compare",
+        "fact_ids": ["first_means", "second_means"],
+        "left": first,
+        "operator": "==",
+        "right": second,
+        "result": False,
+        "answer_binding": _binding(
+            "answer.multiple_choice", False, "different values"
+        ),
+    }
+    derivation = _derivation(
+        [_fact("first_means", first), _fact("second_means", second)],
+        [operation],
+        selected_text,
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "first_means",
+                "answer_fragment": "[1.56, -0.695, 0.483, 0.729]",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "second_means",
+                "answer_fragment": "[0.865, -0.278, 0.216, 0.374]",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "operation",
+                "source_id": "means_match",
+                "answer_fragment": "different values",
+            },
+        ],
+    )
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer={
+            "multiple_choice": {"label": "C", "selected_option_text": selected_text}
+        },
+    )
+
+    assert validated["operations"][0]["result"] is False
+
+    operation["operator"] = "!="
+    operation["result"] = True
+    operation["answer_binding"] = _binding(
+        "answer.multiple_choice", True, "different values"
+    )
+    validated_not_equal = validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer={
+            "multiple_choice": {"label": "C", "selected_option_text": selected_text}
+        },
+    )
+    assert validated_not_equal["operations"][0]["result"] is True
+
+
+def test_extreme_query_cannot_bypass_argmax_with_winner_fact() -> None:
+    query = Query(
+        "maximum",
+        "Which system has the highest score?",
+        ["multiple_choice"],
+        options={"A": "Alpha", "B": "Beta"},
+    )
+    derivation = _derivation(
+        [_fact("winner", "Beta", value_kind="text")],
+        [],
+        "Beta",
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "winner",
+                "answer_fragment": "Beta",
+            }
+        ],
+    )
+
+    with pytest.raises(DerivationValidationError, match="argmax/argmin"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={
+                "multiple_choice": {
+                    "label": "B",
+                    "selected_option_text": "Beta",
+                }
+            },
+        )

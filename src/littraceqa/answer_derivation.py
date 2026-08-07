@@ -35,7 +35,9 @@ _COMPARE_OPERATORS = {
     "==": lambda left, right: left == right,
     "!=": lambda left, right: left != right,
 }
-_NUMBER_IN_TEXT = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
+_NUMBER_IN_TEXT = re.compile(
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+)
 # Facts must be values read directly from the supplied source.  Derived values
 # belong in ``operations``; accepting a free-standing ``computed`` fact would
 # let a model attach an arbitrary result to an otherwise valid chunk.
@@ -126,6 +128,25 @@ _BARE_VISUAL_GROUP_LABEL_RE = re.compile(
     r"(?:.*\s+)?row\s*[-:]?\s*\(?[a-z0-9]+\)?|"
     r"(?:top|bottom|upper|lower)\s+row"
     r")\s*",
+    re.IGNORECASE,
+)
+_DELTA_QUERY_RE = re.compile(
+    r"\bby\s+how\s+much\b[^?\n]{0,240}\b"
+    r"(?:increase|decrease|improve|reduce|raise|lower|change|drop|gain)\w*\b|"
+    r"\bwhat\s+(?:is|was)\s+(?:the\s+)?(?:absolute\s+)?"
+    r"(?:difference|increase|decrease|improvement|reduction|change)\b",
+    re.IGNORECASE,
+)
+_MATCH_COMPARISON_QUERY_RE = re.compile(
+    r"\b(?:do|does|did|are|is|were|was)\b[^?\n]{0,160}\b"
+    r"(?:match(?:es|ed)?|same|equal|identical|different|differ(?:s|ed)?)\b",
+    re.IGNORECASE,
+)
+_EXTREME_QUERY_RE = re.compile(
+    r"\b(?:which|what)\b[^?\n]{0,240}\b"
+    r"(?:highest|lowest|largest|smallest|maximum|minimum|best|worst)\b|"
+    r"\b(?:highest|lowest|largest|smallest|maximum|minimum|best|worst)\b"
+    r"[^?\n]{0,160}\b(?:which|what)\b",
     re.IGNORECASE,
 )
 
@@ -260,7 +281,7 @@ def validate_answer_semantics(
         operations.append(validated_operation)
         operation_results[operation_id] = (
             computed,
-            str(validated_operation["kind"]),
+            _operation_binding_kind(validated_operation),
         )
 
     answer_bindings = _validate_final_answer_bindings(
@@ -292,6 +313,19 @@ def validate_answer_semantics(
         answer,
         final_answer,
         require_final_match="freeform" not in query.answer_types,
+    )
+    _validate_required_reasoning_contracts(
+        query,
+        operations=operations,
+        answer_bindings=answer_bindings,
+        facts_by_id=facts_by_id,
+    )
+    _validate_multiple_choice_numeric_component_bindings(
+        query,
+        answer=answer,
+        answer_bindings=answer_bindings,
+        facts_by_id=facts_by_id,
+        operation_results=operation_results,
     )
     if is_aggregate_citation_count_query(query):
         _validate_aggregate_citation_count_semantics(
@@ -372,6 +406,222 @@ def _validate_visual_subfigure_count_inventory(
             )
 
 
+def _validate_required_reasoning_contracts(
+    query: Query,
+    *,
+    operations: list[dict[str, Any]],
+    answer_bindings: list[dict[str, Any]],
+    facts_by_id: dict[str, dict[str, Any]],
+) -> None:
+    """Require deterministic reasoning when the question explicitly asks for it.
+
+    Without this guard, a model can call a computed difference, comparison, or
+    extremum a ``text`` fact and thereby bypass all operand grounding.  The
+    patterns are intentionally limited to explicit linguistic requests; a
+    directly reported scalar lookup remains a fact.
+    """
+
+    output_groups = _semantic_output_path_groups(query)
+    if not output_groups:
+        return
+    requested: list[tuple[set[str], str, bool]] = []
+    if _DELTA_QUERY_RE.search(query.question):
+        # A paper may explicitly print an already-computed improvement.  Keep
+        # that legitimate lookup path, but do not let a ``text`` fact masquerade
+        # as a derived value.
+        requested.append(({"subtract"}, "numeric delta", True))
+    if _MATCH_COMPARISON_QUERY_RE.search(query.question):
+        requested.append(({"compare"}, "equality comparison", True))
+    if _EXTREME_QUERY_RE.search(query.question):
+        requested.append(({"argmax", "argmin"}, "argmax/argmin", True))
+
+    for kinds, description, allow_direct_reported in requested:
+        operation_ids = {
+            str(operation["id"])
+            for operation in operations
+            if operation.get("kind") in kinds
+        }
+        if not operation_ids:
+            if allow_direct_reported and _all_output_groups_bind_reported_facts(
+                output_groups,
+                answer_bindings=answer_bindings,
+                facts_by_id=facts_by_id,
+            ):
+                continue
+            raise DerivationValidationError(
+                f"question explicitly requests {description}; derivation must "
+                f"use a grounded {sorted(kinds)} operation instead of presenting "
+                "the computed conclusion as a reported/text fact"
+            )
+        for allowed_paths in output_groups:
+            if not any(
+                binding.get("source_type") == "operation"
+                and binding.get("source_id") in operation_ids
+                and binding.get("answer_path") in allowed_paths
+                for binding in answer_bindings
+            ):
+                raise DerivationValidationError(
+                    f"question explicitly requests {description}; every emitted "
+                    "freeform/multiple-choice conclusion must bind to the grounded "
+                    f"{sorted(kinds)} operation"
+                )
+
+
+def _all_output_groups_bind_reported_facts(
+    output_groups: list[set[str]],
+    *,
+    answer_bindings: list[dict[str, Any]],
+    facts_by_id: dict[str, dict[str, Any]],
+) -> bool:
+    return all(
+        any(
+            binding.get("source_type") == "fact"
+            and binding.get("answer_path") in allowed_paths
+            and (
+                facts_by_id.get(str(binding.get("source_id") or ""), {}).get(
+                    "value_kind"
+                )
+                == "reported"
+            )
+            for binding in answer_bindings
+        )
+        for allowed_paths in output_groups
+    )
+
+
+def _semantic_output_path_groups(query: Query) -> list[set[str]]:
+    groups: list[set[str]] = []
+    if "freeform" in query.answer_types:
+        groups.append({"answer.freeform.text"})
+    if "multiple_choice" in query.answer_types:
+        groups.append(
+            {
+                "answer.multiple_choice",
+                "answer.multiple_choice.selected_option_text",
+            }
+        )
+    return groups
+
+
+def _validate_multiple_choice_numeric_component_bindings(
+    query: Query,
+    *,
+    answer: dict[str, Any],
+    answer_bindings: list[dict[str, Any]],
+    facts_by_id: dict[str, dict[str, Any]],
+    operation_results: dict[str, tuple[Any, str]],
+) -> None:
+    """Ground every answer-distinguishing numeric component of an MC option.
+
+    Formula constants and other numbers repeated in every option are ignored.
+    Numbers that distinguish the selected option must each be represented in a
+    final-answer binding.  This prevents a compound option such as ``A=3, B=9``
+    from passing after grounding only ``B=9``.
+    """
+
+    if "multiple_choice" not in query.answer_types or not query.options:
+        return
+    selected = answer["multiple_choice"]
+    selected_text = str(selected["selected_option_text"])
+    selected_numbers = Counter(_decimal_tokens(selected_text))
+    if not selected_numbers:
+        return
+
+    option_counts = [
+        Counter(_decimal_tokens(option_text))
+        for option_text in query.options.values()
+    ]
+    required: list[Decimal] = []
+    for number, selected_count in selected_numbers.items():
+        common_count = min(counts[number] for counts in option_counts)
+        required.extend([number] * max(0, selected_count - common_count))
+    if not required:
+        return
+
+    available: list[Decimal] = []
+    seen_sources: set[tuple[str, str, str | None]] = set()
+    multiple_choice_paths = {
+        "answer.multiple_choice",
+        "answer.multiple_choice.selected_option_text",
+    }
+    for binding in answer_bindings:
+        if binding.get("answer_path") not in multiple_choice_paths:
+            continue
+        source_type = str(binding.get("source_type") or "")
+        source_id = str(binding.get("source_id") or "")
+        fragment = binding.get("answer_fragment")
+        source_signature = (
+            source_type,
+            source_id,
+            fragment if isinstance(fragment, str) else None,
+        )
+        if source_signature in seen_sources:
+            continue
+        seen_sources.add(source_signature)
+        if source_type == "fact":
+            fact = facts_by_id.get(source_id)
+            source_value = fact.get("value") if fact is not None else None
+        else:
+            operation_result = operation_results.get(source_id)
+            source_value = operation_result[0] if operation_result is not None else None
+        available.extend(
+            _numbers_grounded_by_binding_fragment(source_value, fragment)
+        )
+
+    unmatched: list[Decimal] = []
+    remaining = list(available)
+    for expected in required:
+        match_index = next(
+            (
+                index
+                for index, source in enumerate(remaining)
+                if _decimal_grounding_matches(source, expected)
+            ),
+            None,
+        )
+        if match_index is None:
+            unmatched.append(expected)
+        else:
+            remaining.pop(match_index)
+    if unmatched:
+        rendered = [format(value, "f") for value in unmatched]
+        raise DerivationValidationError(
+            "selected multiple-choice option has ungrounded distinguishing "
+            f"numeric component(s) {rendered}; bind every component, not only "
+            "one convenient value from a compound option"
+        )
+
+
+def _numbers_grounded_by_binding_fragment(
+    source_value: Any,
+    fragment: Any,
+) -> list[Decimal]:
+    source_numbers = _numbers_in_value(source_value)
+    if not source_numbers:
+        return []
+    if not isinstance(fragment, str):
+        return source_numbers
+    fragment_numbers = _decimal_tokens(fragment)
+    if not fragment_numbers:
+        return []
+
+    grounded: list[Decimal] = []
+    remaining_fragments = list(fragment_numbers)
+    for source in source_numbers:
+        match_index = next(
+            (
+                index
+                for index, target in enumerate(remaining_fragments)
+                if _decimal_grounding_matches(source, target)
+            ),
+            None,
+        )
+        if match_index is not None:
+            grounded.append(source)
+            remaining_fragments.pop(match_index)
+    return grounded
+
+
 def _validate_minimal_atomic_freeform(
     query: Query,
     *,
@@ -435,7 +685,7 @@ def _minimal_freeform_surface_matches(
     source_kind: str,
 ) -> bool:
     normalized = _normalize_freeform_exact(text)
-    if source_kind == "compare" or isinstance(source_value, bool):
+    if _is_compare_kind(source_kind) or isinstance(source_value, bool):
         expected = "yes" if bool(source_value) else "no"
         return normalized == expected
     if source_kind in {"add", "subtract", "multiply", "divide", "count"} or (
@@ -447,7 +697,7 @@ def _minimal_freeform_surface_matches(
 
 
 def _canonical_minimal_surface(source_value: Any, source_kind: str) -> str:
-    if source_kind == "compare" or isinstance(source_value, bool):
+    if _is_compare_kind(source_kind) or isinstance(source_value, bool):
         return "Yes" if bool(source_value) else "No"
     if source_kind in {"add", "subtract", "multiply", "divide", "count"} or (
         isinstance(source_value, (int, float, Decimal))
@@ -753,20 +1003,50 @@ def _validate_operation(
             )
         computed = result
     elif kind == "compare":
-        left = _decimal(operation.get("left"), f"{path}.left")
-        right = _decimal(operation.get("right"), f"{path}.right")
-        fact_numbers = [
-            _decimal(fact["value"], f"{path}.fact_ids[{fact_index}].value")
-            for fact_index, fact in enumerate(referenced_facts)
-        ]
-        _require_numeric_sequence_match(
-            [left, right],
-            fact_numbers,
-            path=f"{path}.left/right",
-        )
         operator = str(operation.get("operator") or "")
         if operator not in _COMPARE_OPERATORS:
             raise DerivationValidationError(f"{path}.operator is invalid: {operator!r}")
+        raw_left = operation.get("left")
+        raw_right = operation.get("right")
+        if isinstance(raw_left, list) or isinstance(raw_right, list):
+            if not isinstance(raw_left, list) or not isinstance(raw_right, list):
+                raise DerivationValidationError(
+                    f"{path}.left/right must both be numeric lists for a "
+                    "vector comparison"
+                )
+            if operator not in {"==", "!="}:
+                raise DerivationValidationError(
+                    f"{path}.operator={operator!r} is invalid for vector comparison; "
+                    "use == or !="
+                )
+            if len(referenced_facts) != 2:
+                raise DerivationValidationError(
+                    f"{path}.fact_ids must contain exactly two vector facts"
+                )
+            left = _decimal_sequence(raw_left, f"{path}.left")
+            right = _decimal_sequence(raw_right, f"{path}.right")
+            fact_left = _decimal_sequence(
+                referenced_facts[0]["value"], f"{path}.fact_ids[0].value"
+            )
+            fact_right = _decimal_sequence(
+                referenced_facts[1]["value"], f"{path}.fact_ids[1].value"
+            )
+            if left != fact_left or right != fact_right:
+                raise DerivationValidationError(
+                    f"{path}.left/right do not match referenced vector fact values"
+                )
+        else:
+            left = _decimal(raw_left, f"{path}.left")
+            right = _decimal(raw_right, f"{path}.right")
+            fact_numbers = [
+                _decimal(fact["value"], f"{path}.fact_ids[{fact_index}].value")
+                for fact_index, fact in enumerate(referenced_facts)
+            ]
+            _require_numeric_sequence_match(
+                [left, right],
+                fact_numbers,
+                path=f"{path}.left/right",
+            )
         result = operation.get("result")
         if not isinstance(result, bool):
             raise DerivationValidationError(f"{path}.result must be boolean")
@@ -778,10 +1058,11 @@ def _validate_operation(
     else:
         raise DerivationValidationError(f"{path}.kind is unsupported: {kind!r}")
 
+    binding_kind = _operation_binding_kind(operation)
     binding = _validate_answer_binding(
         operation.get("answer_binding"),
         computed=computed,
-        kind=kind,
+        kind=binding_kind,
         answer=answer,
         path=f"{path}.answer_binding",
     )
@@ -1096,11 +1377,19 @@ def _fragment_contains_fact(fragment: str, value: Any) -> bool:
     if isinstance(value, bool):
         return _yes_no_polarity(fragment) is value
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
-        return _decimal(value, "fact value") in _numbers_in_text(fragment)
+        source = _decimal(value, "fact value")
+        return any(
+            _decimal_grounding_matches(source, target)
+            for target in _decimal_tokens(fragment)
+        )
     if isinstance(value, str):
         expected = _normalize_item(value)
         actual = _normalize_item(fragment)
-        return _contains_normalized_token(actual, expected)
+        if _contains_normalized_token(actual, expected):
+            return True
+        return _numeric_sequence_fragment_matches(value, fragment)
+    if isinstance(value, (list, tuple)):
+        return _numeric_sequence_fragment_matches(value, fragment)
     return False
 
 
@@ -1282,9 +1571,20 @@ def _operation_values_equal(kind: str, left: Any, right: Any) -> bool:
             and isinstance(left, int)
             and left == right
         )
-    if kind == "compare":
+    if _is_compare_kind(kind):
         return isinstance(left, bool) and left is right
     return isinstance(left, str) and left.strip() == str(right).strip()
+
+
+def _operation_binding_kind(operation: dict[str, Any]) -> str:
+    kind = str(operation.get("kind") or "")
+    if kind == "compare":
+        return f"compare:{operation.get('operator') or ''}"
+    return kind
+
+
+def _is_compare_kind(kind: str) -> bool:
+    return kind == "compare" or kind.startswith("compare:")
 
 
 def _typed_answer_matches(answer_value: Any, computed: Any, kind: str) -> bool:
@@ -1301,7 +1601,7 @@ def _typed_answer_matches(answer_value: Any, computed: Any, kind: str) -> bool:
             and isinstance(answer_value, int)
             and answer_value == computed
         )
-    if kind == "compare":
+    if _is_compare_kind(kind):
         return isinstance(answer_value, bool) and answer_value is computed
     return answer_value == computed
 
@@ -1310,8 +1610,13 @@ def _fragment_contains_expected(fragment: str, computed: Any, kind: str) -> bool
     if kind in {"add", "subtract", "multiply", "divide", "count"}:
         expected_number = _decimal(computed, "computed result")
         return expected_number in _numbers_in_text(fragment)
-    if kind == "compare":
-        return _yes_no_polarity(fragment) is computed
+    if _is_compare_kind(kind):
+        operator = kind.partition(":")[2] or None
+        return _comparison_fragment_matches(
+            fragment,
+            computed=bool(computed),
+            operator=operator,
+        )
 
     expected_label = _normalize_item(computed)
     normalized_fragment = _normalize_item(fragment)
@@ -1332,15 +1637,101 @@ def _contains_normalized_token(text: str, token: str) -> bool:
 
 
 def _numbers_in_text(text: str) -> set[Decimal]:
-    numbers: set[Decimal] = set()
-    for match in _NUMBER_IN_TEXT.findall(text.replace(",", "")):
-        try:
-            numbers.add(Decimal(match))
-        except InvalidOperation:
-            continue
+    numbers = set(_decimal_tokens(text))
     for match in _NUMBER_WORD_RE.findall(text):
         numbers.add(Decimal(_NUMBER_WORDS[match.casefold()]))
     return numbers
+
+
+def _decimal_tokens(text: str) -> list[Decimal]:
+    normalized = text.replace("−", "-").replace("–", "-").replace(",", "")
+    numbers: list[Decimal] = []
+    for match in _NUMBER_IN_TEXT.finditer(normalized):
+        # Model and dataset identifiers such as Qwen2.5 and CIFAR-10 are
+        # categorical labels, not answer quantities.  A genuine signed number
+        # starts at a delimiter (or the beginning of the text).
+        if match.start() > 0 and re.match(r"[\w]", normalized[match.start() - 1]):
+            continue
+        try:
+            numbers.append(Decimal(match.group()))
+        except InvalidOperation:
+            continue
+    return numbers
+
+
+def _numbers_in_value(value: Any) -> list[Decimal]:
+    if isinstance(value, bool) or value is None:
+        return []
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            return [_decimal(value, "bound source value")]
+        except DerivationValidationError:
+            return []
+    if isinstance(value, str):
+        return _decimal_tokens(value)
+    if isinstance(value, dict):
+        output: list[Decimal] = []
+        for item in value.values():
+            output.extend(_numbers_in_value(item))
+        return output
+    if isinstance(value, (list, tuple)):
+        output = []
+        for item in value:
+            output.extend(_numbers_in_value(item))
+        return output
+    return []
+
+
+def _numeric_sequence_fragment_matches(source_value: Any, fragment: str) -> bool:
+    source_numbers = _numbers_in_value(source_value)
+    fragment_numbers = _decimal_tokens(fragment)
+    return bool(
+        source_numbers
+        and len(source_numbers) == len(fragment_numbers)
+        and all(
+            _decimal_grounding_matches(source, target)
+            for source, target in zip(source_numbers, fragment_numbers, strict=True)
+        )
+    )
+
+
+def _decimal_grounding_matches(source: Decimal, target: Decimal) -> bool:
+    """Accept exact values or an explicitly shorter, conventional decimal rounding."""
+
+    if source == target:
+        return True
+    target_places = max(0, -target.as_tuple().exponent)
+    source_places = max(0, -source.as_tuple().exponent)
+    if target_places == 0 or source_places <= target_places:
+        return False
+    quantum = Decimal(1).scaleb(-target_places)
+    try:
+        with localcontext() as context:
+            context.prec = max(
+                50,
+                len(source.as_tuple().digits) + target_places + 10,
+            )
+            return any(
+                source.quantize(quantum, rounding=mode) == target
+                for mode in (ROUND_HALF_UP, ROUND_HALF_EVEN)
+            )
+    except InvalidOperation:
+        return False
+
+
+def _decimal_sequence(value: Any, path: str) -> list[Decimal]:
+    if isinstance(value, list) and value:
+        return [
+            _decimal(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, str):
+        numbers = _decimal_tokens(value)
+        if numbers:
+            return numbers
+    raise DerivationValidationError(
+        f"{path} must be a non-empty numeric list or numeric vector string"
+    )
 
 
 def _require_numeric_sequence_match(
@@ -1509,7 +1900,28 @@ def _decimal(value: Any, path: str) -> Decimal:
     return number
 
 
-def _yes_no_polarity(text: str) -> bool | None:
+def _comparison_fragment_matches(
+    text: str,
+    *,
+    computed: bool,
+    operator: str | None,
+) -> bool:
+    explicit = _explicit_boolean_polarity(text)
+    if explicit is not None:
+        return explicit is computed
+    equivalence = _equivalence_polarity(text)
+    if equivalence is None:
+        return False
+    if operator in (None, "=="):
+        expressed_result = equivalence
+    elif operator == "!=":
+        expressed_result = not equivalence
+    else:
+        return False
+    return expressed_result is computed
+
+
+def _explicit_boolean_polarity(text: str) -> bool | None:
     normalized = _normalize_item(text)
     positive = bool(re.search(r"\b(?:yes|true)\b", normalized))
     negative = bool(re.search(r"\b(?:no|false)\b", normalized))
@@ -1517,6 +1929,41 @@ def _yes_no_polarity(text: str) -> bool | None:
         return True
     if negative and not positive:
         return False
+    return None
+
+
+def _equivalence_polarity(text: str) -> bool | None:
+    normalized = _normalize_item(text)
+    negative_equivalence = bool(
+        re.search(
+            r"\b(?:different|differ(?:s|ed|ent)?)\b|"
+            r"\b(?:do|does|did|are|is|were|was)\s+not\s+"
+            r"(?:the\s+)?(?:same|equal|identical|match(?:ing)?)\b|"
+            r"\bnot\s+(?:the\s+)?(?:same|equal|identical)\b",
+            normalized,
+        )
+    )
+    positive_equivalence = bool(
+        not negative_equivalence
+        and re.search(
+            r"\b(?:same|equal|identical|match(?:es|ed|ing)?)\b",
+            normalized,
+        )
+    )
+    if positive_equivalence and not negative_equivalence:
+        return True
+    if negative_equivalence and not positive_equivalence:
+        return False
+    return None
+
+
+def _yes_no_polarity(text: str) -> bool | None:
+    explicit = _explicit_boolean_polarity(text)
+    equivalence = _equivalence_polarity(text)
+    if explicit is None:
+        return equivalence
+    if equivalence is None or equivalence is explicit:
+        return explicit
     return None
 
 
