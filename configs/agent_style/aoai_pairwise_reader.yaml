@@ -10,9 +10,11 @@ llm:
   params:
     json_mode: true
     max_completion_tokens: 12000
-    # Successful validation calls are normally below 22s. Fail a wedged
-    # transport at 60s so one dead socket cannot stall a whole recovery wave.
-    timeout: 60.0
+    # Most calls finish quickly, but the largest 50-paper answer context can
+    # legitimately need more than 60s. Keep a bounded 180s ceiling so that
+    # evidence-rich enumeration questions are not misclassified as transport
+    # failures while a genuinely dead socket still terminates.
+    timeout: 180.0
     # All workers share one launch pacer. This avoids an instantaneous token
     # burst while still allowing slow provider calls to overlap.
     min_request_interval_seconds: 0.075

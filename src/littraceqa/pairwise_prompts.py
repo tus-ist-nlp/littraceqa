@@ -21,7 +21,7 @@ JUDGMENT_PROMPT_VERSION = (
     "pairwise-paper-judge-v21-grammatical-owner-spatial-counts"
 )
 ANSWER_PROMPT_VERSION = (
-    "accepted-evidence-answer-v28-lossless-hypotheses-row-inventory"
+    "accepted-evidence-answer-v29-lossless-hypotheses-grounded-paraphrase"
 )
 PAIRWISE_SYSTEM_PROMPT = (
     "You are the reading component of a scientific-paper QA system. "
@@ -377,6 +377,12 @@ DERIVATION CONTRACT
   a longer source sentence. For example, use one minimal fact for an optimal
   scalar and another for the above-threshold effect, then bind both exact option
   fragments. Do not force one long source sentence into one short option text.
+- A text fact may use a minimal canonical phrase from a multiple-choice option
+  when the cited original source directly states the same qualitative meaning,
+  direction, and polarity in different words. For example, source text saying
+  performance falls behind a baseline may ground the canonical phrase "harms
+  performance". This is semantic reading, not permission to alter any number,
+  comparator, negation, condition, dataset, model, or setting.
 - For argmax/argmin only, every referenced fact.value is exactly an object
   {"label":"unique answer-aligned row identity","value":numeric compared operand}.
   The operation's candidates must copy those objects exactly. Labels must be
@@ -956,8 +962,8 @@ Use one reported numeric-array fact from each owning paper. Bind each vector ind
     FewShotExample(
         "A25_compound_extremum_requires_all_candidates",
         frozenset({"argmax", "multiple_choice"}),
-        r'''Synthetic question asks which decay factor gives the best performance across three evaluated settings and also asks what happens above 1.0. The source reports gamma=0.90 score 71, gamma=0.98 score 76, gamma=1.05 score 68, and says values above 1.0 harm performance.
-Create three label/value facts and an argmax operation over all three candidates, yielding the exact winning label used by the option. Create a separate atomic reported fact for "harms performance". Bind both the argmax result and the effect fact to the compound option. A bare fact saying "0.98 is optimal" cannot replace the comparison inventory, and grounding only one half of a compound option is incomplete.''',
+        r'''Synthetic question asks which decay factor gives the best performance across three evaluated settings and also asks what happens above 1.0. The source directly states "gamma=0.98 achieves the highest performance across all three models" and later says performance above 1.0 falls behind the standard baseline. The selected option is "gamma=0.98 optimal; gamma>1.0 harms performance".
+Because the original source explicitly reports the optimum, use a minimal reported fact for gamma=0.98 rather than inventing a one-row or duplicate-row argmax. If only raw setting/score rows were supplied, then an argmax over every eligible distinct row would be required instead. Create a separate text fact with the minimal canonical phrase "harms performance": the cited source directly states the same negative direction even though its surface wording is "falls behind the standard baseline". Bind both atomic facts independently to the compound option. Grounding only one half is incomplete, and this narrow qualitative paraphrase rule may never alter numbers, polarity, conditions, models, datasets, or settings.''',
     ),
     FewShotExample(
         "A26_explicit_table_row_inventory",

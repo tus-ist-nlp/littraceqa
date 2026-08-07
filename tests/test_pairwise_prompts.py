@@ -896,7 +896,7 @@ def test_answer_render_includes_answer_shape_limits_and_actual_image_mapping():
     )
 
     assert ANSWER_PROMPT_VERSION == (
-        "accepted-evidence-answer-v28-lossless-hypotheses-row-inventory"
+        "accepted-evidence-answer-v29-lossless-hypotheses-grounded-paraphrase"
     )
     assert prompt.index("SYNTHETIC FEW-SHOT EXAMPLES") < prompt.index("LIVE TASK")
     assert '"Passed":false' in prompt

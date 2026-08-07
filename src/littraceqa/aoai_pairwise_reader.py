@@ -81,7 +81,7 @@ from littraceqa.query_requirements import (
 PAPER_CONTEXT_SELECTOR_VERSION = "query-lexical-v3-exact-object-multipanel"
 NAMED_OWNER_RESOLVER_VERSION = "named-owner-v2-grammatical-local-object-only"
 ANSWER_IMAGE_HANDOFF_VERSION = "answer-purpose-image-first-v1"
-MAX_ANSWER_REPAIR_ATTEMPTS = 3
+MAX_ANSWER_REPAIR_ATTEMPTS = 5
 
 JUDGMENT_LABELS = (
     "direct_answer",
@@ -3012,6 +3012,7 @@ class PairwiseAOAIReader:
             or "candidates do not match label/value pairs" in error_corpus
             or "does not express expected result" in error_corpus
             or "does not equal computed result" in error_corpus
+            or "question explicitly requests argmax/argmin" in error_corpus
         ):
             comparison_repair = (
                 " This is an argmax/argmin comparison-contract error. For every "
@@ -3026,7 +3027,11 @@ class PairwiseAOAIReader:
                 "possible; for example keep a lone 'KS' as 'KS', not 'KS (m = 128)', "
                 "so the computed winner is an exact substring of the final answer. "
                 "Preserve this labeling scheme in all later corrections, then recompute "
-                "result and bindings from the corrected candidates."
+                "result and bindings from the corrected candidates. If the original "
+                "source directly and explicitly reports the requested winner or optimum "
+                "rather than merely listing operands, do not invent a one-row or "
+                "duplicate-row argmax: use the minimal winner value with "
+                "value_kind='reported' and bind every final output to that reported fact."
             )
         table_binding_repair = ""
         if (
@@ -3068,7 +3073,14 @@ class PairwiseAOAIReader:
                 "substring of the emitted answer, preferably a JSON number for a "
                 "numeric value. Split genuinely compound answers into separate "
                 "atomic facts and bindings. Never copy option-only wording into a "
-                "reported fact; every fact value must remain supported by its chunk."
+                "reported fact; every fact value must remain supported by its chunk. "
+                "For a multiple-choice option that faithfully canonicalizes a directly "
+                "stated qualitative effect, a text fact may use the option's minimal "
+                "canonical phrase only when the cited source visibly states the same "
+                "direction and polarity. For example, source text saying performance "
+                "falls behind a baseline may ground 'harms performance'. Never use this "
+                "paraphrase rule to change a number, comparator, negation, condition, "
+                "dataset, model, or setting."
             )
         visual_fact_repair = ""
         if (

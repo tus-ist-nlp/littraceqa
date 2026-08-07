@@ -4307,8 +4307,8 @@ def test_answer_gets_second_bounded_repair_for_verbose_fact_value(tmp_path):
 
     assert prediction.answer.freeform == {"text": concise_value}
     assert len(llm.calls) == 3
-    assert "Correction attempt: 1/3" in llm.calls[1]
-    assert "Correction attempt: 2/3" in llm.calls[2]
+    assert "Correction attempt: 1/5" in llm.calls[1]
+    assert "Correction attempt: 2/5" in llm.calls[2]
     assert "smallest answer-bearing typed value" in llm.calls[2]
     assert [attempt["parse_error"] is None for attempt in answer_record["attempts"]] == [
         False,
