@@ -138,6 +138,31 @@ def test_few_shot_selection_is_stable_bounded_and_query_aware():
     assert "A12_missing_image" in answer_ids
 
 
+def test_singleton_extremum_few_shot_requires_eligibility_only() -> None:
+    eligible_query = Query(
+        "eligible",
+        "Which paper trained only on BaseSet has the highest score?",
+        ["multiple_choice"],
+        options={"A": "Cedar", "B": "Flint"},
+    )
+    output_only_query = Query(
+        "output_only",
+        "Which paper has the highest score? Return only the paper name.",
+        ["multiple_choice"],
+        options={"A": "Cedar", "B": "Flint"},
+    )
+
+    eligible_ids = {
+        item.example_id for item in selected_answer_examples(eligible_query)
+    }
+    output_only_ids = {
+        item.example_id for item in selected_answer_examples(output_only_query)
+    }
+
+    assert "A28_only_filter_singleton_extremum" in eligible_ids
+    assert "A28_only_filter_singleton_extremum" not in output_only_ids
+
+
 def test_json_judgment_few_shots_obey_visual_contract():
     summaries = _judgment_response_summaries()
 

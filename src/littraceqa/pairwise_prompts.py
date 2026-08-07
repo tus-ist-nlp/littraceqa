@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from littraceqa.answer_derivation import has_explicit_singleton_eligibility_filter
 from littraceqa.corpus_preflight import requires_visual_image
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.query_requirements import explicit_table_row_items
@@ -1330,7 +1331,6 @@ def _query_tags(query: Query) -> frozenset[str]:
         ),
         "vector_compare": r"\bdo\s+they\s+match\b",
         "same_performance": r"\bachieve(?:s|d)?\s+the\s+same\s+performance\b",
-        "filtered_singleton": r"\bonly\b",
         "multi": (
             r"\b(?:each|across|respective|for these|among)\b|"
             r"\bwhich(?:\s+[a-z0-9-]+){0,4}\s+papers\b"
@@ -1346,6 +1346,8 @@ def _query_tags(query: Query) -> frozenset[str]:
     for tag, pattern in keyword_patterns.items():
         if re.search(pattern, text):
             tags.add(tag)
+    if has_explicit_singleton_eligibility_filter(query.question):
+        tags.add("filtered_singleton")
     if "multiple_choice" in query.answer_types:
         tags.add("multiple_choice")
     if len(query.answer_types) > 1:

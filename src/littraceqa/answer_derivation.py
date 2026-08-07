@@ -27,7 +27,7 @@ class DerivationValidationError(ValueError):
     """A structured derivation contradicts its inputs or final answer."""
 
 
-ANSWER_DERIVATION_VERSION = "answer-derivation-v2-filtered-singleton-extremum"
+ANSWER_DERIVATION_VERSION = "answer-derivation-v3-eligibility-scoped-extremum"
 
 
 _COMPARE_OPERATORS = {
@@ -146,13 +146,34 @@ _MATCH_COMPARISON_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 _EXTREME_QUERY_RE = re.compile(
-    r"\b(?:which|what)\b[^?\n]{0,240}\b"
-    r"(?:highest|lowest|largest|smallest|maximum|minimum|best|worst)\b|"
-    r"\b(?:highest|lowest|largest|smallest|maximum|minimum|best|worst)\b"
-    r"[^?\n]{0,160}\b(?:which|what)\b",
+    r"\b(?:highest|lowest|largest|smallest|maximum|minimum|best|worst)\b",
     re.IGNORECASE,
 )
-_EXPLICIT_SINGLETON_FILTER_RE = re.compile(r"\bonly\b", re.IGNORECASE)
+_ELIGIBILITY_VERB = (
+    r"(?:train(?:ed|ing|s)?|pre[- ]?train(?:ed|ing|s)?|"
+    r"fine[- ]?tun(?:e|ed|ing|es)|evaluat(?:e|ed|ing|es)|"
+    r"test(?:ed|ing|s)?|us(?:e|ed|ing|es)|re(?:ly|lies|lied|lying)|"
+    r"bas(?:e|ed|ing|es)|build(?:s|ing)?|built|operat(?:e|ed|ing|es)|"
+    r"run(?:s|ning)?|optim(?:ize|ized|izing|izes)|"
+    r"contain(?:s|ed|ing)?|consum(?:e|ed|ing|es))"
+)
+_EXPLICIT_SINGLETON_FILTER_RE = re.compile(
+    rf"(?:\b{_ELIGIBILITY_VERB}\b(?:\s+[^\s?.,;:]+){{0,3}}\s+\bonly\b|"
+    rf"\bonly\b(?:\s+[^\s?.,;:]+){{0,3}}\s+\b{_ELIGIBILITY_VERB}\b)",
+    re.IGNORECASE,
+)
+
+
+def has_explicit_singleton_eligibility_filter(question: str) -> bool:
+    """Return whether ``only`` constrains candidate eligibility.
+
+    Output instructions such as ``Return only the system name`` must not make a
+    one-row extremum valid.  We therefore require ``only`` to occur in a short
+    grammatical window around an eligibility verb such as ``trained`` or
+    ``uses``.
+    """
+
+    return _EXPLICIT_SINGLETON_FILTER_RE.search(question) is not None
 
 
 def is_aggregate_citation_count_query(query: Query) -> bool:
@@ -428,6 +449,25 @@ def _validate_required_reasoning_contracts(
     output_groups = _semantic_output_path_groups(query)
     if not output_groups:
         return
+    explicit_extreme = _EXTREME_QUERY_RE.search(query.question) is not None
+    explicit_singleton_filter = has_explicit_singleton_eligibility_filter(
+        query.question
+    )
+    singleton_extrema = [
+        operation
+        for operation in operations
+        if operation.get("kind") in {"argmax", "argmin"}
+        and len(operation.get("candidates") or []) == 1
+    ]
+    if singleton_extrema and not (
+        explicit_extreme and explicit_singleton_filter
+    ):
+        raise DerivationValidationError(
+            "a one-candidate argmax/argmin is allowed only when the released "
+            "question explicitly requests an extremum and contains an eligibility "
+            "'only' attached to a constraint such as trained/uses/evaluated; output "
+            "instructions such as 'return only the name' do not qualify"
+        )
     requested: list[tuple[set[str], str, bool]] = []
     if _DELTA_QUERY_RE.search(query.question):
         # A paper may explicitly print an already-computed improvement.  Keep
@@ -436,8 +476,18 @@ def _validate_required_reasoning_contracts(
         requested.append(({"subtract"}, "numeric delta", True))
     if _MATCH_COMPARISON_QUERY_RE.search(query.question):
         requested.append(({"compare"}, "equality comparison", True))
-    if _EXTREME_QUERY_RE.search(query.question):
-        requested.append(({"argmax", "argmin"}, "argmax/argmin", True))
+    if explicit_extreme:
+        # A filtered extremum must show the eligible set explicitly, even if a
+        # paper happens to describe its own result as best.  Otherwise a model
+        # could skip the cross-paper eligibility comparison by labelling the
+        # winning paper name as a directly reported fact.
+        requested.append(
+            (
+                {"argmax", "argmin"},
+                "argmax/argmin",
+                not explicit_singleton_filter,
+            )
+        )
 
     for kinds, description, allow_direct_reported in requested:
         operation_ids = {
@@ -457,22 +507,6 @@ def _validate_required_reasoning_contracts(
                 f"use a grounded {sorted(kinds)} operation instead of presenting "
                 "the computed conclusion as a reported/text fact"
             )
-        if kinds == {"argmax", "argmin"}:
-            singleton_operations = [
-                operation
-                for operation in operations
-                if operation.get("id") in operation_ids
-                and len(operation.get("candidates") or []) == 1
-            ]
-            if singleton_operations and not _EXPLICIT_SINGLETON_FILTER_RE.search(
-                query.question
-            ):
-                raise DerivationValidationError(
-                    "a one-candidate argmax/argmin is allowed only when the released "
-                    "question contains an explicit 'only' eligibility filter that can "
-                    "reduce the grounded eligible set to one; otherwise compare every "
-                    "eligible candidate"
-                )
         for allowed_paths in output_groups:
             if not any(
                 binding.get("source_type") == "operation"

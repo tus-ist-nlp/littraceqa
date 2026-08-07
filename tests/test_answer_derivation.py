@@ -1950,10 +1950,20 @@ def test_explicit_only_filter_allows_grounded_singleton_argmax() -> None:
     ]
 
 
-def test_singleton_argmax_without_explicit_only_filter_is_rejected() -> None:
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Which system has the highest score?",
+        "Which system has the highest score? Return only the system name.",
+        "Name the system with the highest score.",
+    ],
+)
+def test_singleton_argmax_without_explicit_only_filter_is_rejected(
+    question: str,
+) -> None:
     query = Query(
         "unfiltered_maximum",
-        "Which system has the highest score?",
+        question,
         ["multiple_choice"],
         options={"A": "Cedar", "B": "Flint"},
     )
@@ -1973,6 +1983,40 @@ def test_singleton_argmax_without_explicit_only_filter_is_rejected() -> None:
         validate_answer_semantics(
             query,
             derivation=_derivation(facts, [operation], "Flint"),
+            answer={
+                "multiple_choice": {
+                    "label": "B",
+                    "selected_option_text": "Flint",
+                }
+            },
+        )
+
+
+def test_filtered_extremum_cannot_bypass_comparison_with_reported_name() -> None:
+    query = Query(
+        "filtered_maximum",
+        "Which system trained only on BaseSet has the highest score?",
+        ["multiple_choice"],
+        options={"A": "Cedar", "B": "Flint"},
+    )
+    derivation = _derivation(
+        [_fact("winner", "Flint", value_kind="reported")],
+        [],
+        "Flint",
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "winner",
+                "answer_fragment": "Flint",
+            }
+        ],
+    )
+
+    with pytest.raises(DerivationValidationError, match="argmax/argmin"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
             answer={
                 "multiple_choice": {
                     "label": "B",
