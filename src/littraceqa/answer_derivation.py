@@ -27,6 +27,9 @@ class DerivationValidationError(ValueError):
     """A structured derivation contradicts its inputs or final answer."""
 
 
+ANSWER_DERIVATION_VERSION = "answer-derivation-v2-filtered-singleton-extremum"
+
+
 _COMPARE_OPERATORS = {
     ">": lambda left, right: left > right,
     ">=": lambda left, right: left >= right,
@@ -149,6 +152,7 @@ _EXTREME_QUERY_RE = re.compile(
     r"[^?\n]{0,160}\b(?:which|what)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_SINGLETON_FILTER_RE = re.compile(r"\bonly\b", re.IGNORECASE)
 
 
 def is_aggregate_citation_count_query(query: Query) -> bool:
@@ -453,6 +457,22 @@ def _validate_required_reasoning_contracts(
                 f"use a grounded {sorted(kinds)} operation instead of presenting "
                 "the computed conclusion as a reported/text fact"
             )
+        if kinds == {"argmax", "argmin"}:
+            singleton_operations = [
+                operation
+                for operation in operations
+                if operation.get("id") in operation_ids
+                and len(operation.get("candidates") or []) == 1
+            ]
+            if singleton_operations and not _EXPLICIT_SINGLETON_FILTER_RE.search(
+                query.question
+            ):
+                raise DerivationValidationError(
+                    "a one-candidate argmax/argmin is allowed only when the released "
+                    "question contains an explicit 'only' eligibility filter that can "
+                    "reduce the grounded eligible set to one; otherwise compare every "
+                    "eligible candidate"
+                )
         for allowed_paths in output_groups:
             if not any(
                 binding.get("source_type") == "operation"
@@ -974,8 +994,10 @@ def _validate_operation(
         computed = result
     elif kind in {"argmax", "argmin"}:
         candidates = operation.get("candidates")
-        if not isinstance(candidates, list) or len(candidates) < 2:
-            raise DerivationValidationError(f"{path}.candidates needs at least two rows")
+        if not isinstance(candidates, list) or not candidates:
+            raise DerivationValidationError(
+                f"{path}.candidates needs at least one grounded row"
+            )
         parsed: list[tuple[str, Decimal]] = []
         for candidate_index, candidate in enumerate(candidates):
             if not isinstance(candidate, dict) or set(candidate) != {"label", "value"}:

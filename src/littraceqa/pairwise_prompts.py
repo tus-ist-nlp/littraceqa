@@ -21,7 +21,7 @@ JUDGMENT_PROMPT_VERSION = (
     "pairwise-paper-judge-v21-grammatical-owner-spatial-counts"
 )
 ANSWER_PROMPT_VERSION = (
-    "accepted-evidence-answer-v29-lossless-hypotheses-grounded-paraphrase"
+    "accepted-evidence-answer-v30-filtered-singleton-extremum"
 )
 PAIRWISE_SYSTEM_PROMPT = (
     "You are the reading component of a scientific-paper QA system. "
@@ -300,6 +300,10 @@ COUNTING AND COMPARISON
   "top-row col-1 axes" or "(a)-left axes". Bare labels such as "(a)" and "(b)"
   are not an auditable inventory. Never invent panel letters absent from pixels.
 - For argmax/argmin, list every compared label/value pair with the correct header.
+- If the released question contains an explicit "only" eligibility condition
+  and applying all grounded constraints leaves exactly one eligible candidate,
+  a one-candidate argmax/argmin is valid. Use that one distinct fact/candidate;
+  never duplicate it to fabricate two rows and never add an ineligible paper.
 - For Yes/No, record left value, operator, right value, and boolean result. The
   final polarity and selected option must agree with that boolean.
 
@@ -966,6 +970,12 @@ Use one reported numeric-array fact from each owning paper. Bind each vector ind
 Because the original source explicitly reports the optimum, use a minimal reported fact for gamma=0.98 rather than inventing a one-row or duplicate-row argmax. If only raw setting/score rows were supplied, then an argmax over every eligible distinct row would be required instead. Create a separate text fact with the minimal canonical phrase "harms performance": the cited source directly states the same negative direction even though its surface wording is "falls behind the standard baseline". Bind both atomic facts independently to the compound option. Grounding only one half is incomplete, and this narrow qualitative paraphrase rule may never alter numbers, polarity, conditions, models, datasets, or settings.''',
     ),
     FewShotExample(
+        "A28_only_filter_singleton_extremum",
+        frozenset({"filtered_singleton", "argmax", "multiple_choice"}),
+        r'''Synthetic question: "Which paper trained only on BaseSet achieves the highest score?" Cedar scores 81 but visibly uses BaseSet plus ExtraSet; Flint scores 74 and visibly trains only on BaseSet. No other supplied paper satisfies every condition.
+Apply eligibility before the extremum. Create one reported label/value fact for the sole eligible Flint row and one unary argmax operation whose fact_ids and candidates each contain Flint exactly once. Bind the result label to the full Flint option using its exact Flint substring. Preserve Cedar as query-relevant comparison context if appropriate, but do not put Cedar into the eligible argmax, do not duplicate Flint to fake two rows, and do not waive the explicit "only" constraint.''',
+    ),
+    FewShotExample(
         "A26_explicit_table_row_inventory",
         frozenset({"explicit_rows", "table"}),
         r'''Synthetic question explicitly requests rows for Cedar, Flint, Quartz, and Willow. Stage 1 proposes four source-linked rows. The table image visibly prints Cedar=7, Flint=-, Quartz=11, and Willow=13.
@@ -1320,6 +1330,7 @@ def _query_tags(query: Query) -> frozenset[str]:
         ),
         "vector_compare": r"\bdo\s+they\s+match\b",
         "same_performance": r"\bachieve(?:s|d)?\s+the\s+same\s+performance\b",
+        "filtered_singleton": r"\bonly\b",
         "multi": (
             r"\b(?:each|across|respective|for these|among)\b|"
             r"\bwhich(?:\s+[a-z0-9-]+){0,4}\s+papers\b"

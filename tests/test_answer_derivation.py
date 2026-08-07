@@ -1913,3 +1913,70 @@ def test_extreme_query_cannot_bypass_argmax_with_winner_fact() -> None:
                 }
             },
         )
+
+
+def test_explicit_only_filter_allows_grounded_singleton_argmax() -> None:
+    query = Query(
+        "filtered_maximum",
+        "Which system trained only on BaseSet has the highest score?",
+        ["multiple_choice"],
+        options={"A": "Cedar", "B": "Flint"},
+    )
+    facts = [_fact("flint", {"label": "Flint", "value": 74})]
+    operation = {
+        "id": "eligible_largest",
+        "kind": "argmax",
+        "fact_ids": ["flint"],
+        "candidates": [{"label": "Flint", "value": 74}],
+        "result": "Flint",
+        "answer_binding": _binding(
+            "answer.multiple_choice", "Flint", "Flint"
+        ),
+    }
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(facts, [operation], "Flint"),
+        answer={
+            "multiple_choice": {
+                "label": "B",
+                "selected_option_text": "Flint",
+            }
+        },
+    )
+
+    assert validated["operations"][0]["candidates"] == [
+        {"label": "Flint", "value": 74}
+    ]
+
+
+def test_singleton_argmax_without_explicit_only_filter_is_rejected() -> None:
+    query = Query(
+        "unfiltered_maximum",
+        "Which system has the highest score?",
+        ["multiple_choice"],
+        options={"A": "Cedar", "B": "Flint"},
+    )
+    facts = [_fact("flint", {"label": "Flint", "value": 74})]
+    operation = {
+        "id": "largest",
+        "kind": "argmax",
+        "fact_ids": ["flint"],
+        "candidates": [{"label": "Flint", "value": 74}],
+        "result": "Flint",
+        "answer_binding": _binding(
+            "answer.multiple_choice", "Flint", "Flint"
+        ),
+    }
+
+    with pytest.raises(DerivationValidationError, match="one-candidate argmax"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "Flint"),
+            answer={
+                "multiple_choice": {
+                    "label": "B",
+                    "selected_option_text": "Flint",
+                }
+            },
+        )

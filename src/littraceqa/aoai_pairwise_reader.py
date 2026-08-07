@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Required, TypedDict, cast
 
 from littraceqa.answer_derivation import (
+    ANSWER_DERIVATION_VERSION,
     DerivationValidationError,
     citation_author_filter,
     citation_identity_key,
@@ -2427,6 +2428,7 @@ class PairwiseAOAIReader:
         return _json_sha256(
             {
                 "prompt_version": ANSWER_PROMPT_VERSION,
+                "answer_derivation_version": ANSWER_DERIVATION_VERSION,
                 "image_handoff_version": ANSWER_IMAGE_HANDOFF_VERSION,
                 "query_requirements_version": QUERY_REQUIREMENTS_VERSION,
                 "few_shot_examples": example_manifest(query)["answer"],
@@ -3031,7 +3033,11 @@ class PairwiseAOAIReader:
                 "source directly and explicitly reports the requested winner or optimum "
                 "rather than merely listing operands, do not invent a one-row or "
                 "duplicate-row argmax: use the minimal winner value with "
-                "value_kind='reported' and bind every final output to that reported fact."
+                "value_kind='reported' and bind every final output to that reported fact. "
+                "When the released question itself contains an explicit 'only' filter "
+                "and the grounded eligible set truly reduces to one paper, use a unary "
+                "argmax/argmin with exactly that one distinct candidate. Never pad it "
+                "with a duplicate fact or an ineligible paper."
             )
         table_binding_repair = ""
         if (
