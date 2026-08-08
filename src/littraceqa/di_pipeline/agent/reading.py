@@ -27,6 +27,7 @@ from __future__ import annotations
 from littraceqa.di_pipeline.agent.evidence import evidence_from_result
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 from littraceqa.di_pipeline.agent.task_family import MULTI, TaskFamilyClassifier, apply_paper_cutoff
+from littraceqa.di_pipeline.select import build_paper_selector
 from littraceqa.di_pipeline.contracts import Answer, Evidence, Prediction, Query, RetrievalResult
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.di_pipeline.registry import register
@@ -54,6 +55,7 @@ class ReadingAgent:
         snippet_chars: int = 1800,
         paper_cutoff: str = "task_family",
         max_papers: int = 10,
+        paper_selector: dict | None = None,
     ):
         self.retriever = retriever
         self.llm = llm
@@ -64,6 +66,7 @@ class ReadingAgent:
         self.snippet_chars = snippet_chars
         self.paper_cutoff = paper_cutoff
         self.max_papers = max_papers
+        self.paper_selector = build_paper_selector(paper_selector)
         self.task_family = TaskFamilyClassifier(llm)
 
     def run(self, query: Query) -> Prediction:
@@ -305,9 +308,24 @@ class ReadingAgent:
         else:
             ranked = verdict["paper_ids"]
 
-        paper_ids = apply_paper_cutoff(
-            ranked, query, self.task_family, self.paper_cutoff, self.max_papers
-        )
+        if self.paper_selector is not None:
+            # select_style を指定したときは、そちらが提出本数を決める。
+            # 根拠が取れた論文を渡すので、require_evidence 付きの構成では
+            # 読解で裏が取れなかった候補を落とせる。
+            evidence_paper_ids = (
+                {chunks[chunk_id].paper_id for chunk_id in verdict["evidence_chunk_ids"]}
+                if verdict is not None
+                else None
+            )
+            paper_ids = list(
+                self.paper_selector.select(
+                    query.question, ranked, evidence_paper_ids
+                ).paper_ids
+            )
+        else:
+            paper_ids = apply_paper_cutoff(
+                ranked, query, self.task_family, self.paper_cutoff, self.max_papers
+            )
 
         evidence_results: list[RetrievalResult] = []
         if verdict is not None:

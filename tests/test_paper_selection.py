@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
+import yaml
 
-from littraceqa.di_pipeline.evaluation.paper_selection import (
+from littraceqa.di_pipeline.evaluation.submission_scoring import (
     load_gold_paper_sets,
     prf,
     score_selection,
@@ -15,6 +17,7 @@ from littraceqa.di_pipeline.select.cardinality import (
     expected_paper_count,
     is_open_ended_enumeration,
 )
+from littraceqa.di_pipeline.select import build_paper_selector
 from littraceqa.di_pipeline.select.selector import CardinalityPaperSelector
 
 
@@ -198,3 +201,116 @@ def test_load_gold_paper_sets_rejects_an_empty_file(tmp_path):
 
     with pytest.raises(ValueError, match="no queries"):
         load_gold_paper_sets(path)
+
+
+def test_stated_count_margin_widens_only_a_stated_count():
+    selector = CardinalityPaperSelector(default_count=2, stated_count_margin=1)
+    candidates = ["a", "b", "c", "d", "e"]
+
+    stated = selector.select(
+        "For the two ICCV 2025 papers, compare their speed.", candidates
+    )
+    assert stated.paper_ids == ("a", "b", "c")
+
+    unstated = selector.select("What batch size does TCM use?", candidates)
+    assert unstated.paper_ids == ("a", "b")
+
+
+def test_require_evidence_drops_unsupported_candidates():
+    selector = CardinalityPaperSelector(
+        default_count=2, require_evidence=True, max_papers=10
+    )
+
+    selection = selector.select(
+        "What batch size does TCM use?",
+        ["a", "b", "c"],
+        evidence_paper_ids={"b", "c"},
+    )
+
+    assert selection.paper_ids == ("b", "c")
+    assert selection.dropped_without_evidence == ("a",)
+    assert selection.reason.endswith("+evidence")
+
+
+def test_require_evidence_is_inert_without_evidence_information():
+    selector = CardinalityPaperSelector(default_count=2, require_evidence=True)
+
+    selection = selector.select("What batch size does TCM use?", ["a", "b", "c"])
+
+    assert selection.paper_ids == ("a", "b")
+    assert selection.dropped_without_evidence == ()
+
+
+def test_evidence_filter_never_empties_the_submission():
+    # An empty submission scores zero on both precision and recall, so the
+    # raw ranking is kept when nothing could be verified.
+    selector = CardinalityPaperSelector(require_evidence=True)
+
+    selection = selector.select(
+        "What batch size does TCM use?", ["a", "b"], evidence_paper_ids=set()
+    )
+
+    assert selection.paper_ids == ("a",)
+
+
+@pytest.mark.parametrize("margin", [-1, True, 1.5])
+def test_rejects_invalid_stated_count_margin(margin):
+    with pytest.raises((TypeError, ValueError)):
+        CardinalityPaperSelector(stated_count_margin=margin)
+
+
+def test_rejects_non_boolean_require_evidence():
+    with pytest.raises(TypeError, match="require_evidence"):
+        CardinalityPaperSelector(require_evidence="yes")
+
+
+# --- the shipped select_style configurations -------------------------------
+
+
+SELECT_STYLES = sorted(Path("configs/select_style").glob("*.yaml"))
+
+
+def test_every_shipped_select_style_builds():
+    assert [path.stem for path in SELECT_STYLES] == [
+        "f1_balanced",
+        "high_precision",
+        "high_recall",
+    ]
+    for path in SELECT_STYLES:
+        assert build_paper_selector(yaml.safe_load(path.read_text())) is not None
+
+
+@pytest.mark.parametrize(
+    ("style", "open_set", "default", "stated_two"),
+    [
+        ("high_precision", 1, 1, 2),
+        ("f1_balanced", 3, 1, 2),
+        ("high_recall", 5, 2, 3),
+    ],
+)
+def test_shipped_styles_bracket_the_tradeoff(style, open_set, default, stated_two):
+    selector = build_paper_selector(
+        yaml.safe_load(Path(f"configs/select_style/{style}.yaml").read_text())
+    )
+
+    assert selector.expected_count("Which CVPR 2025 papers cite UniAD?")[0] == open_set
+    assert selector.expected_count("What batch size does TCM use?")[0] == default
+    assert (
+        selector.expected_count("For the two ICCV 2025 papers, compare speed.")[0]
+        == stated_two
+    )
+
+
+def test_build_paper_selector_passes_through_none():
+    assert build_paper_selector(None) is None
+
+
+@pytest.mark.parametrize("spec", [{"name": "nope"}, {}, {"name": None}])
+def test_build_paper_selector_rejects_unknown_names(spec):
+    with pytest.raises(ValueError, match="unknown paper selector"):
+        build_paper_selector(spec)
+
+
+def test_build_paper_selector_rejects_a_non_mapping():
+    with pytest.raises(TypeError, match="mapping"):
+        build_paper_selector("cardinality")

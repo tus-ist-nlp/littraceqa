@@ -1,0 +1,17 @@
+# Run C: hedge on every question that involves more than one paper.
+#
+# Two papers when the question states nothing, one more than stated when it
+# does, and five for open-set enumerations. This is the only configuration that
+# can reach a gold set larger than the question's own wording implies, which is
+# what the official validation gold looks like: twelve questions there share a
+# single four-paper cluster even though each names one paper.
+#
+# It pays for that with precision on one-paper questions, which is why it is
+# submitted alongside the other two rather than instead of them.
+name: cardinality
+params:
+  default_count: 2
+  open_set_count: 5
+  stated_count_margin: 1
+  max_papers: 10
+  require_evidence: false

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Run preprocessing, indexing, retrieval, and evaluation end to end.
 
-The four independent YAML files under ``configs`` select paths,
-preprocessing, retrieval, and agent behavior.
+The independent YAML files under ``configs`` select paths, preprocessing,
+retrieval, and agent behavior. A fifth, ``--select``, decides how many of the
+ranked papers are submitted; it is optional and defaults to the agent's own
+cutoff.
 
 Usage:
     # Build at most three papers without constructing or calling an LLM agent.
@@ -22,6 +24,7 @@ Usage:
       --process configs/process_style/mineru.yaml \\
       --search configs/search_style/abstract_specter2_body_qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
+      --select configs/select_style/f1_balanced.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl
 """
@@ -82,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--process", required=True, help="configs/process_style/*.yaml")
     parser.add_argument("--search", required=True, help="configs/search_style/*.yaml")
     parser.add_argument("--agent", required=True, help="configs/agent_style/*.yaml")
+    parser.add_argument(
+        "--select",
+        default=None,
+        help=(
+            "configs/select_style/*.yaml. 提出する論文集合の決め方。"
+            "省略すると agent_style の paper_cutoff をそのまま使う。"
+        ),
+    )
     parser.add_argument("--queries", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
@@ -296,6 +307,7 @@ def resolve_config(
         process=process_cfg,
         search=search_cfg,
         agent=load_config(args.agent),
+        select=load_config(args.select) if args.select else None,
     )
     if args.build:
         index_paths = [

@@ -6,10 +6,15 @@ papers reached the reading agent. It does not measure the submitted score: the
 official metric compares the submitted set with the gold set and macro-averages
 F1, so the number of papers submitted dominates it.
 
-This script takes a retrieval output, applies a selection strategy to each
-ranked candidate list, and reports paper precision/recall/F1 macro. Because it
-reuses a finished retrieval run, a strategy can be evaluated in a second with
-no GPU and no LLM.
+This script takes a retrieval output, applies each ``configs/select_style``
+configuration to the ranked candidates, and reports paper precision/recall/F1
+macro. Because it reuses a finished retrieval run, a configuration can be
+scored in a second with no GPU and no LLM.
+
+The evidence check cannot run here -- it needs the reading agent -- so a
+configuration with ``require_evidence`` is scored on its cardinality rule
+alone. Its real precision will be at least this high and its real recall at
+most this high.
 
 Example:
     uv run python scripts/eval_paper_selection.py \\
@@ -21,20 +26,22 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
-from littraceqa.di_pipeline.evaluation.paper_selection import (
+import yaml
+
+from littraceqa.di_pipeline.evaluation.submission_scoring import (
     load_gold_paper_sets,
     score_selection,
 )
+from littraceqa.di_pipeline.select import build_paper_selector
 from littraceqa.di_pipeline.select.cardinality import (
     expected_paper_count,
     is_open_ended_enumeration,
 )
-from littraceqa.di_pipeline.select.selector import CardinalityPaperSelector
 
-Strategy = Callable[[str, Sequence[str]], Sequence[str]]
+SELECT_STYLE_DIR = Path("configs/select_style")
 
 
 def load_rankings(path: Path) -> dict[str, list[str]]:
@@ -63,22 +70,18 @@ def load_questions(path: Path) -> dict[str, str]:
     return questions
 
 
-def build_strategies(questions: dict[str, str]) -> dict[str, Strategy]:
-    """The fixed cutoffs to compare against, plus the selector itself."""
-
-    strategies: dict[str, Strategy] = {
-        f"fixed top{k}": (lambda q, r, k=k: r[:k]) for k in (1, 2, 3, 4, 5, 10, 20)
-    }
-    selector = CardinalityPaperSelector()
-    strategies["cardinality selector"] = (
-        lambda q, r: selector.select(questions.get(q, ""), r).paper_ids
+def report(
+    name: str,
+    gold: dict[str, set[str]],
+    selected: dict[str, Sequence[str]],
+) -> None:
+    metrics = score_selection(gold, selected)
+    per_query = sum(len(value) for value in selected.values()) / len(selected)
+    print(
+        f"{name:34s} {metrics.paper_precision_macro:8.4f} "
+        f"{metrics.paper_recall_macro:8.4f} {metrics.paper_f1_macro:8.4f} "
+        f"{per_query:9.2f}"
     )
-    for count in (4, 8, 10):
-        open_selector = CardinalityPaperSelector(open_set_count=count)
-        strategies[f"cardinality selector, open-set {count}"] = (
-            lambda q, r, s=open_selector: s.select(questions.get(q, ""), r).paper_ids
-        )
-    return strategies
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Where to read question text from. Defaults to the gold file.",
     )
+    parser.add_argument(
+        "--select-style-dir",
+        type=Path,
+        default=SELECT_STYLE_DIR,
+        help="Directory of select_style YAML files to score.",
+    )
     return parser
 
 
@@ -117,31 +126,30 @@ def main() -> None:
             f"first: {missing[0]}"
         )
 
-    print(f"{'strategy':40s} {'P':>8} {'R':>8} {'F1':>8} {'papers/q':>9}")
-    rows: list[tuple[str, float]] = []
-    for name, strategy in build_strategies(questions).items():
-        selected = {
-            query_id: list(strategy(query_id, rankings[query_id])) for query_id in gold
-        }
-        metrics = score_selection(gold, selected)
-        per_query = sum(len(v) for v in selected.values()) / len(selected)
-        print(
-            f"{name:40s} {metrics.paper_precision_macro:8.4f} "
-            f"{metrics.paper_recall_macro:8.4f} {metrics.paper_f1_macro:8.4f} "
-            f"{per_query:9.2f}"
-        )
-        rows.append((name, metrics.paper_f1_macro))
+    print(f"{'strategy':34s} {'P':>8} {'R':>8} {'F1':>8} {'papers/q':>9}")
+    for k in (1, 2, 4, 10, 20):
+        report(f"fixed top{k}", gold, {q: rankings[q][:k] for q in gold})
 
-    ceiling = score_selection(
-        gold, {q: set(rankings[q][:50]) & gold[q] for q in gold}
+    print()
+    for config_path in sorted(args.select_style_dir.glob("*.yaml")):
+        selector = build_paper_selector(
+            yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        )
+        report(
+            config_path.stem,
+            gold,
+            {
+                q: selector.select(questions.get(q, ""), rankings[q]).paper_ids
+                for q in gold
+            },
+        )
+
+    print()
+    report(
+        "ceiling: perfect pick from top 50",
+        gold,
+        {q: set(rankings[q][:50]) & gold[q] for q in gold},
     )
-    print(
-        f"{'ceiling: perfect pick from top 50':40s} "
-        f"{ceiling.paper_precision_macro:8.4f} {ceiling.paper_recall_macro:8.4f} "
-        f"{ceiling.paper_f1_macro:8.4f}"
-    )
-    best = max(rows, key=lambda row: row[1])
-    print(f"\nbest strategy: {best[0]} (F1 {best[1]:.4f})")
 
     stated = sum(
         1 for q in gold if expected_paper_count(questions.get(q, ""), default=0) >= 2

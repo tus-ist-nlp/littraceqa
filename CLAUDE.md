@@ -19,15 +19,16 @@
 新しい Indexer / Preprocessor / Agent を実装したときは、
 必ず以下も合わせて作成・更新すること。
 
-### 1. configs/ は4フォルダに分離されている
-前処理・検索手法・エージェント・共有パスはそれぞれ独立したyamlファイルで、
-実行時に4つから1ファイルずつ選んで組み合わせる（`src/littraceqa/di_pipeline/config.py` の
+### 1. configs/ は5フォルダに分離されている
+前処理・検索手法・エージェント・提出方法・共有パスはそれぞれ独立したyamlファイルで、
+実行時に1ファイルずつ選んで組み合わせる（`src/littraceqa/di_pipeline/config.py` の
 `compose_config()` が合成する）。1ファイルに全部詰め込まない。
 
 - `configs/paths/{名前}.yaml`: 実行環境ごとの共有パス（pdf_dir, index_dirのルート等）
 - `configs/process_style/{preprocessor名}.yaml`: 前処理（`{name, params}`）
 - `configs/search_style/{組み合わせ名}.yaml`: 検索手法（indexer群 + fuser + reranker）
 - `configs/agent_style/{agent名}.yaml`: エージェント（`{name, llm?, params}`）
+- `configs/select_style/{構成名}.yaml`: 提出する論文集合の決め方（`{name, params}`、省略可）
 
 `process_style`/`search_style` のファイルには `pdf_dir`/`index_dir` を
 **書かない**。`compose_config()` が `paths` から
@@ -64,6 +65,7 @@ uv run python scripts/run_search.py \
   --process configs/process_style/mineru.yaml \
   --search configs/search_style/seed_expansion_structured_filter.yaml \
   --agent configs/agent_style/reading.yaml \
+  --select configs/select_style/f1_balanced.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions.jsonl \
   --build
@@ -132,8 +134,12 @@ configs/
 │   ├── bm25_paper_rank_seed_expansion_qwen3_reranker.yaml : 上の構成から候補補充を外した比較基準
 │   └── seed_expansion_structured_filter.yaml : dual BM25 + seed expansion + 候補補充4レーン
 │         + Qwen3-Reranker-4B（デフォルト、構築済み）
-└── agent_style/
-    └── reading.yaml      : 分解→読解→不足分の再検索を繰り返す唯一の本命。evidence も埋める（デフォルト）
+├── agent_style/
+│   └── reading.yaml      : 分解→読解→不足分の再検索を繰り返す唯一の本命。evidence も埋める（デフォルト）
+└── select_style/
+    ├── high_precision.yaml : 質問が明示した本数だけ出す。evidence 必須（Run B）
+    ├── f1_balanced.yaml    : 上に open-set列挙3本を足したもの（Run A、推奨）
+    └── high_recall.yaml    : 複数論文問題で多めに出す（Run C）
 ```
 
 `iterative.yaml` / `reading_llmcount.yaml` / `simple.yaml` / `verifying.yaml` は削除済み
@@ -164,7 +170,21 @@ gold 1本の問題に20本出すと F1 は 0.095 で頭打ちになる。
 `src/littraceqa/di_pipeline/select/` が提出集合を決める。
 `CardinalityPaperSelector` は**質問文が明示している本数**で順位を切る
 （"For the two ICCV 2025 papers" → 2本、"the X paper and the Y paper" → 2本、
-明示が無ければ1本）。`configs/agent_style` の `paper_cutoff: cardinality` で有効になる。
+明示が無ければ1本）。`--select configs/select_style/{構成}.yaml` で選ぶ。
+
+**閾値は validation で当てていない。3構成でトレードオフを挟み、本番で決める。**
+validation の multi 29問の gold はクラスタ注釈なので、そこに合わせて閾値を
+最適化すると「質問が言及していない論文も出す」設定が選ばれてしまう。
+
+| 構成 | 明示なし | 明示あり | open-set列挙 | evidence必須 |
+|---|---|---|---|---|
+| `high_precision` (Run B) | 1本 | そのまま | 1本 | あり |
+| `f1_balanced` (Run A、既定) | 1本 | そのまま | 3本 | なし |
+| `high_recall` (Run C) | 2本 | +1本 | 5本 | なし |
+
+`require_evidence` は reading agent が根拠を取れた論文だけに絞る。根拠が1本も
+取れなかったときは検索順位のまま出す（空提出は precision も recall も0になり、
+必ず損をするため）。
 
 **`answer_types` で本数を判定してはいけない。** validation 55問では
 `freeform` を含む＝single、`multiple_choice` 単独＝multi がほぼ完全に成立するが、
@@ -178,8 +198,15 @@ validation 55問（公式 gold 146本）での実測:
 | 固定 top20 | 0.0991 | 0.8318 | 0.1686 |
 | 固定 top10 | 0.1836 | 0.7939 | 0.2750 |
 | 固定 top1 | 0.9273 | 0.5444 | 0.6200 |
-| **CardinalityPaperSelector** | 0.8758 | 0.6081 | **0.6437** |
+| `high_recall` | 0.5188 | 0.6732 | 0.5302 |
+| `f1_balanced` | 0.8455 | 0.6101 | 0.6410 |
+| **`high_precision`** | 0.8758 | 0.6081 | **0.6437** |
 | 上限（top50から完璧に選ぶ） | 1.0000 | 0.9091 | 0.9406 |
+
+**この順位を鵜呑みにしない。** validation がクラスタ注釈である以上、precision 寄りが
+有利に出るのは当然で、test で同じとは限らない。`eval_paper_selection.py` は
+evidence 判定を動かせない（reading agent が要る）ので、`require_evidence` 付きの
+構成については recall の上限・precision の下限を出しているだけである。
 
 `uv run python scripts/eval_paper_selection.py --retrieval {検索出力}.json
 --gold data/validation.jsonl` で GPU も LLM も使わず即座に測り直せる。

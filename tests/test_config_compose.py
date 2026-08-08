@@ -287,3 +287,44 @@ def test_rerank_pool_override_routes_to_retriever_wrapper():
     assert updated["pool_k"] == 50
     assert updated["retriever_wrapper"]["params"]["rerank_pool_k"] == 50
     assert search["retriever_wrapper"]["params"]["rerank_pool_k"] == 20
+
+
+def test_select_style_is_folded_into_the_agent_params():
+    cfg = compose_config(
+        paths=_paths(),
+        process=load_config("configs/process_style/mineru.yaml"),
+        search=load_config("configs/search_style/seed_expansion_structured_filter.yaml"),
+        agent=_agent(),
+        select={"name": "cardinality", "params": {"open_set_count": 3}},
+    )
+
+    assert cfg["agent"]["params"]["paper_selector"] == {
+        "name": "cardinality",
+        "params": {"open_set_count": 3},
+    }
+
+
+def test_omitting_select_style_leaves_the_agent_untouched():
+    agent = _agent()
+    cfg = compose_config(
+        paths=_paths(),
+        process=load_config("configs/process_style/mineru.yaml"),
+        search=load_config("configs/search_style/seed_expansion_structured_filter.yaml"),
+        agent=agent,
+    )
+
+    assert "paper_selector" not in cfg["agent"].get("params", {})
+
+
+@pytest.mark.parametrize("select", [{"params": {}}, {"name": ""}, "cardinality"])
+def test_select_style_must_name_a_selector(select):
+    with pytest.raises(ValueError, match="select_style"):
+        compose_config(
+            paths=_paths(),
+            process=load_config("configs/process_style/mineru.yaml"),
+            search=load_config(
+                "configs/search_style/seed_expansion_structured_filter.yaml"
+            ),
+            agent=_agent(),
+            select=select,
+        )

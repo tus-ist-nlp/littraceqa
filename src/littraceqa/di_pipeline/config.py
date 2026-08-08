@@ -200,13 +200,24 @@ def override_rerank_pool(search: dict, pool_k: int | None) -> dict:
     return updated
 
 
-def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dict:
-    """paths/process_style/search_style/agent_style の4dictから、
+def compose_config(
+    paths: dict,
+    process: dict,
+    search: dict,
+    agent: dict,
+    select: dict | None = None,
+) -> dict:
+    """paths/process_style/search_style/agent_style/select_style から、
 
     build_pipeline() がそのまま扱える {paths, preprocessor, retriever, agent}
     形のcfgを組み立てる。pdf_dir / index_dir / chunks は process の名前を
     キーにして paths から自動導出し、同じ search_style を別の process_style
     と組み合わせても索引パスが衝突しないようにする（明示指定があれば優先する）。
+
+    select_style は提出する論文集合の決め方で、省略できる。省略すると agent が
+    自前の打ち切り（paper_cutoff）をそのまま使う。指定すると agent の params へ
+    paper_selector として畳み込まれるので、agent_style を3種類に複製せずに
+    提出方法だけを差し替えられる。
     """
     process_name = process["name"]
 
@@ -278,11 +289,22 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
             "params": wrapper_params,
         }
 
+    composed_agent = dict(agent)
+    if select is not None:
+        if not isinstance(select, dict) or not select.get("name"):
+            raise ValueError("select_style must be a mapping with a name")
+        agent_params = dict(composed_agent.get("params", {}))
+        agent_params["paper_selector"] = {
+            "name": select["name"],
+            "params": dict(select.get("params", {})),
+        }
+        composed_agent["params"] = agent_params
+
     return {
         "paths": resolved_paths,
         "preprocessor": {"name": process_name, "params": preprocessor_params},
         "retriever": retriever,
-        "agent": agent,
+        "agent": composed_agent,
     }
 
 

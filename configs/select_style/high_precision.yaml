@@ -1,0 +1,17 @@
+# Run B: submit only what the question states.
+#
+# A question that names two papers gets two; one that names none gets the
+# top-ranked paper alone. Nothing is added on a guess, and the reading agent's
+# evidence check can only remove papers, never add them.
+#
+# Strongest on the one-paper questions that make up roughly half of the
+# benchmark, where the top-ranked candidate is correct 92.7% of the time on
+# validation. Weakest on open-set enumerations, which it deliberately answers
+# with a single paper rather than guessing a size.
+name: cardinality
+params:
+  default_count: 1
+  open_set_count: 1
+  stated_count_margin: 0
+  max_papers: 10
+  require_evidence: true
