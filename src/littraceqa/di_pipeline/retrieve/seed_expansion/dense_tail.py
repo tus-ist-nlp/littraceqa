@@ -1,8 +1,9 @@
 """Dense tail fusion.
 
 Rebuilds the positions after the stable selected prefix by fusing the baseline
-tail rank with paper-embedding neighbours of the prefix. Admits every reranked
-baseline paper but only a bounded number of genuinely new ones.
+tail rank with the paper-embedding neighbours of the prefix papers that own a
+method the question names. Admits every reranked baseline paper but only a
+bounded number of genuinely new ones.
 """
 
 from __future__ import annotations
@@ -22,11 +23,6 @@ from littraceqa.di_pipeline.retrieve.seed_expansion.paper_index import (
 
 MAX_DENSE_TAIL_NEW_PAPERS = 10
 
-_TAIL_LANE_PREFIXES = (
-    ("method", "method_dense_tail"),
-    ("paper", "paper_dense_tail"),
-)
-
 
 @dataclass(frozen=True)
 class DenseTailFusion:
@@ -38,9 +34,6 @@ class DenseTailFusion:
     method_seed_k: int
     method_max_results: int
     method_max_new_papers: int
-    paper_weight: float
-    paper_seed_k: int
-    paper_max_results: int
 
     def fuse(
         self,
@@ -59,8 +52,7 @@ class DenseTailFusion:
             and hints is not None
             and bool(hints.methods)
         )
-        use_prefix_seeds = self.paper_weight > 0
-        if not has_embedding_index or not (use_method_seeds or use_prefix_seeds):
+        if not has_embedding_index or not use_method_seeds:
             return candidates
 
         paper_index = find_paper_index(indexers, "get_document")
@@ -71,15 +63,13 @@ class DenseTailFusion:
         if not prefix_ids:
             return candidates
 
-        seed_specs = self._collect_seed_specs(
+        seed_ids = self._collect_seed_ids(
             paper_index,
             selected_prefix,
             prefix_ids,
             hints=hints,
-            use_method_seeds=use_method_seeds,
-            use_prefix_seeds=use_prefix_seeds,
         )
-        if not seed_specs:
+        if not seed_ids:
             return candidates
 
         embedding_store = get_embedding_store()
@@ -105,7 +95,7 @@ class DenseTailFusion:
         dense_by_id = self._collect_neighbors(
             paper_index,
             embedding_store,
-            seed_specs,
+            seed_ids,
             prefix_ids,
             valid_documents,
         )
@@ -140,100 +130,74 @@ class DenseTailFusion:
             valid_documents,
         )
 
-    def _collect_seed_specs(
+    def _collect_seed_ids(
         self,
         paper_index,
         selected_prefix: list[RetrievalResult],
         prefix_ids: set[str],
         *,
         hints: SearchHints | None,
-        use_method_seeds: bool,
-        use_prefix_seeds: bool,
-    ) -> dict[str, dict[str, tuple[float, int]]]:
-        """Pick the prefix papers to expand from, per lane."""
+    ) -> tuple[str, ...]:
+        """Pick the prefix papers that own a method named in the question."""
 
-        seed_specs: dict[str, dict[str, tuple[float, int]]] = {}
-        if use_method_seeds and callable(
-            getattr(paper_index, "find_method_owners", None)
-        ):
+        if not callable(getattr(paper_index, "find_method_owners", None)):
+            return ()
+        try:
+            owner_records = tuple(
+                find_method_owner_records(
+                    paper_index,
+                    hints.methods,
+                    selected_prefix,
+                    limit=max(self.method_seed_k, len(selected_prefix)),
+                )
+            )
+        except Exception:
+            return ()
+
+        seed_ids: list[str] = []
+        for record in owner_records:
+            if not isinstance(record, dict):
+                continue
+            paper_id = record.get("paper_id")
+            if (
+                not isinstance(paper_id, str)
+                or paper_id not in prefix_ids
+                or paper_id in seed_ids
+            ):
+                continue
             try:
-                owner_records = tuple(
-                    find_method_owner_records(
-                        paper_index,
-                        hints.methods,
-                        selected_prefix,
-                        limit=max(self.method_seed_k, len(selected_prefix)),
-                    )
-                )
+                owner_document = paper_index.get_document(paper_id)
             except Exception:
-                owner_records = ()
-
-            method_seed_count = 0
-            for record in owner_records:
-                if not isinstance(record, dict):
-                    continue
-                paper_id = record.get("paper_id")
-                if (
-                    not isinstance(paper_id, str)
-                    or paper_id not in prefix_ids
-                    or paper_id in seed_specs
-                ):
-                    continue
-                try:
-                    owner_document = paper_index.get_document(paper_id)
-                except Exception:
-                    continue
-                if (
-                    not isinstance(owner_document, Chunk)
-                    or owner_document.paper_id != paper_id
-                ):
-                    continue
-                seed_specs[paper_id] = {
-                    "method": (self.method_weight, self.method_max_results)
-                }
-                method_seed_count += 1
-                if method_seed_count >= self.method_seed_k:
-                    break
-
-        if use_prefix_seeds:
-            for result in selected_prefix[: self.paper_seed_k]:
-                paper_id = result.paper_id
-                if not isinstance(paper_id, str) or not paper_id:
-                    continue
-                try:
-                    document = paper_index.get_document(paper_id)
-                except Exception:
-                    continue
-                if (
-                    not isinstance(document, Chunk)
-                    or document.paper_id != paper_id
-                ):
-                    continue
-                seed_specs.setdefault(paper_id, {})["paper"] = (
-                    self.paper_weight,
-                    self.paper_max_results,
-                )
-
-        return seed_specs
+                continue
+            if (
+                not isinstance(owner_document, Chunk)
+                or owner_document.paper_id != paper_id
+            ):
+                continue
+            seed_ids.append(paper_id)
+            if len(seed_ids) >= self.method_seed_k:
+                break
+        return tuple(seed_ids)
 
     def _collect_neighbors(
         self,
         paper_index,
         embedding_store,
-        seed_specs: dict[str, dict[str, tuple[float, int]]],
+        seed_ids: tuple[str, ...],
         prefix_ids: set[str],
         valid_documents: dict[str, Chunk],
     ) -> dict[str, dict]:
-        """Accumulate per-paper RRF evidence across every seed and lane."""
+        """Accumulate per-paper RRF evidence across every seed."""
 
         dense_by_id: dict[str, dict] = {}
-        seed_ids = tuple(seed_specs)
 
-        for seed_rank, (seed_id, lanes) in enumerate(seed_specs.items(), start=1):
-            search_limit = max(limit for _, limit in lanes.values())
+        for seed_rank, seed_id in enumerate(seed_ids, start=1):
             try:
                 dense_results = tuple(
-                    embedding_store.search_by_paper_id(seed_id, search_limit)
+                    embedding_store.search_by_paper_id(
+                        seed_id,
+                        self.method_max_results,
+                    )
                 )
             except Exception:
                 continue
@@ -249,12 +213,7 @@ class DenseTailFusion:
                     or paper_id in seen_for_seed
                 ):
                     continue
-                eligible_lanes = {
-                    lane: weight
-                    for lane, (weight, limit) in lanes.items()
-                    if result_rank <= limit
-                }
-                if not eligible_lanes:
+                if result_rank > self.method_max_results:
                     continue
                 similarity = finite_similarity(result)
                 if similarity is None:
@@ -283,9 +242,6 @@ class DenseTailFusion:
                         "best_similarity": similarity,
                         "rrf_score": 0.0,
                         "via_papers": set(),
-                        "via_by_lane": {"method": set(), "paper": set()},
-                        "best_result_rank_by_lane": {},
-                        "best_similarity_by_lane": {},
                     },
                 )
                 state["best_result_rank"] = min(
@@ -297,30 +253,10 @@ class DenseTailFusion:
                     state["best_similarity"],
                     similarity,
                 )
-                state["rrf_score"] += max(eligible_lanes.values()) / (
+                state["rrf_score"] += self.method_weight / (
                     self.rrf_k + result_rank
                 )
                 state["via_papers"].add(seed_id)
-                for lane in eligible_lanes:
-                    state["via_by_lane"][lane].add(seed_id)
-                    previous_rank = state["best_result_rank_by_lane"].get(lane)
-                    if previous_rank is None:
-                        state["best_result_rank_by_lane"][lane] = result_rank
-                    else:
-                        state["best_result_rank_by_lane"][lane] = min(
-                            previous_rank,
-                            result_rank,
-                        )
-                    previous_similarity = state["best_similarity_by_lane"].get(
-                        lane
-                    )
-                    if previous_similarity is None:
-                        state["best_similarity_by_lane"][lane] = similarity
-                    else:
-                        state["best_similarity_by_lane"][lane] = max(
-                            previous_similarity,
-                            similarity,
-                        )
         return dense_by_id
 
     def _select_allowed(
@@ -393,37 +329,27 @@ class DenseTailFusion:
                 fused_score += state["rrf_score"]
                 dense_rank = dense_rank_by_id[paper_id]
                 metadata = dict(representative.metadata)
-                for lane, prefix in _TAIL_LANE_PREFIXES:
-                    via_papers = state["via_by_lane"][lane]
-                    if not via_papers:
-                        continue
-                    metadata.update(
-                        {
-                            f"{prefix}_baseline_rank": baseline_rank,
-                            f"{prefix}_rank": dense_rank,
-                            f"{prefix}_best_neighbor_rank": state[
-                                "best_result_rank_by_lane"
-                            ][lane],
-                            f"{prefix}_best_similarity": state[
-                                "best_similarity_by_lane"
-                            ][lane],
-                            f"{prefix}_via_papers": sorted(via_papers),
-                            f"{prefix}_rrf_score": fused_score,
-                            f"{prefix}_is_new": baseline_rank is None,
-                        }
-                    )
-                has_method_lane = bool(state["via_by_lane"]["method"])
-                has_paper_lane = bool(state["via_by_lane"]["paper"])
-                if has_method_lane and has_paper_lane:
-                    result_source = "paper_method_dense_tail_rrf"
-                elif has_paper_lane:
-                    result_source = "paper_dense_tail_rrf"
-                else:
-                    result_source = "method_dense_tail_rrf"
+                metadata.update(
+                    {
+                        "method_dense_tail_baseline_rank": baseline_rank,
+                        "method_dense_tail_rank": dense_rank,
+                        "method_dense_tail_best_neighbor_rank": state[
+                            "best_result_rank"
+                        ],
+                        "method_dense_tail_best_similarity": state[
+                            "best_similarity"
+                        ],
+                        "method_dense_tail_via_papers": sorted(
+                            state["via_papers"]
+                        ),
+                        "method_dense_tail_rrf_score": fused_score,
+                        "method_dense_tail_is_new": baseline_rank is None,
+                    }
+                )
                 result = replace(
                     representative,
                     metadata=metadata,
-                    source=result_source,
+                    source="method_dense_tail_rrf",
                 )
             scored_tail.append(
                 (

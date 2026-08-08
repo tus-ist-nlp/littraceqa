@@ -1,17 +1,21 @@
-# Reproduce the two-lane retrieval evaluation
+# Reproduce the retrieval evaluation
 
-This guide runs the retrieval-only experiment with prebuilt MinerU indexes and
-`Qwen/Qwen3-Reranker-0.6B`. It does not run MinerU, read the original PDFs, call
+This guide runs the retrieval-only experiment with prebuilt MinerU indexes and a
+pinned Qwen3 reranker. It does not run MinerU, read the original PDFs, call
 Azure, or run an answer-generation agent.
 
 The search configuration is pinned in
-`configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml`. It performs:
+`configs/search_style/seed_expansion_structured_filter.yaml`. It performs:
 
-1. Chunk BM25 and Paper BM25 retrieval.
-2. A base lane and a bounded candidate-expansion lane.
-3. Qwen3 0.6B reranking within each 50-paper lane.
-4. Weighted RRF with lane weights `1.0` and `1.15`.
-5. A final Qwen3 rerank over at most 100 unique papers.
+1. Chunk BM25 and Paper BM25 retrieval, fused into a 50-paper candidate set.
+2. Seed expansion from the leading paper, plus the method-conditioned dense tail.
+3. Candidate supplementation: the structured filter and exact method search.
+4. A final Qwen3 rerank over all 50 candidates, with the original top 20
+   protected from displacement.
+
+The reranker it pins is `Qwen/Qwen3-Reranker-4B`. The cache steps below name the
+0.6B model because that is the smaller download used to verify the environment;
+substitute the 4B directory name to fetch the model the config actually loads.
 
 ## Requirements
 
@@ -55,7 +59,7 @@ git pull --ff-only origin KumagaiKotaro/di_rag_improvement
 git lfs pull
 ```
 
-Commit `3b92388` or a later commit contains the portable 0.6B environment.
+Commit `3b92388` or a later commit contains the portable environment.
 Uncommitted or unpushed changes from another checkout are never visible here.
 
 ### 2. Create a private Python environment
@@ -168,14 +172,14 @@ mkdir -p "$HOME/littraceqa_data/mineru_eval/runs"
 uv run --locked --no-sync python scripts/eval_retrieval.py \
   --paths configs/paths/server_shared_retrieval.yaml \
   --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml \
+  --search configs/search_style/seed_expansion_structured_filter.yaml \
   --queries data/validation_answer_bearing_gold_draft.jsonl \
   --query-id q_020 \
   --query-id q_023 \
   --ks 1,3,5,8,10,20,50,100 \
   --read-only-root /data2 \
   --allow-shared-index-load \
-  --output "$HOME/littraceqa_data/mineru_eval/runs/two_lane_0p6b_smoke.json"
+  --output "$HOME/littraceqa_data/mineru_eval/runs/structured_filter_smoke.json"
 ```
 
 `--allow-shared-index-load` acknowledges the memory cost of loading the shared
@@ -289,12 +293,12 @@ export OPENBLAS_NUM_THREADS=2
 uv run --locked --no-sync python scripts/eval_retrieval.py \
   --paths configs/paths/local_retrieval.yaml \
   --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml \
+  --search configs/search_style/seed_expansion_structured_filter.yaml \
   --queries data/validation_answer_bearing_gold_draft.jsonl \
   --query-id q_020 \
   --query-id q_023 \
   --ks 1,3,5,8,10,20,50,100 \
-  --output runs/two_lane_0p6b_smoke.json
+  --output runs/structured_filter_smoke.json
 ```
 
 The recorded reference smoke test completed two queries with no failures and
@@ -309,10 +313,10 @@ Remove the two `--query-id` options and use a new output path:
 uv run --locked --no-sync python scripts/eval_retrieval.py \
   --paths configs/paths/local_retrieval.yaml \
   --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml \
+  --search configs/search_style/seed_expansion_structured_filter.yaml \
   --queries data/validation_answer_bearing_gold_draft.jsonl \
   --ks 1,3,5,8,10,20,50,100 \
-  --output runs/two_lane_0p6b_validation.json
+  --output runs/structured_filter_validation.json
 ```
 
 The evaluator writes a checkpoint after each question. If interrupted, run the
@@ -336,7 +340,7 @@ is not supported; use WSL2.
 
 ## What is and is not reproduced
 
-This setup reproduces the selected two-lane 0.6B retrieval configuration and
-its software versions. The two-query run has been measured, but a full 55-query
-score for this exact two-lane configuration has not yet been established. Do
-not report the older one-lane 55-query metrics as results from this config.
+This setup reproduces the default retrieval configuration and
+its software versions. The 55-query validation score for this configuration is
+R@1 0.7808 / R@10 0.9848 / R@20 1.0000 against the answer-bearing gold; the
+two-query smoke run below only checks that the environment works.

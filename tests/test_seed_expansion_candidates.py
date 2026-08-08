@@ -36,29 +36,6 @@ def test_fuses_unique_papers_with_equal_weight_rrf():
     assert results[0].metadata["seed_expansion_expanded_rank"] == 1
 
 
-def test_fuses_opt_in_local_expansion_with_configured_rrf_weight():
-    seed = _result("p1", title="A paper", text="Local evidence")
-    seed.metadata["paper_rank_expansion_text"] = "Paper overview"
-    initial = [seed, _result("p2")]
-    expanded = [_result("p2"), _result("p3")]
-    local = [_result("p3"), _result("p1")]
-    retriever = SeedExpansionRetriever(
-        _FakeRetriever([initial, expanded, local]),
-        rrf_k=0,
-        local_expansion_weight=0.5,
-    )
-
-    results = retriever.retrieve("question", 10)
-
-    assert [result.paper_id for result in results] == ["p2", "p1", "p3"]
-    assert results[0].score == pytest.approx(1.5)
-    assert results[1].score == pytest.approx(1.25)
-    assert results[2].score == pytest.approx(1.0)
-    assert results[0].metadata["seed_expansion_local_rank"] is None
-    assert results[1].metadata["seed_expansion_local_rank"] == 2
-    assert results[2].metadata["seed_expansion_local_rank"] == 1
-
-
 def test_duplicate_chunks_do_not_consume_paper_ranks():
     initial = [
         _result("p1", chunk_id="p1#c0000"),

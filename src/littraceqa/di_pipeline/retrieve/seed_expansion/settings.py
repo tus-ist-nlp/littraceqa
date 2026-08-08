@@ -19,8 +19,11 @@ from numbers import Real
 from littraceqa.di_pipeline.retrieve.seed_expansion.candidates import (
     MAX_OPEN_SET_SEEDS,
 )
-from littraceqa.di_pipeline.retrieve.seed_expansion.dense_reciprocal import (
-    MAX_DENSE_RECIPROCAL_CANDIDATES,
+from littraceqa.di_pipeline.retrieve.seed_expansion.exact_match import (
+    MAX_EXACT_MATCH_PAPERS,
+)
+from littraceqa.di_pipeline.retrieve.seed_expansion.structured_filter import (
+    MAX_STRUCTURED_FILTER_PAPERS,
 )
 from littraceqa.di_pipeline.retrieve.seed_expansion.dense_tail import (
     MAX_DENSE_TAIL_NEW_PAPERS,
@@ -37,18 +40,25 @@ class CandidateSettings:
     candidate_k: int
     seed_text_chars: int
     rrf_k: int
-    local_expansion_weight: float
     literal_attribute_hints: bool
     literal_method_hints: bool
 
 
 @dataclass(frozen=True)
-class TwoLaneSettings:
-    """How the lexical and seed-expanded paper rankings are combined."""
+class SupplementSettings:
+    """The extra candidate source merged in before the reranker sees a pool.
 
-    two_lane_rerank: bool
-    two_lane_base_weight: float
-    two_lane_expansion_weight: float
+    Disabled by default, so a configuration that omits it produces exactly the
+    ranking it produced before the lane existed.
+    """
+
+    exact_method_search: bool
+    exact_match_max_papers: int
+    structured_filter: bool
+    structured_filter_max_papers: int
+    structured_filter_search_depth: int
+    structured_filter_protected_prefix_k: int
+    paper_metadata_path: str | None
 
 
 @dataclass(frozen=True)
@@ -76,51 +86,14 @@ class OpenSetSettings:
 
 
 @dataclass(frozen=True)
-class NeighborhoodSettings:
-    """Reranking by the citation links between retrieved papers."""
-
-    paper_neighborhood_weight: float
-    paper_neighborhood_two_hop_weight: float
-    paper_neighborhood_max_hub_degree: int
-
-
-@dataclass(frozen=True)
-class MethodSettings:
-    """Method ownership, method-to-method edges and the one-slot bridge."""
-
-    method_owner_weight: float
-    method_relation_weight: float
-    method_relation_seed_k: int
-    method_relation_max_results: int
-    method_relation_max_new_papers: int
-    method_relation_protected_top_k: int
-    method_topic_weight: float
-    method_topic_seed_chars: int
-    method_topic_seed_k: int
-    method_topic_max_results: int
-    method_bridge_topic_max_rank: int
-
-
-@dataclass(frozen=True)
 class DenseSettings:
-    """The three paper-embedding lanes: tail fusion, reciprocal, consensus."""
+    """The paper-embedding tail lane seeded from the papers that own a method."""
 
     paper_embedding_index_dir: str | None
     method_dense_tail_weight: float
     method_dense_tail_seed_k: int
     method_dense_tail_max_results: int
     method_dense_tail_max_new_papers: int
-    paper_dense_tail_weight: float
-    paper_dense_tail_seed_k: int
-    paper_dense_tail_max_results: int
-    paper_dense_consensus_seed_k: int
-    paper_dense_consensus_max_results: int
-    paper_dense_consensus_min_support: int
-    paper_dense_reciprocal_seed_k: int
-    paper_dense_reciprocal_forward_k: int
-    paper_dense_reciprocal_reverse_k: int
-    paper_dense_reciprocal_min_support: int
-    paper_dense_reciprocal_max_candidates: int
 
     @property
     def has_embedding_index(self) -> bool:
@@ -132,11 +105,9 @@ class SeedExpansionSettings:
     """Every stage parameter, grouped by the stage that consumes it."""
 
     candidates: CandidateSettings
-    two_lane: TwoLaneSettings
+    supplement: SupplementSettings
     output: OutputSettings
     open_set: OpenSetSettings
-    neighborhood: NeighborhoodSettings
-    method: MethodSettings
     dense: DenseSettings
 
     def with_float_weights(self) -> SeedExpansionSettings:
@@ -148,45 +119,10 @@ class SeedExpansionSettings:
 
         return replace(
             self,
-            candidates=replace(
-                self.candidates,
-                local_expansion_weight=float(
-                    self.candidates.local_expansion_weight
-                ),
-            ),
-            two_lane=replace(
-                self.two_lane,
-                two_lane_base_weight=float(
-                    self.two_lane.two_lane_base_weight
-                ),
-                two_lane_expansion_weight=float(
-                    self.two_lane.two_lane_expansion_weight
-                ),
-            ),
-            neighborhood=replace(
-                self.neighborhood,
-                paper_neighborhood_weight=float(
-                    self.neighborhood.paper_neighborhood_weight
-                ),
-                paper_neighborhood_two_hop_weight=float(
-                    self.neighborhood.paper_neighborhood_two_hop_weight
-                ),
-            ),
-            method=replace(
-                self.method,
-                method_owner_weight=float(self.method.method_owner_weight),
-                method_relation_weight=float(
-                    self.method.method_relation_weight
-                ),
-                method_topic_weight=float(self.method.method_topic_weight),
-            ),
             dense=replace(
                 self.dense,
                 method_dense_tail_weight=float(
                     self.dense.method_dense_tail_weight
-                ),
-                paper_dense_tail_weight=float(
-                    self.dense.paper_dense_tail_weight
                 ),
             ),
         )
@@ -266,10 +202,6 @@ def _validate_output_shape(output: OutputSettings) -> None:
 
 
 def _validate_candidate_signals(candidates: CandidateSettings) -> None:
-    _require_non_negative_number(
-        "local_expansion_weight",
-        candidates.local_expansion_weight,
-    )
     _require_boolean(
         "literal_attribute_hints",
         candidates.literal_attribute_hints,
@@ -277,31 +209,43 @@ def _validate_candidate_signals(candidates: CandidateSettings) -> None:
     _require_boolean("literal_method_hints", candidates.literal_method_hints)
 
 
-def _validate_two_lane(
-    two_lane: TwoLaneSettings,
-    candidates: CandidateSettings,
-    reranker: object | None,
-) -> None:
-    _require_boolean("two_lane_rerank", two_lane.two_lane_rerank)
-    _require_non_negative_number(
-        "two_lane_base_weight",
-        two_lane.two_lane_base_weight,
+def _validate_supplement(supplement: SupplementSettings) -> None:
+    _require_boolean("exact_method_search", supplement.exact_method_search)
+    _require_non_negative_integer(
+        "exact_match_max_papers",
+        supplement.exact_match_max_papers,
     )
-    _require_non_negative_number(
-        "two_lane_expansion_weight",
-        two_lane.two_lane_expansion_weight,
-    )
-    if two_lane.two_lane_rerank and (
-        two_lane.two_lane_base_weight == 0
-        and two_lane.two_lane_expansion_weight == 0
-    ):
-        raise ValueError("at least one two-lane weight must be positive")
-    if two_lane.two_lane_rerank and reranker is None:
-        raise ValueError("two_lane_rerank requires an enabled reranker")
-    if two_lane.two_lane_rerank and candidates.local_expansion_weight > 0:
+    if supplement.exact_match_max_papers > MAX_EXACT_MATCH_PAPERS:
         raise ValueError(
-            "two_lane_rerank does not support local_expansion_weight"
+            f"exact_match_max_papers must not exceed {MAX_EXACT_MATCH_PAPERS}"
         )
+    _require_boolean("structured_filter", supplement.structured_filter)
+    _require_non_negative_integer(
+        "structured_filter_max_papers",
+        supplement.structured_filter_max_papers,
+    )
+    if supplement.structured_filter_max_papers > MAX_STRUCTURED_FILTER_PAPERS:
+        raise ValueError(
+            "structured_filter_max_papers must not exceed "
+            f"{MAX_STRUCTURED_FILTER_PAPERS}"
+        )
+    _require_positive_integer(
+        "structured_filter_search_depth",
+        supplement.structured_filter_search_depth,
+    )
+    _require_non_negative_integer(
+        "structured_filter_protected_prefix_k",
+        supplement.structured_filter_protected_prefix_k,
+    )
+    if supplement.paper_metadata_path is not None:
+        if not isinstance(supplement.paper_metadata_path, str):
+            raise TypeError("paper_metadata_path must be a string or None")
+        if not supplement.paper_metadata_path.strip():
+            raise ValueError("paper_metadata_path must not be empty")
+    if supplement.structured_filter and not supplement.paper_metadata_path:
+        raise ValueError("structured_filter requires paper_metadata_path")
+    if supplement.exact_method_search and not supplement.paper_metadata_path:
+        raise ValueError("exact_method_search requires paper_metadata_path")
 
 
 def _validate_open_set(
@@ -337,160 +281,23 @@ def _validate_open_set(
         raise ValueError("open_set_slot_k must not exceed max_results")
 
 
-def _validate_neighborhood(neighborhood: NeighborhoodSettings) -> None:
+def _validate_dense_tail(dense: DenseSettings) -> None:
     _require_non_negative_number(
-        "paper_neighborhood_weight",
-        neighborhood.paper_neighborhood_weight,
+        "method_dense_tail_weight",
+        dense.method_dense_tail_weight,
     )
-    _require_non_negative_number(
-        "paper_neighborhood_two_hop_weight",
-        neighborhood.paper_neighborhood_two_hop_weight,
-    )
-    _require_positive_integer(
-        "paper_neighborhood_max_hub_degree",
-        neighborhood.paper_neighborhood_max_hub_degree,
-    )
-
-
-def _validate_expansion_weights(
-    method: MethodSettings,
-    dense: DenseSettings,
-) -> None:
     for name, value in (
-        ("method_owner_weight", method.method_owner_weight),
-        ("method_relation_weight", method.method_relation_weight),
-        ("method_topic_weight", method.method_topic_weight),
-        ("method_dense_tail_weight", dense.method_dense_tail_weight),
-        ("paper_dense_tail_weight", dense.paper_dense_tail_weight),
-    ):
-        _require_non_negative_number(name, value)
-
-
-def _validate_expansion_limits(
-    method: MethodSettings,
-    dense: DenseSettings,
-) -> None:
-    for name, value in (
-        ("method_topic_seed_chars", method.method_topic_seed_chars),
-        ("method_topic_seed_k", method.method_topic_seed_k),
-        ("method_topic_max_results", method.method_topic_max_results),
-        ("method_relation_seed_k", method.method_relation_seed_k),
-        ("method_relation_max_results", method.method_relation_max_results),
         ("method_dense_tail_seed_k", dense.method_dense_tail_seed_k),
         (
             "method_dense_tail_max_results",
             dense.method_dense_tail_max_results,
         ),
-        ("paper_dense_tail_seed_k", dense.paper_dense_tail_seed_k),
-        ("paper_dense_tail_max_results", dense.paper_dense_tail_max_results),
-        (
-            "paper_dense_consensus_max_results",
-            dense.paper_dense_consensus_max_results,
-        ),
-        (
-            "paper_dense_consensus_min_support",
-            dense.paper_dense_consensus_min_support,
-        ),
-        (
-            "paper_dense_reciprocal_forward_k",
-            dense.paper_dense_reciprocal_forward_k,
-        ),
-        (
-            "paper_dense_reciprocal_reverse_k",
-            dense.paper_dense_reciprocal_reverse_k,
-        ),
-        (
-            "paper_dense_reciprocal_min_support",
-            dense.paper_dense_reciprocal_min_support,
-        ),
-        (
-            "paper_dense_reciprocal_max_candidates",
-            dense.paper_dense_reciprocal_max_candidates,
-        ),
     ):
         _require_positive_integer(name, value)
-
-
-def _validate_optional_lane_seeds(
-    method: MethodSettings,
-    dense: DenseSettings,
-) -> None:
-    """Seed counts of zero disable a lane, so they are non-negative, not positive."""
-
     _require_non_negative_integer(
-        "paper_dense_consensus_seed_k",
-        dense.paper_dense_consensus_seed_k,
+        "method_dense_tail_max_new_papers",
+        dense.method_dense_tail_max_new_papers,
     )
-    _require_non_negative_integer(
-        "paper_dense_reciprocal_seed_k",
-        dense.paper_dense_reciprocal_seed_k,
-    )
-    _require_non_negative_integer(
-        "method_bridge_topic_max_rank",
-        method.method_bridge_topic_max_rank,
-    )
-    if method.method_bridge_topic_max_rank > method.method_topic_max_results:
-        raise ValueError(
-            "method_bridge_topic_max_rank must not exceed "
-            "method_topic_max_results"
-        )
-
-
-def _validate_lane_support(dense: DenseSettings, output: OutputSettings) -> None:
-    """An enabled lane must be able to reach the support it demands."""
-
-    if (
-        dense.paper_dense_consensus_seed_k > 0
-        and dense.paper_dense_consensus_min_support
-        > dense.paper_dense_consensus_seed_k
-    ):
-        raise ValueError(
-            "paper_dense_consensus_min_support must not exceed "
-            "paper_dense_consensus_seed_k when consensus is enabled"
-        )
-    if (
-        dense.paper_dense_reciprocal_seed_k > 0
-        and dense.paper_dense_reciprocal_min_support
-        > min(
-            dense.paper_dense_reciprocal_seed_k,
-            dense.paper_dense_reciprocal_reverse_k,
-            output.max_results,
-        )
-    ):
-        raise ValueError(
-            "paper_dense_reciprocal_min_support must not exceed "
-            "the seed count, reverse depth, or maximum result count "
-            "when reciprocal expansion is enabled"
-        )
-    if (
-        dense.paper_dense_reciprocal_max_candidates
-        > MAX_DENSE_RECIPROCAL_CANDIDATES
-    ):
-        raise ValueError(
-            "paper_dense_reciprocal_max_candidates must not exceed "
-            f"{MAX_DENSE_RECIPROCAL_CANDIDATES}"
-        )
-
-
-def _validate_bounded_new_papers(
-    method: MethodSettings,
-    dense: DenseSettings,
-) -> None:
-    for name, value in (
-        (
-            "method_relation_max_new_papers",
-            method.method_relation_max_new_papers,
-        ),
-        (
-            "method_relation_protected_top_k",
-            method.method_relation_protected_top_k,
-        ),
-        (
-            "method_dense_tail_max_new_papers",
-            dense.method_dense_tail_max_new_papers,
-        ),
-    ):
-        _require_non_negative_integer(name, value)
     if dense.method_dense_tail_max_new_papers > MAX_DENSE_TAIL_NEW_PAPERS:
         raise ValueError(
             "method_dense_tail_max_new_papers must not exceed "
@@ -532,13 +339,8 @@ def validate_settings(
     _validate_candidate_pool(settings.candidates)
     _validate_output_shape(settings.output)
     _validate_candidate_signals(settings.candidates)
-    _validate_two_lane(settings.two_lane, settings.candidates, reranker)
+    _validate_supplement(settings.supplement)
     _validate_open_set(settings.open_set, settings.candidates, settings.output)
-    _validate_neighborhood(settings.neighborhood)
-    _validate_expansion_weights(settings.method, settings.dense)
-    _validate_expansion_limits(settings.method, settings.dense)
-    _validate_optional_lane_seeds(settings.method, settings.dense)
-    _validate_lane_support(settings.dense, settings.output)
-    _validate_bounded_new_papers(settings.method, settings.dense)
+    _validate_dense_tail(settings.dense)
     _validate_paper_embedding_index(settings.dense)
     _validate_wrapping(retriever, reranker, settings.output)

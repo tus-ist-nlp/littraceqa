@@ -170,19 +170,6 @@ boundary were selected on the current validation set and need held-out
 confirmation. Run the model from a local cache in offline mode so evaluation
 cannot trigger a download.
 
-`bm25_two_lane_qwen3_0p6b_reranker.yaml` is the wider experimental variant. Each
-core search reads 100 results from both Chunk BM25 and Paper BM25, then the
-hybrid fuser retains a 50-paper lane. This depth matches the established
-baseline and avoids losing relevant papers before fusion. The original-question
-ranking is the base lane, while the ranking produced from the leading paper's
-context is the expansion lane. Qwen3-Reranker-0.6B reranks both lanes, weighted
-RRF combines them with weights 1.0 and 1.15, and the same model reranks their
-bounded 100-paper union. Exact query-document scores are reused across these
-stages; lane-specific ranks are still recomputed. The final top 20 is not
-protected from the wider pool, so this configuration must be compared with the
-conservative 50-paper baseline before adoption. The 0.6B weights are not
-downloaded automatically because `local_files_only` is true.
-
 The same config also enables a guarded exploration slot for open-set
 enumeration questions such as `Which ... papers` or `what ... does each
 method`. Only those questions expand from the next four unique seed papers.
@@ -206,7 +193,7 @@ uv run python scripts/eval_retrieval.py \
 ```
 
 For the pinned two-lane Qwen3 0.6B environment and prebuilt-index layout, see
-[`docs/retrieval_0p6b_reproduction.md`](../docs/retrieval_0p6b_reproduction.md).
+[`docs/retrieval_reproduction.md`](../docs/retrieval_reproduction.md).
 On the existing server, `paths/server_shared_retrieval.yaml` reads the
 completed indexes in place. It is evaluation-only and must never be passed to
 `run_search.py --build`; evaluation output must stay in the current user's
@@ -245,14 +232,15 @@ configs/
 │   ├── bm25_specter2.yaml    : BM25 + SPECTER2（全チャンク版）
 │   ├── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding）
 │   ├── bm25_paper_rank_seed_expansion_qwen3_reranker.yaml : 論文単位候補補充 + Qwen3 Reranker
-│   ├── bm25_two_lane_qwen3_0p6b_reranker.yaml : 2レーン候補統合 + Qwen3-Reranker-0.6B
-│   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) +
-│         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う（デフォルト、構築済み）
+│   ├── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) +
+│         Qwen3-Embedding-0.6B(本文のみ)。各モデルを設計どおりの粒度で使う
+│   └── seed_expansion_structured_filter.yaml : Chunk BM25 + Paper BM25 +
+│         構造化フィルタ・完全一致補充 + Qwen3-Reranker-4B（デフォルト、構築済み）
 └── agent_style/
     └── reading.yaml          : 分解→読解→不足分の再検索を繰り返す唯一の本命（デフォルト）
 ```
 
-推奨デフォルトの組み合わせ: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml` + `agent_style/reading.yaml`
+推奨デフォルトの組み合わせ: `process_style/mineru.yaml` + `search_style/seed_expansion_structured_filter.yaml` + `agent_style/reading.yaml`
 
 ## 新しい手法を追加するとき
 

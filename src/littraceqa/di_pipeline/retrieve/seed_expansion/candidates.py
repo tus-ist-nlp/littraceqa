@@ -102,7 +102,6 @@ class CandidateGeneration:
     retriever: Retriever
     candidate_k: int
     rrf_k: int
-    local_expansion_weight: float
 
     def search(
         self,
@@ -121,7 +120,6 @@ class CandidateGeneration:
         self,
         initial: list[RetrievalResult],
         expanded: list[RetrievalResult],
-        local_expanded: list[RetrievalResult] | None = None,
     ) -> list[RetrievalResult]:
         """Fuse the lanes with reciprocal rank fusion, one entry per paper."""
 
@@ -130,14 +128,7 @@ class CandidateGeneration:
         first_seen: dict[str, int] = {}
         ranks_by_run: list[dict[str, int]] = []
 
-        weighted_runs: list[tuple[list[RetrievalResult], float]] = [
-            (initial, 1.0),
-            (expanded, 1.0),
-        ]
-        if local_expanded is not None:
-            weighted_runs.append((local_expanded, self.local_expansion_weight))
-
-        for run, weight in weighted_runs:
+        for run in (initial, expanded):
             run_ranks: dict[str, int] = {}
             for result in run:
                 if result.paper_id in run_ranks:
@@ -145,15 +136,14 @@ class CandidateGeneration:
                 rank = len(run_ranks) + 1
                 run_ranks[result.paper_id] = rank
                 scores[result.paper_id] = scores.get(result.paper_id, 0.0) + (
-                    weight / (self.rrf_k + rank)
+                    1.0 / (self.rrf_k + rank)
                 )
                 if result.paper_id not in representatives:
                     representatives[result.paper_id] = result
                     first_seen[result.paper_id] = len(first_seen)
             ranks_by_run.append(run_ranks)
 
-        original_ranks, expanded_ranks, *optional_ranks = ranks_by_run
-        local_ranks = optional_ranks[0] if optional_ranks else None
+        original_ranks, expanded_ranks = ranks_by_run
         paper_ids = sorted(
             scores,
             key=lambda paper_id: (
@@ -169,8 +159,6 @@ class CandidateGeneration:
             metadata = dict(representative.metadata)
             metadata["seed_expansion_original_rank"] = original_ranks.get(paper_id)
             metadata["seed_expansion_expanded_rank"] = expanded_ranks.get(paper_id)
-            if local_ranks is not None:
-                metadata["seed_expansion_local_rank"] = local_ranks.get(paper_id)
             fused.append(
                 replace(
                     representative,

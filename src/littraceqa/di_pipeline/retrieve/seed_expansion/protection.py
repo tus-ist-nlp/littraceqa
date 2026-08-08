@@ -1,8 +1,7 @@
 """Candidate protection.
 
-Reserves final slots that later stages must not evict: papers whose title the
-query names outright, and normal-search papers that method relation reranking
-promised to keep.
+Reserves final slots that later stages must not evict: the papers whose title
+the query names outright.
 """
 
 from __future__ import annotations
@@ -65,50 +64,6 @@ def standalone_alias_position(query: str, alias: str) -> int | None:
     return match.start() if match is not None else None
 
 
-def restore_method_protected_candidates(
-    ranked_candidates: list[RetrievalResult],
-    selected: list[RetrievalResult],
-    protected_candidates: tuple[RetrievalResult, ...],
-    output_k: int,
-) -> list[RetrievalResult]:
-    """Keep normal-search papers protected by method relation reranking."""
-
-    if not protected_candidates or output_k <= 0:
-        return selected[:output_k]
-
-    ranked_by_id = {
-        candidate.paper_id: candidate for candidate in ranked_candidates
-    }
-    protected_ids = {
-        candidate.paper_id for candidate in protected_candidates
-    }
-    restored = list(selected[:output_k])
-    selected_ids = {candidate.paper_id for candidate in restored}
-    missing = [
-        ranked_by_id.get(candidate.paper_id, candidate)
-        for candidate in protected_candidates
-        if candidate.paper_id not in selected_ids
-    ]
-    for candidate in missing:
-        if len(restored) >= output_k:
-            replacement_index = next(
-                (
-                    index
-                    for index in range(len(restored) - 1, -1, -1)
-                    if restored[index].paper_id not in protected_ids
-                ),
-                None,
-            )
-            if replacement_index is None:
-                break
-            removed = restored.pop(replacement_index)
-            selected_ids.discard(removed.paper_id)
-        restored.append(candidate)
-        selected_ids.add(candidate.paper_id)
-
-    return restored[:output_k]
-
-
 @dataclass(frozen=True)
 class ExplicitTitleGuard:
     """Reserves bounded final slots for unambiguous titles named in the query."""
@@ -122,8 +77,6 @@ class ExplicitTitleGuard:
         candidate_pool: list[RetrievalResult],
         selected: list[RetrievalResult],
         output_k: int,
-        *,
-        reserved_paper_ids: set[str] | None = None,
     ) -> list[RetrievalResult]:
         """Put back query-named papers that ranking dropped from the output."""
 
@@ -135,7 +88,6 @@ class ExplicitTitleGuard:
             return selected
 
         protected_ids = {candidate.paper_id for _, _, candidate, _ in protected}
-        protected_ids.update(reserved_paper_ids or ())
         selected_ids = {candidate.paper_id for candidate in selected}
         missing = [
             item for item in protected if item[2].paper_id not in selected_ids

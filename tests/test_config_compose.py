@@ -189,7 +189,7 @@ def test_portable_retrieval_paths_resolve_all_prebuilt_indexes():
         paths=load_config("configs/paths/local_retrieval.yaml"),
         process=load_config("configs/process_style/mineru.yaml"),
         search=load_config(
-            "configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml"
+            "configs/search_style/seed_expansion_structured_filter.yaml"
         ),
         agent=_agent(),
     )
@@ -215,7 +215,7 @@ def test_server_shared_paths_resolve_read_only_prebuilt_indexes():
         paths=load_config("configs/paths/server_shared_retrieval.yaml"),
         process=load_config("configs/process_style/mineru.yaml"),
         search=load_config(
-            "configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml"
+            "configs/search_style/seed_expansion_structured_filter.yaml"
         ),
         agent=_agent(),
     )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from littraceqa.di_pipeline.contracts import Chunk
+from littraceqa.di_pipeline.contracts import Chunk, SearchHints
 from littraceqa.di_pipeline.retrieve.seed_expansion import (
     SeedExpansionRetriever,
 )
@@ -21,7 +21,7 @@ from seed_expansion_doubles import (
 )
 
 
-def test_final_candidate_rerank_runs_once_after_dense_tail_and_consensus():
+def test_final_candidate_rerank_runs_once_after_the_dense_tail():
     candidates = [
         _result(
             f"p{index}",
@@ -32,7 +32,7 @@ def test_final_candidate_rerank_runs_once_after_dense_tail_and_consensus():
     paper_ids = {
         *(candidate.paper_id for candidate in candidates),
         "tail-new",
-        "consensus-new",
+        "tail-second",
     }
     documents = {
         paper_id: Chunk(
@@ -47,14 +47,15 @@ def test_final_candidate_rerank_runs_once_after_dense_tail_and_consensus():
     dense_results = {
         "p1": [
             _result("tail-new", score=0.95),
-            _result("consensus-new", score=0.9),
+            _result("tail-second", score=0.9),
         ],
-        "p2": [_result("consensus-new", score=0.92)],
-        "p3": [_result("consensus-new", score=0.91)],
     }
 
     def retrieve(reranker=None):
-        paper_index = _FakePaperIndex(documents)
+        paper_index = _FakePaperIndex(
+            documents,
+            owners=({"paper_id": "p1", "alias": "MethodX"},),
+        )
         dense_store = _FakePaperEmbeddingStore(dense_results)
         retriever = SeedExpansionRetriever(
             _FakeRetriever(
@@ -65,25 +66,27 @@ def test_final_candidate_rerank_runs_once_after_dense_tail_and_consensus():
             max_results=20,
             stable_prefix_k=10,
             paper_embedding_index_dir="/tmp/paper-embeddings",
-            paper_dense_tail_weight=4.0,
-            paper_dense_tail_seed_k=1,
-            paper_dense_tail_max_results=1,
-            paper_dense_consensus_seed_k=3,
-            paper_dense_consensus_max_results=7,
-            paper_dense_consensus_min_support=2,
+            method_dense_tail_weight=4.0,
+            method_dense_tail_seed_k=1,
+            method_dense_tail_max_results=2,
+            method_dense_tail_max_new_papers=2,
             rerank_final_candidates=reranker is not None,
             rerank_pool_k=20,
             final_rerank_document_chars=12,
         )
         retriever._paper_embedding_store = dense_store
-        return retriever.retrieve("question", 20)
+        return retriever.retrieve(
+            "question",
+            20,
+            hints=SearchHints(methods=("MethodX",)),
+        )
 
     baseline = retrieve()
     final_reranker = _RecordingFinalReranker()
     results = retrieve(final_reranker)
 
     baseline_ids = [result.paper_id for result in baseline]
-    assert {"tail-new", "consensus-new"} <= set(baseline_ids)
+    assert {"tail-new", "tail-second"} <= set(baseline_ids)
     assert len(final_reranker.calls) == 1
     rerank_query, proxies, rerank_top_k = final_reranker.calls[0]
     assert rerank_query == "question"

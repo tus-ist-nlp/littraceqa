@@ -10,7 +10,7 @@ from typing import Any
 
 
 DEFAULT_SEARCH_CONFIG = Path(
-    "configs/search_style/bm25_two_lane_qwen3_0p6b_reranker.yaml"
+    "configs/search_style/seed_expansion_structured_filter.yaml"
 )
 
 

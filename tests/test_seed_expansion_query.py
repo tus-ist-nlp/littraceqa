@@ -102,55 +102,12 @@ def test_prefers_paper_context_and_does_not_duplicate_leading_title():
     )
 
 
-def test_opt_in_local_expansion_uses_legacy_seed_query_and_forwards_hints():
-    seed = _result(
-        "p1",
-        title="A paper",
-        text="Query-matched table details",
-    )
-    seed.metadata["paper_rank_expansion_text"] = "A paper\nUseful abstract"
-    inner = _FakeRetriever(
-        [
-            [seed],
-            [_result("p2")],
-            [_result("p3")],
-        ]
-    )
-    retriever = SeedExpansionRetriever(
-        inner,
-        seed_text_chars=19,
-        local_expansion_weight=0.5,
-    )
-    hints = SearchHints(venues=("ACL",), years=(2024,))
-
-    retriever.retrieve("original question", 10, hints=hints)
-
-    assert len(inner.calls) == 3
-    assert inner.calls[1] == (
-        "original question A paper Useful abst",
-        50,
-        hints,
-    )
-    assert inner.calls[2] == (
-        "original question A paper Query-matched table",
-        50,
-        hints,
-    )
-
-
 def test_opt_in_literal_attribute_hints_are_forwarded_to_every_lane():
     seed = _result("p1", title="A paper", text="Local evidence")
     seed.metadata["paper_rank_expansion_text"] = "Paper overview"
-    inner = _FakeRetriever(
-        [
-            [seed],
-            [_result("p2")],
-            [_result("p3")],
-        ]
-    )
+    inner = _FakeRetriever([[seed], [_result("p2")]])
     retriever = SeedExpansionRetriever(
         inner,
-        local_expansion_weight=0.5,
         literal_attribute_hints=True,
     )
 
@@ -161,7 +118,7 @@ def test_opt_in_literal_attribute_hints_are_forwarded_to_every_lane():
     )
 
     expected = SearchHints(venues=("CVPR",), years=(2025,))
-    assert len(inner.calls) == 3
+    assert len(inner.calls) == 2
     assert all(hints == expected for _, _, hints in inner.calls)
 
 
@@ -229,53 +186,6 @@ def test_default_does_not_extract_literal_attribute_hints():
 
     assert len(inner.calls) == 2
     assert all(hints is None for _, _, hints in inner.calls)
-
-
-def test_local_expansion_still_runs_when_paper_context_search_is_empty():
-    seed = _result("p1", title="A paper", text="Local evidence")
-    seed.metadata["paper_rank_expansion_text"] = "Paper overview"
-    inner = _FakeRetriever(
-        [
-            [seed],
-            [],
-            [_result("local")],
-        ]
-    )
-    retriever = SeedExpansionRetriever(
-        inner,
-        local_expansion_weight=0.5,
-    )
-
-    results = retriever.retrieve("question", 10)
-
-    assert len(inner.calls) == 3
-    assert [result.paper_id for result in results] == ["p1", "local"]
-    assert results[0].metadata["seed_expansion_expanded_rank"] is None
-    assert results[1].metadata["seed_expansion_local_rank"] == 1
-
-
-def test_local_expansion_is_not_duplicated_without_paper_context():
-    initial = [_result("p1", title="A paper", text="Local evidence")]
-    inner = _FakeRetriever(
-        [
-            initial,
-            [_result("p2")],
-            [_result("unexpected")],
-        ]
-    )
-    retriever = SeedExpansionRetriever(
-        inner,
-        local_expansion_weight=0.5,
-    )
-
-    results = retriever.retrieve("question", 10)
-
-    assert len(inner.calls) == 2
-    assert inner.calls[1][0] == "question A paper Local evidence"
-    assert all(
-        "seed_expansion_local_rank" not in result.metadata
-        for result in results
-    )
 
 
 def test_paper_context_keeps_title_when_context_does_not_begin_with_it():

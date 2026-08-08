@@ -1,0 +1,100 @@
+# Baseline plus venue+modality structured filtering for enumeration questions.
+# Several weights were selected on the current validation queries and require
+# confirmation on a separate held-out set.
+per_index_k: 100
+attribute_weight: 0.75
+indexers:
+  - name: bm25s
+    params:
+      method: lucene
+      idf_method: lucene
+      k1: 1.5
+      b: 0.75
+      delta: 0.5
+      resumable_build: true
+      build_batch_size: 256
+      max_batch_characters: 2000000
+  - name: paper_bm25
+    index_name: paper_bm25
+    params:
+      exclude_references: false
+      result_text_chars: 2000
+      extract_method_names: true
+      method_max_degree: 10
+fuser:
+  name: paper_rank_rrf
+  params:
+    k: 60
+    weights: { bm25s: 1.0, paper_bm25: 1.0 }
+    budget_source: bm25s
+    fill_to_top_k: true
+    expansion_source: paper_bm25
+reranker:
+  name: qwen3
+  params:
+    # A five-point sweep of the reranker size put 4B ahead of both 0.6B and
+    # 8B: R@1 0.7808 against 0.7202 and 0.7581, and +11pt of R@1 on the
+    # multi-paper questions. 8B was slower and no better.
+    model: Qwen/Qwen3-Reranker-4B
+    device: cuda:0
+    dtype: bfloat16
+    batch_size: 4
+    max_tokens: 1024
+    local_files_only: true
+    # Re-swept for the 4B model over 0.30-0.80; 0.52 stayed the best on R@1,
+    # R@3 and on the multi-paper questions. Lower weights trade R@1 for R@10.
+    base_rank_weight: 0.52
+    rank_fusion_k: 60.0
+    instruction: >-
+      Given a scientific question, determine whether the document contains
+      evidence needed to answer it.
+retriever_wrapper:
+  name: seed_expansion
+  params:
+    candidate_k: 50
+    seed_text_chars: 512
+    rrf_k: 60
+    max_results: 50
+    stable_prefix_k: 10
+    protect_explicit_title_matches: true
+    max_protected_titles: 4
+    literal_attribute_hints: true
+    literal_method_hints: true
+    # Only open-set enumeration questions run four additional seed searches.
+    # A paper must appear in at least two independent runs and reach the top
+    # two in one of them before it can fill rank 20 after final reranking.
+    # This preserves the baseline's final top 19 exactly.
+    open_set_seed_k: 5
+    open_set_min_support: 2
+    open_set_max_seed_rank: 2
+    open_set_slot_k: 20
+    # Candidate supplementation is limited to the method-conditioned dense
+    # tail and the guarded open-set slot. Graph, reciprocal, consensus, and
+    # generic paper-neighbour lanes remain at their disabled defaults.
+    paper_embedding_index_name: specter2_paper_embeddings
+    method_dense_tail_weight: 1.0
+    method_dense_tail_seed_k: 1
+    method_dense_tail_max_results: 7
+    method_dense_tail_max_new_papers: 3
+    # The fixed candidate set is assembled before model scoring.
+    # The caller can still request a smaller output, such as the 20 papers
+    # consumed by the reading agent.
+    rerank_final_candidates: true
+    final_rerank_document_chars: 2000
+    rerank_pool_k: 50
+    # Qwen can reorder the original top 20, but papers below that boundary
+    # cannot displace a paper that the reading agent would otherwise receive.
+    final_rerank_protected_top_k: 20
+    # Questions that state a venue, a year and a modality ("which CVPR 2025
+    # papers ... in their main comparison table") get a shortlist built from
+    # that constraint, which is promoted ahead of the general ranking.
+    structured_filter: true
+    structured_filter_max_papers: 20
+    structured_filter_search_depth: 5000
+    # The head of the ordinary ranking is left untouched; only ranks below it
+    # are rebuilt from the constraint shortlist.
+    structured_filter_protected_prefix_k: 5
+    # A method name that identifies exactly one paper adds that paper when the
+    # ordinary search missed it entirely. Appended, never promoted.
+    exact_method_search: true
+    exact_match_max_papers: 5

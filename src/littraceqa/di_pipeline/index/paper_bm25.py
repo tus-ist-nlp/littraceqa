@@ -8,7 +8,6 @@ import re
 import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from pathlib import Path
 from typing import Any
 
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult

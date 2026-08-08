@@ -264,6 +264,15 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
                     f"{paper_embedding_index_name}"
                 ),
             )
+        if wrapper_params.get("structured_filter") or wrapper_params.get(
+            "exact_method_search"
+        ):
+            # The alias index is built from the same corpus metadata the rest
+            # of the pipeline uses, so it is derived rather than configured.
+            wrapper_params.setdefault(
+                "paper_metadata_path",
+                str(resolved_paths["paper_metadata"]),
+            )
         retriever["retriever_wrapper"] = {
             "name": wrapper["name"],
             "params": wrapper_params,

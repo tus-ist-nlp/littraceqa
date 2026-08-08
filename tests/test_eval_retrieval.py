@@ -217,12 +217,6 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
             "qwen3_rank": 2,
             "rank_fusion_base_weight": 0.75,
             "rank_fusion_k": 60.0,
-            "two_lane_base_rank": 3,
-            "two_lane_expansion_rank": 1,
-            "two_lane_rrf_score": 0.04,
-            "two_lane_sources": ["base", "expansion"],
-            "two_lane_rerank_status": "applied",
-            "two_lane_rerank_error_type": None,
             "final_rerank_status": "applied",
             "final_rerank_candidate_set_preserved": True,
             "final_rerank_error_type": None,
@@ -249,12 +243,6 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
     assert detail["qwen3_rank"] == 2
     assert detail["rank_fusion_base_weight"] == 0.75
     assert detail["rank_fusion_k"] == 60.0
-    assert detail["two_lane_base_rank"] == 3
-    assert detail["two_lane_expansion_rank"] == 1
-    assert detail["two_lane_rrf_score"] == 0.04
-    assert detail["two_lane_sources"] == ["base", "expansion"]
-    assert detail["two_lane_rerank_status"] == "applied"
-    assert detail["two_lane_rerank_error_type"] is None
     assert detail["final_rerank_status"] == "applied"
     assert detail["final_rerank_candidate_set_preserved"] is True
     assert detail["final_rerank_error_type"] is None
@@ -275,25 +263,18 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
     json.dumps(detail)
 
 
-def test_ranking_details_include_typed_method_provenance_without_text() -> None:
+def test_ranking_details_include_typed_provenance_without_text() -> None:
     result = SimpleNamespace(
-        paper_id="related",
+        paper_id="neighbor",
         score=0.75,
-        source="method_relation_rrf",
-        chunk_id="related#paper",
+        source="method_dense_tail_rrf",
+        chunk_id="neighbor#paper",
         chunk_type="paper",
         text="SECRET DOCUMENT TEXT",
         metadata={
-            "method_relation_baseline_rank": 7,
-            "method_owner_rank": None,
-            "method_relation_rank": 2,
-            "method_owner_aliases": ["TCM"],
-            "method_relation_aliases": ["TCM", "sCT"],
-            "method_relation_via_papers": ["owner"],
-            "method_relation_strength": 3,
-            "method_topic_rank": 1,
-            "method_topic_search_rank": 4,
-            "method_topic_via_papers": ["owner"],
+            "method_dense_tail_baseline_rank": 7,
+            "method_dense_tail_rank": 2,
+            "method_dense_tail_via_papers": ["owner"],
             "output_order_rank": 2,
             "pre_output_order_score": 0.8,
         },
@@ -303,23 +284,16 @@ def test_ranking_details_include_typed_method_provenance_without_text() -> None:
 
     assert details == [
         {
-            "paper_id": "related",
+            "paper_id": "neighbor",
             "score": 0.75,
-            "source": "method_relation_rrf",
-            "representative_chunk_id": "related#paper",
+            "source": "method_dense_tail_rrf",
+            "representative_chunk_id": "neighbor#paper",
             "chunk_type": "paper",
             "pre_rerank_rank": None,
             "pre_rerank_score": None,
-            "method_relation_baseline_rank": 7,
-            "method_owner_rank": None,
-            "method_relation_rank": 2,
-            "method_owner_aliases": ["TCM"],
-            "method_relation_aliases": ["TCM", "sCT"],
-            "method_relation_via_papers": ["owner"],
-            "method_relation_strength": 3,
-            "method_topic_rank": 1,
-            "method_topic_search_rank": 4,
-            "method_topic_via_papers": ["owner"],
+            "method_dense_tail_baseline_rank": 7,
+            "method_dense_tail_rank": 2,
+            "method_dense_tail_via_papers": ["owner"],
             "output_order_rank": 2,
             "pre_output_order_score": 0.8,
         }
@@ -343,20 +317,6 @@ def test_ranking_details_include_typed_dense_tail_provenance() -> None:
             "method_dense_tail_via_papers": ["owner"],
             "method_dense_tail_rrf_score": 0.04,
             "method_dense_tail_is_new": True,
-            "paper_dense_tail_baseline_rank": 7,
-            "paper_dense_tail_rank": 4,
-            "paper_dense_tail_best_neighbor_rank": 5,
-            "paper_dense_tail_best_similarity": 0.89,
-            "paper_dense_tail_via_papers": ["rank-one"],
-            "paper_dense_tail_rrf_score": 0.03,
-            "paper_dense_tail_is_new": False,
-            "paper_dense_consensus_support": 2,
-            "paper_dense_consensus_best_neighbor_rank": 1,
-            "paper_dense_consensus_best_similarity": 0.95,
-            "paper_dense_consensus_via_papers": ["seed-two", "seed-three"],
-            "paper_dense_consensus_rrf_score": 0.032,
-            "paper_dense_consensus_replaced_paper_id": "old-tail",
-            "paper_dense_consensus_is_new": True,
         },
     )
 
@@ -369,132 +329,25 @@ def test_ranking_details_include_typed_dense_tail_provenance() -> None:
     assert detail["method_dense_tail_via_papers"] == ["owner"]
     assert detail["method_dense_tail_rrf_score"] == 0.04
     assert detail["method_dense_tail_is_new"] is True
-    assert detail["paper_dense_tail_baseline_rank"] == 7
-    assert detail["paper_dense_tail_rank"] == 4
-    assert detail["paper_dense_tail_best_neighbor_rank"] == 5
-    assert detail["paper_dense_tail_best_similarity"] == 0.89
-    assert detail["paper_dense_tail_via_papers"] == ["rank-one"]
-    assert detail["paper_dense_tail_rrf_score"] == 0.03
-    assert detail["paper_dense_tail_is_new"] is False
-    assert detail["paper_dense_consensus_support"] == 2
-    assert detail["paper_dense_consensus_best_neighbor_rank"] == 1
-    assert detail["paper_dense_consensus_best_similarity"] == 0.95
-    assert detail["paper_dense_consensus_via_papers"] == [
-        "seed-two",
-        "seed-three",
-    ]
-    assert detail["paper_dense_consensus_rrf_score"] == 0.032
-    assert detail["paper_dense_consensus_replaced_paper_id"] == "old-tail"
-    assert detail["paper_dense_consensus_is_new"] is True
     json.dumps(detail)
 
 
-def test_ranking_details_include_method_bridge_provenance() -> None:
-    result = SimpleNamespace(
-        paper_id="linked",
-        score=0.25,
-        source="method_bridge_exploration",
-        chunk_id="linked#paper",
-        chunk_type="paper",
-        metadata={
-            "method_bridge_topic_rank": 4,
-            "method_bridge_strength": 1,
-            "method_bridge_owner_papers": ["owner"],
-            "method_bridge_via_papers": ["bridge"],
-            "method_bridge_aliases": ["PAI"],
-            "method_bridge_replaced_paper_id": "old-tail",
-            "method_bridge_is_new": True,
-        },
-    )
-
-    detail = paper_ranking_details([result])[0]
-
-    assert detail["method_bridge_topic_rank"] == 4
-    assert detail["method_bridge_strength"] == 1
-    assert detail["method_bridge_owner_papers"] == ["owner"]
-    assert detail["method_bridge_via_papers"] == ["bridge"]
-    assert detail["method_bridge_aliases"] == ["PAI"]
-    assert detail["method_bridge_replaced_paper_id"] == "old-tail"
-    assert detail["method_bridge_is_new"] is True
-
-
-def test_ranking_details_include_dense_reciprocal_provenance() -> None:
-    result = SimpleNamespace(
-        paper_id="reciprocal",
-        score=0.2,
-        source="paper_dense_reciprocal_exploration",
-        chunk_id="reciprocal#paper",
-        chunk_type="paper",
-        metadata={
-            "paper_dense_reciprocal_seed_count": 8,
-            "paper_dense_reciprocal_discovered_candidates": 28,
-            "paper_dense_reciprocal_examined_candidates": 28,
-            "paper_dense_reciprocal_support": 6,
-            "paper_dense_reciprocal_forward_support": 1,
-            "paper_dense_reciprocal_best_forward_rank": 16,
-            "paper_dense_reciprocal_best_reverse_rank": 1,
-            "paper_dense_reciprocal_best_similarity": 0.96,
-            "paper_dense_reciprocal_forward_rrf_score": 0.013,
-            "paper_dense_reciprocal_reverse_rrf_score": 0.091,
-            "paper_dense_reciprocal_forward_via_papers": ["alpha"],
-            "paper_dense_reciprocal_reverse_via_papers": [
-                "alpha",
-                "owner",
-            ],
-            "paper_dense_reciprocal_replaced_paper_id": "old-tail",
-            "paper_dense_reciprocal_is_new": True,
-        },
-    )
-
-    detail = paper_ranking_details([result])[0]
-
-    assert detail["paper_dense_reciprocal_seed_count"] == 8
-    assert detail["paper_dense_reciprocal_discovered_candidates"] == 28
-    assert detail["paper_dense_reciprocal_examined_candidates"] == 28
-    assert detail["paper_dense_reciprocal_support"] == 6
-    assert detail["paper_dense_reciprocal_forward_support"] == 1
-    assert detail["paper_dense_reciprocal_best_forward_rank"] == 16
-    assert detail["paper_dense_reciprocal_best_reverse_rank"] == 1
-    assert detail["paper_dense_reciprocal_best_similarity"] == 0.96
-    assert detail["paper_dense_reciprocal_forward_rrf_score"] == 0.013
-    assert detail["paper_dense_reciprocal_reverse_rrf_score"] == 0.091
-    assert detail["paper_dense_reciprocal_forward_via_papers"] == ["alpha"]
-    assert detail["paper_dense_reciprocal_reverse_via_papers"] == [
-        "alpha",
-        "owner",
-    ]
-    assert detail["paper_dense_reciprocal_replaced_paper_id"] == "old-tail"
-    assert detail["paper_dense_reciprocal_is_new"] is True
-    json.dumps(detail)
-
-
-def test_ranking_details_fail_closed_for_invalid_method_provenance() -> None:
+def test_ranking_details_fail_closed_for_invalid_provenance() -> None:
     result = SimpleNamespace(
         paper_id="invalid",
         score=0.5,
-        source="method_relation_rrf",
+        source="method_dense_tail_rrf",
         chunk_id="invalid#paper",
         chunk_type="paper",
         metadata={
-            "method_relation_baseline_rank": True,
-            "method_owner_rank": 1.5,
-            "method_relation_rank": "2",
-            "method_owner_aliases": ("TCM",),
-            "method_relation_aliases": ["TCM", 3],
-            "method_relation_via_papers": {"owner"},
-            "method_relation_strength": False,
-            "method_topic_rank": 1.5,
-            "method_topic_search_rank": "4",
-            "method_topic_via_papers": ("owner",),
+            "method_dense_tail_baseline_rank": True,
+            "method_dense_tail_rank": "2",
+            "method_dense_tail_best_neighbor_rank": 1.5,
+            "method_dense_tail_best_similarity": float("nan"),
+            "method_dense_tail_via_papers": {"owner"},
+            "method_dense_tail_is_new": 1,
             "output_order_rank": 1.5,
             "pre_output_order_score": float("inf"),
-            "method_dense_tail_is_new": 1,
-            "paper_dense_tail_is_new": "false",
-            "paper_dense_consensus_support": True,
-            "paper_dense_consensus_via_papers": ("seed-one",),
-            "paper_dense_consensus_best_similarity": float("nan"),
-            "paper_dense_consensus_is_new": 1,
-            "paper_dense_consensus_replaced_paper_id": "",
             "qwen3_score": float("inf"),
             "qwen3_rank": False,
             "rank_fusion_base_weight": "0.75",
@@ -502,30 +355,21 @@ def test_ranking_details_fail_closed_for_invalid_method_provenance() -> None:
             "final_rerank_status": "",
             "final_rerank_candidate_set_preserved": 1,
             "final_rerank_error_type": [],
+            "open_set_expansion_via_papers": ("seed-one",),
+            "open_set_expansion_selected_paper_id": "",
         },
     )
 
     detail = paper_ranking_details([result])[0]
 
-    assert detail["method_relation_baseline_rank"] is None
-    assert detail["method_owner_rank"] is None
-    assert detail["method_relation_rank"] is None
-    assert detail["method_owner_aliases"] == []
-    assert detail["method_relation_aliases"] == []
-    assert detail["method_relation_via_papers"] == []
-    assert detail["method_relation_strength"] is None
-    assert detail["method_topic_rank"] is None
-    assert detail["method_topic_search_rank"] is None
-    assert detail["method_topic_via_papers"] == []
+    assert detail["method_dense_tail_baseline_rank"] is None
+    assert detail["method_dense_tail_rank"] is None
+    assert detail["method_dense_tail_best_neighbor_rank"] is None
+    assert detail["method_dense_tail_best_similarity"] is None
+    assert detail["method_dense_tail_via_papers"] == []
+    assert detail["method_dense_tail_is_new"] is None
     assert detail["output_order_rank"] is None
     assert detail["pre_output_order_score"] is None
-    assert detail["method_dense_tail_is_new"] is None
-    assert detail["paper_dense_tail_is_new"] is None
-    assert detail["paper_dense_consensus_support"] is None
-    assert detail["paper_dense_consensus_via_papers"] == []
-    assert detail["paper_dense_consensus_best_similarity"] is None
-    assert detail["paper_dense_consensus_is_new"] is None
-    assert detail["paper_dense_consensus_replaced_paper_id"] is None
     assert detail["qwen3_score"] is None
     assert detail["qwen3_rank"] is None
     assert detail["rank_fusion_base_weight"] is None
@@ -533,6 +377,8 @@ def test_ranking_details_fail_closed_for_invalid_method_provenance() -> None:
     assert detail["final_rerank_status"] is None
     assert detail["final_rerank_candidate_set_preserved"] is None
     assert detail["final_rerank_error_type"] is None
+    assert detail["open_set_expansion_via_papers"] == []
+    assert detail["open_set_expansion_selected_paper_id"] is None
     json.dumps(detail)
 
 
