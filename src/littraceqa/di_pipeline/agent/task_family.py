@@ -213,9 +213,10 @@ def cutoff_for(query: Query, classifier: TaskFamilyClassifier) -> int | None:
 
 # 提出本数の決め方。比較実験では、これを揃えないと「エージェントの賢さ」ではなく
 # 「本数の決め方」の差を測ってしまう（論文集合は F1 採点なので本数がスコアを支配する）。
-#   "task_family": task_family の cutoff（single=2, multi=5）で機械的に切る
-#   "llm":         LLM が選んだ本数をそのまま採用する（max_papers で頭打ち）
-PAPER_CUTOFF_MODES = ("task_family", "llm")
+#   "task_family":  task_family の cutoff（single=2, multi=5）で機械的に切る
+#   "llm":          LLM が選んだ本数をそのまま採用する（max_papers で頭打ち）
+#   "cardinality":  質問文が明示している本数で切る（本番入力にある情報だけを使う）
+PAPER_CUTOFF_MODES = ("task_family", "llm", "cardinality")
 
 
 def apply_paper_cutoff(
@@ -235,4 +236,11 @@ def apply_paper_cutoff(
         if cutoff is not None:
             return paper_ids[:cutoff]
         return paper_ids[:max_papers]
+    if mode == "cardinality":
+        # 遅延 import。select パッケージは検索側からは使わないので、
+        # agent を組まない経路に読み込ませない。
+        from littraceqa.di_pipeline.select.selector import CardinalityPaperSelector
+
+        selector = CardinalityPaperSelector(max_papers=max_papers)
+        return list(selector.select(query.question, paper_ids).paper_ids)
     return paper_ids[:max_papers]
