@@ -211,6 +211,24 @@ evidence 判定を動かせない（reading agent が要る）ので、`require_
 `uv run python scripts/eval_paper_selection.py --retrieval {検索出力}.json
 --gold data/validation.jsonl` で GPU も LLM も使わず即座に測り直せる。
 
+**gold paper だけなら LLM 無しで提出ファイルを作れる。** paper 系の指標に必要なのは
+`query_id` と `gold_papers` だけで、`evidence` と `answer` は独立した指標に入る。
+`scripts/build_submission.py` が検索結果と select_style から公式形式の JSONL を
+書き出す（`evidence: []`、`answer` は answer_types に合わせた空スケルトン）。
+ただし**レコード自体は全質問分必要**で、採点ループは gold 側を回るため予測に
+無い query_id は paper F1 も 0 になる。
+
+```
+uv run python scripts/build_submission.py \
+  --retrieval test_retrieval_4b.json --queries data/test.jsonl \
+  --select configs/select_style/f1_balanced.yaml --output submission.jsonl
+```
+
+**エージェント無しでは `high_precision` と `f1_balanced` はほぼ同じ出力になる。**
+前者の差別化要素 `require_evidence` は根拠情報が無いと何もせず、もう一つの違い
+`open_set_count` は test 71問で1問も発火しない（test_extra でも25問）。実際
+test では2つのファイルがバイト単位で一致する。LLM 無しで3構成を出す意味は薄い。
+
 **残りの差 0.64 → 0.94 は本数ではなく「どの論文か」で、読解が要る。** single(26問)は
 top1 で F1 0.8846 とほぼ上限だが、multi(29問)は順位ベースだと 0.42〜0.45 で頭打ち
 （precision と recall がちょうど相殺する）。method alias graph はクラスタを繋いで
