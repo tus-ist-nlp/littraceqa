@@ -32,7 +32,7 @@ Plain `uv sync` does not install GPU retrieval dependencies. To reproduce the
 current retrieval-only experiment either from this server's prebuilt indexes
 or on another Linux/WSL2 computer, including the pinned Python/CUDA
 environment, model cache, smoke test, and resume command, follow
-[`docs/retrieval_0p6b_reproduction.md`](docs/retrieval_0p6b_reproduction.md).
+[`docs/retrieval_reproduction.md`](docs/retrieval_reproduction.md).
 
 ## DI-based hybrid retrieval pipeline
 

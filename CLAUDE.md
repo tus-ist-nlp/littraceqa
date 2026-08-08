@@ -62,7 +62,7 @@ title+abstract で学習された**論文単位**のモデルなので、本文�
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
   --process configs/process_style/mineru.yaml \
-  --search configs/search_style/abstract_specter2_body_qwen3.yaml \
+  --search configs/search_style/seed_expansion_structured_filter.yaml \
   --agent configs/agent_style/reading.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions.jsonl \
@@ -73,10 +73,44 @@ uv run python scripts/run_search.py \
 新しい手法をデフォルト（推奨組み合わせ）にする場合は、この節の記載を更新する。
 ablation 用なら触らない。
 
-現在のデフォルト: `process_style/mineru.yaml` + `search_style/abstract_specter2_body_qwen3.yaml`
-+ `agent_style/reading.yaml`（MinerU + BM25 + SPECTER2(title_abstract) + Qwen3-Embedding-0.6B(本文) + ReadingAgent）。
-27,487件分の chunks・索引（`bm25s` / `faiss_specter2_abstract` / `faiss_qwen3_0p6b`）が
-構築済みで、`--build` なしですぐ検索できる。
+現在のデフォルト: `process_style/mineru.yaml` + `search_style/seed_expansion_structured_filter.yaml`
++ `agent_style/reading.yaml`。27,487件の索引（`bm25s` / `paper_bm25` /
+`specter2_paper_embeddings`）が構築済みで、`--build` なしですぐ検索できる。
+
+構成は「chunk-level BM25 + paper-level BM25 を PaperRank RRF で論文単位に統合 →
+seed expansion → 候補補充4レーン → Qwen3-Reranker-4B で50件を採点して Top 50」。
+候補補充は次の4つで、いずれも上限付きで既存順位を壊さない。
+
+| レーン | 発火条件 | 効果 |
+|---|---|---|
+| method dense tail | 手法名ヒントあり | SPECTER2 近傍から最大3本 |
+| open-set slot | 列挙型質問 | rank 20 に1枠 |
+| structured filter | 列挙型 かつ 会場・年・モダリティを明示 | 会場×モダリティで絞った候補を6位以降へ昇格 |
+| exact method search | 質問中の固有名が1論文を一意に指す | その論文を候補へ追加（昇格はしない） |
+
+validation 55問（answer-bearing gold 87本）での実測は R@1 0.7808 / R@10 0.9848 /
+R@20 1.0000 / All-Gold@20 1.0000。
+
+**主要な設定値はいずれも掃引で選んでいる。変更するなら測り直すこと。**
+
+- `reranker.model: Qwen3-Reranker-4B` — 0.6B / 4B / 8B の比較で 4B が最良。
+  8B は 4B より遅く R@1 も低い（0.7581 対 0.7808）。大きいほど良いわけではない。
+- `base_rank_weight: 0.52` — 0.30〜0.80 の5点掃引で最良。0.30 は R@10 だけ僅かに
+  上回るので、後段が上位10本しか使わない設計に変えるなら再検討する。
+- `final_rerank_protected_top_k: 20` — 0 / 5 / 10 / 20 の掃引で最良。この保護は
+  reranker が上位と判定した論文を21位以降へ落とすと同時に、reranker が下位と
+  判定した元上位を救っており、validation では後者の利得が上回る。
+- `structured_filter` は**列挙型質問であることを必須**にしている。会場・年・
+  モダリティの3条件だけで発火させると「For the two ICCV 2025 papers ...」のような
+  比較質問にも作動し、質問が名指しした論文を3位から21位へ落とした。
+
+**無効だったレーンは削除済み。** two-lane rerank / paper neighborhood /
+method relation / method bridge / dense reciprocal / dense consensus /
+paper dense tail / local expansion は重みゼロで素通りしていたので、
+コンストラクタ引数ごと消した（60引数 → 31引数）。実装は git 履歴に残り、
+結果と考察は `docs/retrieval_negative_results.md` にまとめてある。
+再導入するなら「validation の改善」だけでなく「held-out での発火内容が
+想定どおりか」まで確認すること。
 
 ### 3. configs/ のディレクトリ構成
 現在の構成:
@@ -94,8 +128,10 @@ configs/
 │   ├── bm25_colbert.yaml    : BM25 + ColBERT
 │   ├── bm25_specter2.yaml   : BM25 + SPECTER2（全チャンク版）
 │   ├── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-8B + SigLIP（図表画像を直接embedding、ablation用）
-│   └── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) + Qwen3-Embedding-0.6B(本文のみ)。
-│         各モデルを設計どおりの粒度で使う3索引構成（デフォルト、構築済み）
+│   ├── abstract_specter2_body_qwen3.yaml : BM25 + SPECTER2(title_abstractのみ) + Qwen3-Embedding-0.6B(本文のみ)
+│   ├── bm25_paper_rank_seed_expansion_qwen3_reranker.yaml : 上の構成から候補補充を外した比較基準
+│   └── seed_expansion_structured_filter.yaml : dual BM25 + seed expansion + 候補補充4レーン
+│         + Qwen3-Reranker-4B（デフォルト、構築済み）
 └── agent_style/
     └── reading.yaml      : 分解→読解→不足分の再検索を繰り返す唯一の本命。evidence も埋める（デフォルト）
 ```
@@ -110,7 +146,57 @@ configs/
 選定をそのまま出す（`max_papers: 10` で頭打ち）。本番入力に `task_family` が無く、
 推定しても正解率0.67程度で当てにならないため、本数決定の経路から task_family を外した。
 
+### 2.1 提出論文の絞り込み（Paper Selector）
+
+**Recall@k は公式の採点指標ではない。** 公式は提出した paper_id の**集合**と gold
+集合を問題ごとに突き合わせ、precision / recall / F1 を出してマクロ平均する
+（`scripts/evaluate.py` の `paper_f1_macro`）。順位も「20位以内か」も見ない。
+gold 1本の問題に20本出すと F1 は 0.095 で頭打ちになる。
+
+そのため候補生成と提出は目的が違う。
+
+| 段階 | 目的 | 指標 |
+|---|---|---|
+| 候補生成 Top50 | gold を漏らさない | Recall@50 / All-Gold@50 |
+| 読解 Top20 | 読解予算 | Recall@20 |
+| **提出集合** | **gold 集合と一致させる** | **paper_f1_macro** |
+
+`src/littraceqa/di_pipeline/select/` が提出集合を決める。
+`CardinalityPaperSelector` は**質問文が明示している本数**で順位を切る
+（"For the two ICCV 2025 papers" → 2本、"the X paper and the Y paper" → 2本、
+明示が無ければ1本）。`configs/agent_style` の `paper_cutoff: cardinality` で有効になる。
+
+**`answer_types` で本数を判定してはいけない。** validation 55問では
+`freeform` を含む＝single、`multiple_choice` 単独＝multi がほぼ完全に成立するが、
+**実際の test / test_extra には `freeform` が1問も無い**。validation に当てた規則は
+転移しない。質問文の明示表現だけを使うのはこのため。
+
+validation 55問（公式 gold 146本）での実測:
+
+| 提出方法 | P | R | **F1** |
+|---|---|---|---|
+| 固定 top20 | 0.0991 | 0.8318 | 0.1686 |
+| 固定 top10 | 0.1836 | 0.7939 | 0.2750 |
+| 固定 top1 | 0.9273 | 0.5444 | 0.6200 |
+| **CardinalityPaperSelector** | 0.8758 | 0.6081 | **0.6437** |
+| 上限（top50から完璧に選ぶ） | 1.0000 | 0.9091 | 0.9406 |
+
+`uv run python scripts/eval_paper_selection.py --retrieval {検索出力}.json
+--gold data/validation.jsonl` で GPU も LLM も使わず即座に測り直せる。
+
+**残りの差 0.64 → 0.94 は本数ではなく「どの論文か」で、読解が要る。** single(26問)は
+top1 で F1 0.8846 とほぼ上限だが、multi(29問)は順位ベースだと 0.42〜0.45 で頭打ち
+（precision と recall がちょうど相殺する）。method alias graph はクラスタを繋いで
+おらず、SPECTER2 近傍でも +0.03 しか出ない。
+
 ### 3.1 評価の作法
+
+**gold paper の評価は公式の `data/validation.jsonl`（146本）を使う。**
+`validation_answer_bearing_gold_draft.jsonl`（87本）は回答に必要な論文だけを
+残した監査結果で、公式採点の対象ではない。公式 gold は「4本の関連論文クラスタを
+選び、それについて複数問を作る」方式で付いており、質問が TCM 1本しか名指しして
+いなくても gold はクラスタ4本全部になる（q_031〜q_042 の12問が同一の4本を共有）。
+answer-bearing gold で R@50 = 1.0000 でも、公式 gold では 0.9091 しかない。
 
 **評価は `--production-input` を付けて回す。** `data/validation_inputs.jsonl` は55件
 すべてに `task_family` が入っているが、本番入力には無い（`query_id` / `question` /
