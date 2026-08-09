@@ -1,0 +1,9 @@
+# F1-oriented selection for a paper_bm25 index. Prefer retrieved papers that
+# explicitly claim the methods named in the question.
+name: owner_aware
+params:
+  default_count: 1
+  open_set_count: 1
+  stated_count_margin: 0
+  max_papers: 10
+  require_evidence: false

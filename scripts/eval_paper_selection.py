@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-"""Score submitted paper sets against the official gold, without running the agent.
+"""Score paper-selection styles on a completed retrieval run.
 
-``scripts/eval_retrieval.py`` reports Recall@k, which measures whether the gold
-papers reached the reading agent. It does not measure the submitted score: the
-official metric compares the submitted set with the gold set and macro-averages
-F1, so the number of papers submitted dominates it.
-
-This script takes a retrieval output, applies each ``configs/select_style``
-configuration to the ranked candidates, and reports paper precision/recall/F1
-macro. Because it reuses a finished retrieval run, a configuration can be
-scored in a second with no GPU and no LLM.
-
-The evidence check cannot run here -- it needs the reading agent -- so a
-configuration with ``require_evidence`` is scored on its cardinality rule
-alone. Its real precision will be at least this high and its real recall at
-most this high.
+The script reports the official macro paper precision, recall, and F1 without
+running a GPU model or reading agent. Evidence-based filtering is inactive
+because a retrieval-only result contains no evidence decisions.
 
 Example:
     uv run python scripts/eval_paper_selection.py \\
@@ -25,7 +14,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -34,6 +22,11 @@ import yaml
 from littraceqa.di_pipeline.evaluation.submission_scoring import (
     load_gold_paper_sets,
     score_selection,
+)
+from littraceqa.di_pipeline.evaluation.selection_input import (
+    load_queries,
+    load_rankings as load_rankings,
+    load_retrieval_run,
 )
 from littraceqa.di_pipeline.select import build_paper_selector
 from littraceqa.di_pipeline.select.cardinality import (
@@ -44,30 +37,13 @@ from littraceqa.di_pipeline.select.cardinality import (
 SELECT_STYLE_DIR = Path("configs/select_style")
 
 
-def load_rankings(path: Path) -> dict[str, list[str]]:
-    """Read ``query_id -> ranked paper ids`` from an eval_retrieval output."""
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    queries = payload.get("queries") or []
-    if not queries:
-        raise ValueError(f"{path} contains no queries")
-    return {
-        str(entry["query_id"]): list(entry.get("ranked_papers") or [])
-        for entry in queries
-    }
-
-
 def load_questions(path: Path) -> dict[str, str]:
     """Read ``query_id -> question`` from a gold or input JSONL file."""
 
-    questions: dict[str, str] = {}
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                record = json.loads(line)
-                questions[str(record["query_id"])] = str(record.get("question", ""))
-    return questions
+    return {
+        str(record["query_id"]): str(record.get("question", ""))
+        for record in load_queries(path)
+    }
 
 
 def report(
@@ -110,12 +86,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=SELECT_STYLE_DIR,
         help="Directory of select_style YAML files to score.",
     )
+    parser.add_argument(
+        "--method-owner-index",
+        type=Path,
+        default=None,
+        help=(
+            "Override method_alias_graph.json. By default it is read from "
+            "the retrieval checkpoint."
+        ),
+    )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    rankings = load_rankings(args.retrieval)
+    retrieval = load_retrieval_run(args.retrieval)
+    rankings = retrieval.rankings
+    method_owner_index = (
+        args.method_owner_index or retrieval.method_owner_index_path
+    )
     gold = load_gold_paper_sets(args.gold)
     questions = load_questions(args.questions or args.gold)
 
@@ -132,8 +121,15 @@ def main() -> None:
 
     print()
     for config_path in sorted(args.select_style_dir.glob("*.yaml")):
+        spec = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if spec.get("name") == "owner_aware" and method_owner_index is None:
+            print(f"{config_path.stem:34s} skipped (no method-owner index)")
+            continue
         selector = build_paper_selector(
-            yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            spec,
+            method_owner_index_path=(
+                str(method_owner_index) if method_owner_index is not None else None
+            ),
         )
         report(
             config_path.stem,

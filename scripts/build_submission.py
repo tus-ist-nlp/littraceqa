@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
-"""Write a submission JSONL from a finished retrieval run and a select_style.
+"""Write a paper-only submission from a completed retrieval run.
 
-Only the paper set needs the retrieval pipeline. ``evidence`` and ``answer``
-come from the reading agent, which needs an LLM; this script leaves them empty
-so the gold-paper part of a submission can be produced without one.
-
-Empty answers cost nothing on the paper metrics. ``scripts/evaluate.py`` scores
-papers from ``gold_papers`` alone, and evidence and answers are accumulated
-into separate macro averages. What does cost is a missing record: the scoring
-loop walks the gold file, so a query with no prediction scores zero on papers
-as well. Every query in the input therefore gets a record.
-
-The answer skeleton mirrors ``answer_types`` so the file has the same shape as
-``data/sample_submission.jsonl`` for each question.
+Every input query receives a record. Evidence and answers stay empty so the
+paper-selection stage can be run without an LLM.
 
 Example:
     uv run python scripts/build_submission.py \\
       --retrieval test_retrieval_4b.json \\
       --queries data/test.jsonl \\
-      --select configs/select_style/f1_balanced.yaml \\
-      --output submissions/test_f1_balanced.jsonl
+      --select configs/select_style/f1_method_owner.yaml \\
+      --output submissions/test_f1_method_owner.jsonl
 """
 
 from __future__ import annotations
@@ -33,6 +23,11 @@ from typing import Any
 import yaml
 
 from littraceqa.di_pipeline.evaluation.output import validate_output_path
+from littraceqa.di_pipeline.evaluation.selection_input import (
+    load_queries,
+    load_rankings as load_rankings,
+    load_retrieval_run,
+)
 from littraceqa.di_pipeline.select import build_paper_selector
 
 _ANSWER_SKELETONS: dict[str, dict[str, Any]] = {
@@ -40,33 +35,6 @@ _ANSWER_SKELETONS: dict[str, dict[str, Any]] = {
     "multiple_choice": {"gold": ""},
     "table": {"rows": []},
 }
-
-
-def load_rankings(path: Path) -> dict[str, list[str]]:
-    """Read ``query_id -> ranked paper ids`` from an eval_retrieval output."""
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    queries = payload.get("queries") or []
-    if not queries:
-        raise ValueError(f"{path} contains no queries")
-    return {
-        str(entry["query_id"]): list(entry.get("ranked_papers") or [])
-        for entry in queries
-    }
-
-
-def load_queries(path: Path) -> list[dict[str, Any]]:
-    """Read the input questions in file order."""
-
-    records: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    if not records:
-        raise ValueError(f"{path} contains no queries")
-    return records
 
 
 def empty_answer(answer_types: Any) -> dict[str, Any]:
@@ -92,6 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--method-owner-index",
+        type=Path,
+        default=None,
+        help=(
+            "Override method_alias_graph.json. By default it is read from "
+            "the retrieval checkpoint."
+        ),
+    )
+    parser.add_argument(
         "--read-only-root",
         type=Path,
         default=Path("/data2/iseakira"),
@@ -108,10 +85,17 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    rankings = load_rankings(args.retrieval)
+    retrieval = load_retrieval_run(args.retrieval)
+    rankings = retrieval.rankings
     queries = load_queries(args.queries)
+    method_owner_index = (
+        args.method_owner_index or retrieval.method_owner_index_path
+    )
     selector = build_paper_selector(
-        yaml.safe_load(args.select.read_text(encoding="utf-8"))
+        yaml.safe_load(args.select.read_text(encoding="utf-8")),
+        method_owner_index_path=(
+            str(method_owner_index) if method_owner_index is not None else None
+        ),
     )
 
     missing = [

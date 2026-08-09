@@ -18,7 +18,21 @@ from littraceqa.di_pipeline.select.cardinality import (
     is_open_ended_enumeration,
 )
 from littraceqa.di_pipeline.select import build_paper_selector
+from littraceqa.di_pipeline.select.owner_aware import (
+    MethodOwnerIndex,
+    OwnerAwarePaperSelector,
+    explicitly_names_paper,
+)
 from littraceqa.di_pipeline.select.selector import CardinalityPaperSelector
+
+
+def _method_owner_index(tmp_path, owners=None):
+    path = tmp_path / "method_alias_graph.json"
+    path.write_text(
+        json.dumps({"schema_version": 3, "owners": owners or {}}),
+        encoding="utf-8",
+    )
+    return path
 
 
 @pytest.mark.parametrize(
@@ -264,20 +278,164 @@ def test_rejects_non_boolean_require_evidence():
         CardinalityPaperSelector(require_evidence="yes")
 
 
+def test_method_owner_matching_prefers_exact_spelling_and_requires_candidates():
+    index = MethodOwnerIndex(
+        {
+            "MoST": "paper-most",
+            "MosT": "paper-other",
+            "AD-GS": "paper-adgs",
+        }
+    )
+
+    assert index.owner_matches(
+        "Compare MoST with ad-gs.",
+        {"paper-most", "paper-other", "paper-adgs"},
+    ) == (("MoST", "paper-most"), ("ad-gs", "paper-adgs"))
+    assert index.owner_matches("Compare MOST.", {"paper-most", "paper-other"}) == ()
+    assert index.owner_matches("Compare AD-GS.", {"paper-most"}) == ()
+
+
+def test_owner_aware_selector_replaces_top_one_only_for_an_explicit_paper(tmp_path):
+    selector = OwnerAwarePaperSelector(
+        method_owner_index_path=_method_owner_index(
+            tmp_path, {"EasySpec": "owner"}
+        )
+    )
+
+    explicit = selector.select(
+        "What is reported in the EasySpec paper?", ["rank-one", "owner"]
+    )
+    implicit = selector.select(
+        "How does EasySpec improve accuracy?", ["rank-one", "owner"]
+    )
+
+    assert explicit.paper_ids == ("owner",)
+    assert implicit.paper_ids == ("rank-one",)
+
+
+def test_owner_index_can_be_built_after_the_selector(tmp_path):
+    path = tmp_path / "method_alias_graph.json"
+    selector = OwnerAwarePaperSelector(method_owner_index_path=path)
+    path.write_text(
+        json.dumps({"schema_version": 3, "owners": {"EasySpec": "owner"}}),
+        encoding="utf-8",
+    )
+
+    selection = selector.select(
+        "What is reported in the EasySpec paper?", ["wrong", "owner"]
+    )
+
+    assert selection.paper_ids == ("owner",)
+
+
+def test_owner_aware_selector_fills_multi_paper_slots_and_protects_top_one(
+    tmp_path,
+):
+    selector = OwnerAwarePaperSelector(
+        method_owner_index_path=_method_owner_index(
+            tmp_path,
+            {"EasySpec": "easy", "AgentNet": "agent"},
+        )
+    )
+
+    selection = selector.select(
+        "For the EasySpec paper and the AgentNet paper, compare accuracy.",
+        ["easy", "unrelated", "agent"],
+    )
+
+    assert selection.paper_ids == ("easy", "agent")
+    assert selection.expected_count == 2
+
+
+def test_distinct_method_owners_raise_the_minimum_paper_count(tmp_path):
+    selector = OwnerAwarePaperSelector(
+        method_owner_index_path=_method_owner_index(
+            tmp_path,
+            {"DiTFastAttnV2": "first", "DLFR-Gen": "second"},
+        )
+    )
+
+    selection = selector.select(
+        "These efficiency papers report DiTFastAttnV2 results alongside "
+        "DLFR-Gen results.",
+        ["first", "second", "other"],
+    )
+
+    assert selection.paper_ids == ("first", "second")
+    assert selection.expected_count == 2
+    assert selection.reason == "default+method_owner"
+
+
+def test_owner_count_does_not_expand_a_singular_paper_question(tmp_path):
+    selector = OwnerAwarePaperSelector(
+        method_owner_index_path=_method_owner_index(
+            tmp_path,
+            {"EasySpec": "easy", "AgentNet": "agent"},
+        )
+    )
+
+    selection = selector.select(
+        "In the EasySpec paper, how does it compare with AgentNet?",
+        ["easy", "agent", "other"],
+    )
+
+    assert selection.paper_ids == ("easy",)
+    assert selection.expected_count == 1
+
+
+def test_a_single_paper_reference_does_not_fill_unconfirmed_slots(tmp_path):
+    selector = OwnerAwarePaperSelector(
+        method_owner_index_path=_method_owner_index(
+            tmp_path, {"Dobi-SVD": "dobi"}
+        )
+    )
+
+    selection = selector.select(
+        "In the Dobi-SVD paper, how many parameters does Dobi-SVD use for "
+        "Llama-7B, and how many parameters does LLM-Pruner require?",
+        ["dobi", "unrelated"],
+    )
+
+    assert selection.paper_ids == ("dobi",)
+    assert selection.expected_count == 1
+    assert selection.reason.endswith("+single_paper_guard")
+
+
+def test_explicit_paper_phrase_does_not_cross_another_method_name():
+    question = "Compare EasySpec with the AgentNet paper."
+
+    assert not explicitly_names_paper(question, "EasySpec")
+    assert explicitly_names_paper(question, "AgentNet")
+
+
 # --- the shipped select_style configurations -------------------------------
 
 
 SELECT_STYLES = sorted(Path("configs/select_style").glob("*.yaml"))
 
 
-def test_every_shipped_select_style_builds():
+def test_every_shipped_select_style_builds(tmp_path):
     assert [path.stem for path in SELECT_STYLES] == [
         "f1_balanced",
+        "f1_method_owner",
         "high_precision",
         "high_recall",
     ]
+    owner_index = _method_owner_index(tmp_path)
     for path in SELECT_STYLES:
-        assert build_paper_selector(yaml.safe_load(path.read_text())) is not None
+        assert (
+            build_paper_selector(
+                yaml.safe_load(path.read_text()),
+                method_owner_index_path=str(owner_index),
+            )
+            is not None
+        )
+
+
+def test_cardinality_f1_baseline_does_not_require_a_method_index():
+    spec = yaml.safe_load(Path("configs/select_style/f1_balanced.yaml").read_text())
+
+    assert build_paper_selector(spec) is not None
 
 
 @pytest.mark.parametrize(
@@ -285,12 +443,16 @@ def test_every_shipped_select_style_builds():
     [
         ("high_precision", 1, 1, 2),
         ("f1_balanced", 3, 1, 2),
+        ("f1_method_owner", 1, 1, 2),
         ("high_recall", 5, 2, 3),
     ],
 )
-def test_shipped_styles_bracket_the_tradeoff(style, open_set, default, stated_two):
+def test_shipped_styles_bracket_the_tradeoff(
+    tmp_path, style, open_set, default, stated_two
+):
     selector = build_paper_selector(
-        yaml.safe_load(Path(f"configs/select_style/{style}.yaml").read_text())
+        yaml.safe_load(Path(f"configs/select_style/{style}.yaml").read_text()),
+        method_owner_index_path=str(_method_owner_index(tmp_path)),
     )
 
     assert selector.expected_count("Which CVPR 2025 papers cite UniAD?")[0] == open_set

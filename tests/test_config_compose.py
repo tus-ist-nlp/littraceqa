@@ -293,7 +293,9 @@ def test_select_style_is_folded_into_the_agent_params():
     cfg = compose_config(
         paths=_paths(),
         process=load_config("configs/process_style/mineru.yaml"),
-        search=load_config("configs/search_style/seed_expansion_structured_filter.yaml"),
+        search=load_config(
+            "configs/search_style/seed_expansion_structured_filter.yaml"
+        ),
         agent=_agent(),
         select={"name": "cardinality", "params": {"open_set_count": 3}},
     )
@@ -304,12 +306,57 @@ def test_select_style_is_folded_into_the_agent_params():
     }
 
 
+def test_owner_aware_selector_uses_the_paper_index_sidecar():
+    cfg = compose_config(
+        paths=_paths(),
+        process=load_config("configs/process_style/mineru.yaml"),
+        search=load_config(
+            "configs/search_style/seed_expansion_structured_filter.yaml"
+        ),
+        agent=_agent(),
+        select={"name": "owner_aware", "params": {"open_set_count": 3}},
+    )
+
+    params = cfg["agent"]["params"]["paper_selector"]["params"]
+    assert params["method_owner_index_path"] == (
+        "/data/index/mineru/paper_bm25/method_alias_graph.json"
+    )
+    assert params["open_set_count"] == 3
+
+
+def test_owner_aware_selector_requires_one_paper_index():
+    with pytest.raises(ValueError, match="one paper_bm25 index"):
+        compose_config(
+            paths=_paths(),
+            process={"name": "mineru", "params": {}},
+            search=_search(),
+            agent=_agent(),
+            select={"name": "owner_aware", "params": {}},
+        )
+
+
+def test_cardinality_f1_style_remains_compatible_without_paper_bm25():
+    cfg = compose_config(
+        paths=_paths(),
+        process={"name": "mineru", "params": {}},
+        search=load_config(
+            "configs/search_style/abstract_specter2_body_qwen3.yaml"
+        ),
+        agent=_agent(),
+        select=load_config("configs/select_style/f1_balanced.yaml"),
+    )
+
+    assert cfg["agent"]["params"]["paper_selector"]["name"] == "cardinality"
+
+
 def test_omitting_select_style_leaves_the_agent_untouched():
     agent = _agent()
     cfg = compose_config(
         paths=_paths(),
         process=load_config("configs/process_style/mineru.yaml"),
-        search=load_config("configs/search_style/seed_expansion_structured_filter.yaml"),
+        search=load_config(
+            "configs/search_style/seed_expansion_structured_filter.yaml"
+        ),
         agent=agent,
     )
 

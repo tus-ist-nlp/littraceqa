@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from littraceqa.di_pipeline import registry
+from littraceqa.di_pipeline.index.method_sidecar import METHOD_GRAPH_FILENAME
 from littraceqa.di_pipeline.retrieve.base import Retriever
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
 
@@ -294,9 +295,26 @@ def compose_config(
         if not isinstance(select, dict) or not select.get("name"):
             raise ValueError("select_style must be a mapping with a name")
         agent_params = dict(composed_agent.get("params", {}))
+        selector_params = dict(select.get("params", {}))
+        if (
+            select["name"] == "owner_aware"
+            and "method_owner_index_path" not in selector_params
+        ):
+            paper_indexes = [
+                item["params"]["index_dir"]
+                for item in indexers
+                if item["name"] == "paper_bm25"
+            ]
+            if len(paper_indexes) != 1:
+                raise ValueError(
+                    "owner_aware select_style requires one paper_bm25 index"
+                )
+            selector_params["method_owner_index_path"] = str(
+                Path(paper_indexes[0]) / METHOD_GRAPH_FILENAME
+            )
         agent_params["paper_selector"] = {
             "name": select["name"],
-            "params": dict(select.get("params", {})),
+            "params": selector_params,
         }
         composed_agent["params"] = agent_params
 

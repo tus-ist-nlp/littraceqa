@@ -1,20 +1,7 @@
-"""Read the number of papers a question asks about out of its wording.
+"""Read an explicitly stated paper count from a question.
 
-The submitted paper set is scored by F1 against the gold set, so the count
-matters as much as the ranking: handing in ten papers for a one-paper question
-caps F1 at 0.18 however good the retrieval was.
-
-Only explicit wording is trusted. A question that says "the two ICCV 2025
-papers" or names two systems joined by "and" states its own cardinality; a
-question that names one system states one. Everything else falls back to the
-default, because guessing a larger set costs precision on the many one-paper
-questions that make up the bulk of the benchmark.
-
-Deliberately no dependence on ``answer_types``: on the 55 validation questions
-that field separates one-paper from multi-paper questions almost perfectly, but
-the distribution does not survive contact with the real test sets, which
-contain no ``freeform`` questions at all. A rule fitted on it would not
-transfer.
+The rules use question wording only. They do not depend on validation-only
+fields or infer a larger set when the wording is ambiguous.
 """
 
 from __future__ import annotations

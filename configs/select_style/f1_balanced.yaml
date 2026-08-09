@@ -1,13 +1,5 @@
-# Run A: the stated count, plus a bounded answer for open-set enumerations.
-#
-# Identical to high_precision on every question that states its size, which is
-# most of them: on the real test sets the wording states a count for 43 of 71
-# questions and 3,446 of 4,901. The two differ only where the question asks
-# "which papers ..." and names no size. Three is the smallest set that can
-# carry a multi-paper answer without collapsing precision on a one-paper gold.
-#
-# Evidence is not required, so a paper the agent ranked highly but could not
-# quote survives. This is the intended default of the three.
+# Cardinality-only F1 baseline. Use the stated count and a small fallback for
+# open-ended paper enumerations.
 name: cardinality
 params:
   default_count: 1

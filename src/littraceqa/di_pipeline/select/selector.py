@@ -1,21 +1,4 @@
-"""Choose the paper set to submit from a relevance-ordered candidate list.
-
-The official score compares the submitted set with the gold set per question
-and macro-averages F1, so the size of the submission decides most of the score.
-On the 55 validation questions, submitting the top 20 papers scores F1 0.169
-and submitting the top 1 scores 0.620, from the same ranking.
-
-The selector therefore answers "how many", not "which": it takes the count the
-question states and cuts the ranking there. Reordering is left to retrieval and
-to the reading agent, which are the stages that can actually read the papers.
-
-Its parameters are deliberately not fitted on validation. The multi-paper gold
-sets there are cluster annotations -- twelve questions share one four-paper set,
-and a question naming only TCM still has the other three papers as gold -- so a
-threshold tuned to reproduce them would reward submitting papers the question
-never refers to. The shipped configurations instead bracket the
-precision/recall trade-off so the held-out evaluator can decide between them.
-"""
+"""Choose a small submitted paper set from ranked retrieval candidates."""
 
 from __future__ import annotations
 
@@ -39,26 +22,59 @@ class PaperSelection:
     dropped_without_evidence: tuple[str, ...] = ()
 
 
+def ordered_paper_ids(candidates: Iterable[str]) -> list[str]:
+    """Keep valid paper ids in first-seen order."""
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for paper_id in candidates:
+        if not isinstance(paper_id, str) or not paper_id or paper_id in seen:
+            continue
+        seen.add(paper_id)
+        ordered.append(paper_id)
+    return ordered
+
+
+def select_papers(
+    candidates: Iterable[str],
+    *,
+    count: int,
+    reason: str,
+    require_evidence: bool = False,
+    evidence_paper_ids: Collection[str] | None = None,
+) -> PaperSelection:
+    """Apply optional evidence filtering and cut an ordered candidate list."""
+
+    ordered = ordered_paper_ids(candidates)
+    dropped: tuple[str, ...] = ()
+    if require_evidence and evidence_paper_ids is not None:
+        supported = [
+            paper_id for paper_id in ordered if paper_id in evidence_paper_ids
+        ]
+        if supported:
+            dropped = tuple(
+                paper_id
+                for paper_id in ordered[:count]
+                if paper_id not in evidence_paper_ids
+            )
+            ordered = supported
+            reason = f"{reason}+evidence"
+
+    return PaperSelection(
+        paper_ids=tuple(ordered[:count]),
+        expected_count=count,
+        reason=reason,
+        dropped_without_evidence=dropped,
+    )
+
+
 class CardinalityPaperSelector:
     """Cut a ranked candidate list at the count the question states.
 
-    ``default_count`` applies when the wording states nothing, which is the
-    common case. One is the safest default: on validation the top-ranked paper
-    is correct for 92.7% of questions, so a larger default trades that
-    precision away on every unmarked question.
-
-    ``open_set_count`` applies to "which papers ..." questions, whose answer
-    set has no stated size.
-
-    ``stated_count_margin`` widens a count the question does state. It exists
-    for the recall-oriented configuration; at zero the stated count is taken
-    literally.
-
-    ``require_evidence`` drops candidates the reading agent could not find
-    supporting evidence for. It only takes effect when ``select`` is given an
-    ``evidence_paper_ids`` argument, so a retrieval-only caller is unaffected.
-    At least one paper is always submitted: an empty submission scores zero,
-    which is never better than submitting the top-ranked candidate.
+    ``default_count`` applies when wording states nothing, ``open_set_count``
+    handles open-ended enumerations, and ``stated_count_margin`` widens an
+    explicit count. ``require_evidence`` is inactive when no evidence set is
+    supplied.
     """
 
     def __init__(
@@ -115,35 +131,11 @@ class CardinalityPaperSelector:
         evidence_paper_ids: Collection[str] | None = None,
     ) -> PaperSelection:
         """Take the leading papers of ``candidates`` up to the expected count."""
-
-        ordered: list[str] = []
-        seen: set[str] = set()
-        for paper_id in candidates:
-            if not isinstance(paper_id, str) or not paper_id or paper_id in seen:
-                continue
-            seen.add(paper_id)
-            ordered.append(paper_id)
-
         count, reason = self.expected_count(question)
-        dropped: tuple[str, ...] = ()
-        if self.require_evidence and evidence_paper_ids is not None:
-            supported = [
-                paper_id for paper_id in ordered if paper_id in evidence_paper_ids
-            ]
-            # Falling back to the raw ranking beats submitting nothing, which
-            # scores zero on both precision and recall.
-            if supported:
-                dropped = tuple(
-                    paper_id
-                    for paper_id in ordered[:count]
-                    if paper_id not in evidence_paper_ids
-                )
-                ordered = supported
-                reason = f"{reason}+evidence"
-
-        return PaperSelection(
-            paper_ids=tuple(ordered[:count]),
-            expected_count=count,
+        return select_papers(
+            candidates,
+            count=count,
             reason=reason,
-            dropped_without_evidence=dropped,
+            require_evidence=self.require_evidence,
+            evidence_paper_ids=evidence_paper_ids,
         )

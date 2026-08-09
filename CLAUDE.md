@@ -65,7 +65,7 @@ uv run python scripts/run_search.py \
   --process configs/process_style/mineru.yaml \
   --search configs/search_style/seed_expansion_structured_filter.yaml \
   --agent configs/agent_style/reading.yaml \
-  --select configs/select_style/f1_balanced.yaml \
+  --select configs/select_style/f1_method_owner.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions.jsonl \
   --build
@@ -138,7 +138,8 @@ configs/
 │   └── reading.yaml      : 分解→読解→不足分の再検索を繰り返す唯一の本命。evidence も埋める（デフォルト）
 └── select_style/
     ├── high_precision.yaml : 質問が明示した本数だけ出す。evidence 必須（Run B）
-    ├── f1_balanced.yaml    : 上に open-set列挙3本を足したもの（Run A、推奨）
+    ├── f1_balanced.yaml    : 本数だけを調整する互換用F1基準（Run A）
+    ├── f1_method_owner.yaml: 手法ownerを優先するF1候補（held-out未確認）
     └── high_recall.yaml    : 複数論文問題で多めに出す（Run C）
 ```
 
@@ -172,15 +173,22 @@ gold 1本の問題に20本出すと F1 は 0.095 で頭打ちになる。
 （"For the two ICCV 2025 papers" → 2本、"the X paper and the Y paper" → 2本、
 明示が無ければ1本）。`--select configs/select_style/{構成}.yaml` で選ぶ。
 
-**閾値は validation で当てていない。3構成でトレードオフを挟み、本番で決める。**
-validation の multi 29問の gold はクラスタ注釈なので、そこに合わせて閾値を
-最適化すると「質問が言及していない論文も出す」設定が選ばれてしまう。
+`f1_method_owner` は、質問中の手法名と `paper_bm25` が抽出した自己所有手法を対応させ、
+入力候補内（下記評価ではTop50）のowner論文を提出枠へ優先する。候補外の論文は
+追加しない。単一論文と判断した場合も、`EasySpec paper` のように質問が論文を
+明示したときだけtop1を
+置き換える。質問が複数のpapers/works/studiesを明示する場合に限り、distinct owner数を
+提出本数の下限として使う。複数論文ではtop1を保護し、確認済みownerを残り枠へ入れる。
+単数のpaper/work/studyを明示する質問では、後続する手法名の列挙を別論文と決めつけず、
+top1と確認済みowner以外の枠を埋めない。
+`paper_bm25`を持たない検索設定では`f1_balanced`を使う。
 
-| 構成 | 明示なし | 明示あり | open-set列挙 | evidence必須 |
-|---|---|---|---|---|
-| `high_precision` (Run B) | 1本 | そのまま | 1本 | あり |
-| `f1_balanced` (Run A、既定) | 1本 | そのまま | 3本 | なし |
-| `high_recall` (Run C) | 2本 | +1本 | 5本 | なし |
+| 構成 | 明示なし | 明示あり | open-set列挙 | owner優先 | evidence必須 |
+|---|---|---|---|---|---|
+| `high_precision` (Run B) | 1本 | そのまま | 1本 | なし | あり |
+| `f1_balanced` (Run A) | 1本 | そのまま | 3本 | なし | なし |
+| `f1_method_owner` (F1候補) | 1本 | 明示数（単数paper保護あり） | 1本 | あり | なし |
+| `high_recall` (Run C) | 2本 | +1本 | 5本 | なし | なし |
 
 `require_evidence` は reading agent が根拠を取れた論文だけに絞る。根拠が1本も
 取れなかったときは検索順位のまま出す（空提出は precision も recall も0になり、
@@ -200,13 +208,14 @@ validation 55問（公式 gold 146本）での実測:
 | 固定 top1 | 0.9273 | 0.5444 | 0.6200 |
 | `high_recall` | 0.5188 | 0.6732 | 0.5302 |
 | `f1_balanced` | 0.8455 | 0.6101 | 0.6410 |
-| **`high_precision`** | 0.8758 | 0.6081 | **0.6437** |
+| `high_precision` | 0.8758 | 0.6081 | 0.6437 |
+| **`f1_method_owner`** | **0.9379** | **0.6490** | **0.6879** |
 | 上限（top50から完璧に選ぶ） | 1.0000 | 0.9091 | 0.9406 |
 
-**この順位を鵜呑みにしない。** validation がクラスタ注釈である以上、precision 寄りが
-有利に出るのは当然で、test で同じとは限らない。`eval_paper_selection.py` は
-evidence 判定を動かせない（reading agent が要る）ので、`require_evidence` 付きの
-構成については recall の上限・precision の下限を出しているだけである。
+**この順位を鵜呑みにしない。** validation がクラスタ注釈である以上、test で同じとは
+限らない。`eval_paper_selection.py` は evidence 判定を動かせないため、
+`require_evidence` 付き構成は本数規則だけの値である。evidenceによる繰り上げは
+正解候補も不正解候補も落とし得るので、precision/recallの上下は保証されない。
 
 `uv run python scripts/eval_paper_selection.py --retrieval {検索出力}.json
 --gold data/validation.jsonl` で GPU も LLM も使わず即座に測り直せる。
@@ -221,18 +230,22 @@ evidence 判定を動かせない（reading agent が要る）ので、`require_
 ```
 uv run python scripts/build_submission.py \
   --retrieval test_retrieval_4b.json --queries data/test.jsonl \
-  --select configs/select_style/f1_balanced.yaml --output submission.jsonl
+  --select configs/select_style/f1_method_owner.yaml --output submission.jsonl
 ```
 
-**エージェント無しでは `high_precision` と `f1_balanced` はほぼ同じ出力になる。**
-前者の差別化要素 `require_evidence` は根拠情報が無いと何もせず、もう一つの違い
-`open_set_count` は test 71問で1問も発火しない（test_extra でも25問）。実際
-test では2つのファイルがバイト単位で一致する。LLM 無しで3構成を出す意味は薄い。
+`f1_method_owner` が使う `method_alias_graph.json` は、通常は検索結果JSONのcheckpointから
+自動で見つかる。古い検索結果や別ホストでは
+`--method-owner-index <paper_bm25索引>/method_alias_graph.json` を明示する。
+別コーパスのsidecarを流用してはいけない。corpus一致は軽量selector側では再計算しない。
 
-**残りの差 0.64 → 0.94 は本数ではなく「どの論文か」で、読解が要る。** single(26問)は
-top1 で F1 0.8846 とほぼ上限だが、multi(29問)は順位ベースだと 0.42〜0.45 で頭打ち
-（precision と recall がちょうど相殺する）。method alias graph はクラスタを繋いで
-おらず、SPECTER2 近傍でも +0.03 しか出ない。
+上のF1値は、完成済みTop50へselectorを直接適用したpaper-only評価である。
+Reading Agent内ではLLM verdictに残った論文だけがselector入力になるため、同じ改善を
+end-to-endで保証する値ではない。Agentを使う場合は別に評価する。
+
+予測test goldでは固定top1のF1 0.7864に対して0.8000だった。ただし、このgoldは
+候補リストを見ながら作られた管理対象外の推定値であり、独立・再配布可能なtest評価
+ではない。候補生成Top50外の論文は救えないため、残りはサブクエリ検索や本文を読む
+選択処理で別途検証する。
 
 ### 3.1 評価の作法
 
