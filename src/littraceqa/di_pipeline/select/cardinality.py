@@ -58,6 +58,21 @@ _SENTENCE_BREAK_RE = re.compile(r"\.\s+[A-Z]")
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*")
 
+_SECOND_MEASUREMENT_RE = re.compile(r",\s+and\s+what\b", re.IGNORECASE)
+_EXPERIMENT_SUBJECT_RE = re.compile(
+    r"^In\s+the\s+[^,;?]{0,80}\bexperiments?\s+of\s+"
+    r"(?P<subject>[^,;?]{1,60}),\s*"
+    r"(?:for\s+which|what|how|which|does|do|is|are)\b",
+    re.IGNORECASE,
+)
+_MEASUREMENT_SUBJECT_RE = re.compile(
+    r"^What\s+is\s+[^?;]{0,100}\b"
+    r"(?:performance|score|value|accuracy|rate|result)\s+of\s+"
+    r"(?P<subject>[^,;?]{1,50}?)\s+"
+    r"(?:on|with|using|in|for|under|when|from|at)\b",
+    re.IGNORECASE,
+)
+
 
 def _normalize(question: object) -> str:
     if not isinstance(question, str):
@@ -109,6 +124,24 @@ def _enumerated_system_count(question: str) -> int:
     return best
 
 
+def _names_one_measurement_subject(question: str) -> bool:
+    """Recognize wording that anchors measurements to one named system."""
+
+    if _SECOND_MEASUREMENT_RE.search(question):
+        return False
+    for pattern in (_EXPERIMENT_SUBJECT_RE, _MEASUREMENT_SUBJECT_RE):
+        match = pattern.search(question)
+        if match is None:
+            continue
+        subject = match.group("subject")
+        if re.search(r"\band\b", subject, re.IGNORECASE):
+            continue
+        for token in _IDENTIFIER_RE.findall(subject):
+            if _looks_like_system_name(token):
+                return True
+    return False
+
+
 def expected_paper_count(question: object, default: int = 1) -> int:
     """Return how many papers the question says it is about.
 
@@ -144,6 +177,9 @@ def expected_paper_count(question: object, default: int = 1) -> int:
     paper_nouns = len(_PAPER_NOUN_RE.findall(text))
     if paper_nouns >= 2 and re.search(r"\band\b", text, re.IGNORECASE):
         return min(paper_nouns, MAX_EXPECTED_PAPERS)
+
+    if _names_one_measurement_subject(text):
+        return default
 
     enumerated = _enumerated_system_count(text)
     if enumerated >= 2:

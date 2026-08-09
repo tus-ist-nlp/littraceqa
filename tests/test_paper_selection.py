@@ -71,11 +71,33 @@ def test_reads_the_count_a_question_states(question, expected):
         "In the TCM paper, does the denoising FID at t=0.2 exceed 3.0?",
         "What optimizer does sCT use for training on CIFAR-10?",
         "In Table 3 of the IMM paper, what 2-step FID is reported?",
+        (
+            "In the real-world experiments of Fast-in-Slow, for which task "
+            "do pi0 and FiS-VLA achieve the same performance?"
+        ),
+        (
+            "What is the $AP^{kit}_{3D}$ performance of DetAny3D on Omni3D "
+            "with ground-truth prompts and Cube R-CNN 2D detections?"
+        ),
     ],
 )
-def test_a_number_belonging_to_a_figure_is_not_a_paper_count(question):
-    # "Figure 4 of the ... paper" names one paper, not four.
+def test_single_paper_or_system_wording_defaults_to_one(question):
+    # These questions identify one paper or system, not one paper per setting.
     assert expected_paper_count(question) == 1
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is the performance of TCM, sCT, and IMM?",
+        (
+            "In the experiments of TCM, sCT, and IMM, what score does each "
+            "method report?"
+        ),
+    ],
+)
+def test_single_subject_wording_does_not_hide_multiple_subjects(question):
+    assert expected_paper_count(question) == 3
 
 
 @pytest.mark.parametrize(
