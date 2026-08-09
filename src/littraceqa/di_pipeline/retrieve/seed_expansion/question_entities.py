@@ -23,6 +23,18 @@ _CANDIDATE_TOKEN_RE = re.compile(
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 
+def _generic_alias_key(alias: str) -> str:
+    return " ".join(alias.split()).casefold()
+
+
+_GENERIC_METHOD_ALIAS_KEYS = frozenset(
+    _generic_alias_key(alias) for alias in GENERIC_METHOD_ALIASES
+)
+_GENERIC_TITLE_ALIAS_KEYS = frozenset(
+    _generic_alias_key(alias) for alias in GENERIC_TITLE_ALIASES
+)
+
+
 def fold_alias(value: object) -> str:
     """Reduce an alias to the key used for matching, or '' when unusable.
 
@@ -67,8 +79,8 @@ def _word_is_identifier(word: str) -> bool:
 
 
 def is_generic_alias(alias: str) -> bool:
-    key = " ".join(alias.split()).casefold()
-    return key in GENERIC_METHOD_ALIASES or key in GENERIC_TITLE_ALIASES
+    key = _generic_alias_key(alias)
+    return key in _GENERIC_METHOD_ALIAS_KEYS or key in _GENERIC_TITLE_ALIAS_KEYS
 
 
 def _is_lowercased_identifier(token: str) -> bool:
