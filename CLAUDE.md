@@ -206,16 +206,32 @@ validation 55問（公式 gold 146本）での実測:
 | 固定 top20 | 0.0991 | 0.8318 | 0.1686 |
 | 固定 top10 | 0.1836 | 0.7939 | 0.2750 |
 | 固定 top1 | 0.9273 | 0.5444 | 0.6200 |
-| `high_recall` | 0.5188 | 0.6732 | 0.5302 |
-| `f1_balanced` | 0.8455 | 0.6101 | 0.6410 |
-| `high_precision` | 0.8758 | 0.6081 | 0.6437 |
-| **`f1_method_owner`** | **0.9379** | **0.6490** | **0.6879** |
+| `high_recall` | 0.5264 | 0.6732 | 0.5381 |
+| `f1_balanced` | 0.8667 | 0.6101 | 0.6561 |
+| `high_precision` | 0.8970 | 0.6081 | 0.6588 |
+| **`f1_method_owner`** | **0.9591** | **0.6490** | **0.7030** |
+| **`f1_method_owner` + Evidence Coverage** | **0.9909** | **0.6535** | **0.7212** |
 | 上限（top50から完璧に選ぶ） | 1.0000 | 0.9091 | 0.9406 |
 
+`f1_method_owner` の増分は、単一の実験主体を明示する2文型の過大選択を抑えた結果である。
+Evidence Coverage はその後段でMinerUのTableをTop20だけ確認し、次のどちらかが一意に
+成立した場合だけ既存選択を置き換える。
+
+- 質問中のpaper名、Table番号、2つ以上の式が同じTableに一致する
+- 非method系の行項目が別々の行に現れ、値列名も同じ1つのTable内に現れる
+
+validationで変わったのはq_033とq_052だけで、Answer-bearing / Evidence / Officialの
+F1はそれぞれ0.9273 / 0.8079 / 0.7212になった。test 71問とtest_extra 4,901問の
+選択は変わらず、独立goldでの改善は未確認。このためEvidence Coverageは既定ではなく
+paper-only提出時のopt-inである。MinerU欠損、表構造の不一致、候補が複数の場合は
+`f1_method_owner`へ戻る。
+
 **この順位を鵜呑みにしない。** validation がクラスタ注釈である以上、test で同じとは
-限らない。`eval_paper_selection.py` は evidence 判定を動かせないため、
-`require_evidence` 付き構成は本数規則だけの値である。evidenceによる繰り上げは
-正解候補も不正解候補も落とし得るので、precision/recallの上下は保証されない。
+限らない。`eval_paper_selection.py` はReading AgentのLLM evidence判定を動かさないため、
+`require_evidence` 付き構成は本数規則だけの値である。一方、
+`--evidence-coverage-mineru-dir`を指定した場合だけ、上記の表限定refinerを評価できる。
+どちらの処理も正解候補と不正解候補を落とし得るので、precision/recallの上下は
+実測で確認する。
 
 `uv run python scripts/eval_paper_selection.py --retrieval {検索出力}.json
 --gold data/validation.jsonl` で GPU も LLM も使わず即座に測り直せる。
@@ -233,6 +249,16 @@ uv run python scripts/build_submission.py \
   --select configs/select_style/f1_method_owner.yaml --output submission.jsonl
 ```
 
+同一サーバ上でEvidence Coverageも使う場合は、共有MinerUを読み取り専用で指定する。
+
+```bash
+uv run python scripts/build_submission.py \
+  --retrieval test_retrieval_4b.json --queries data/test.jsonl \
+  --select configs/select_style/f1_method_owner.yaml \
+  --evidence-coverage-mineru-dir /data2/iseakira/pdfs/mineru \
+  --output submission.jsonl
+```
+
 `f1_method_owner` が使う `method_alias_graph.json` は、通常は検索結果JSONのcheckpointから
 自動で見つかる。古い検索結果や別ホストでは
 `--method-owner-index <paper_bm25索引>/method_alias_graph.json` を明示する。
@@ -246,6 +272,38 @@ end-to-endで保証する値ではない。Agentを使う場合は別に評価�
 候補リストを見ながら作られた管理対象外の推定値であり、独立・再配布可能なtest評価
 ではない。候補生成Top50外の論文は救えないため、残りはサブクエリ検索や本文を読む
 選択処理で別途検証する。
+
+未取得goldを人手または外部モデルで確認するときは、候補一覧だけでなく失敗段階を含む
+レビューJSONを作る。answer-bearing版は検索改善の診断、official版は公式スコア差の確認に
+分けて使う。
+
+```bash
+uv run python scripts/report_paper_selection_errors.py \
+  --retrieval /path/to/post_lane_removal.json \
+  --gold data/validation_answer_bearing_gold_draft.jsonl \
+  --questions data/validation_inputs.jsonl \
+  --paper-metadata data/paper_metadata.jsonl \
+  --select configs/select_style/f1_method_owner.yaml \
+  --evidence-coverage-mineru-dir /data2/iseakira/pdfs/mineru \
+  --analysis-cutoff 20 \
+  --output ~/littraceqa_data/mineru_eval/analysis/answer_bearing_selection_errors.json
+```
+
+出力は未取得またはfalse positiveのあるqueryだけを含み、gold evidence、reference answer、
+最終/リランク前順位、Selectorの本数判断、Top候補のabstractとprovenanceを記録する。
+`--analysis-cutoff`は診断用の境界であり、Selectorへ渡す候補を切り詰めない。
+
+Evidence Coverage後のanswer-bearing監査では、誤り8問、未選択21本、false positive
+2本。未選択はすべてTop20内で、16本がq_020/q_022/q_023/q_025のopen/implicit
+enumeration、3本がq_042/q_043/q_045の明示的な複数手法比較、2本がq_029の
+paper-to-answer-slot割当だった。
+固定本数やscore gapはtest_extraで過大選択を起こしたため、open-setは候補ごとの条件・
+evidence検証を作るまでcount=1へフォールバックする。q_029はmethod ownerではなく、
+各回答値を実際に掲載する表・論文へのslot coverageが必要。
+
+`question_entities.py`のgeneric alias比較はcasefold済み集合を使う。旧実装は小文字keyを
+大文字集合と比較しており、ACL/LoRA/RAG等を除外できていなかった。修正後に影響する
+validation 17問を4Bで再検索し、Top50順位が全件同一であることを確認済み。
 
 ### 3.1 評価の作法
 
