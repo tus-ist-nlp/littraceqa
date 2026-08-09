@@ -2,8 +2,8 @@
 """Score paper-selection styles on a completed retrieval run.
 
 The script reports the official macro paper precision, recall, and F1 without
-running a GPU model or reading agent. Evidence-based filtering is inactive
-because a retrieval-only result contains no evidence decisions.
+running a GPU model or reading agent. Reading-agent evidence filtering remains
+inactive; an optional table-only refiner can inspect existing MinerU output.
 
 Example:
     uv run python scripts/eval_paper_selection.py \\
@@ -28,11 +28,14 @@ from littraceqa.di_pipeline.evaluation.selection_input import (
     load_rankings as load_rankings,
     load_retrieval_run,
 )
+from littraceqa.di_pipeline.contracts import Query
+from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
 from littraceqa.di_pipeline.select import build_paper_selector
 from littraceqa.di_pipeline.select.cardinality import (
     expected_paper_count,
     is_open_ended_enumeration,
 )
+from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
 SELECT_STYLE_DIR = Path("configs/select_style")
 
@@ -42,6 +45,15 @@ def load_questions(path: Path) -> dict[str, str]:
 
     return {
         str(record["query_id"]): str(record.get("question", ""))
+        for record in load_queries(path)
+    }
+
+
+def load_query_records(path: Path) -> dict[str, Query]:
+    """Read production query fields keyed by query id."""
+
+    return {
+        str(record["query_id"]): Query.from_dict(record)
         for record in load_queries(path)
     }
 
@@ -95,24 +107,53 @@ def build_parser() -> argparse.ArgumentParser:
             "the retrieval checkpoint."
         ),
     )
+    parser.add_argument(
+        "--evidence-coverage-mineru-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Also report each strategy after high-confidence MinerU table "
+            "coverage refinement."
+        ),
+    )
     return parser
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.evidence_coverage_mineru_dir is not None and args.questions is None:
+        parser.error("--questions is required with evidence coverage")
     retrieval = load_retrieval_run(args.retrieval)
     rankings = retrieval.rankings
     method_owner_index = (
         args.method_owner_index or retrieval.method_owner_index_path
     )
     gold = load_gold_paper_sets(args.gold)
-    questions = load_questions(args.questions or args.gold)
+    query_path = args.questions or args.gold
+    query_records = load_query_records(query_path)
+    questions = {query_id: query.question for query_id, query in query_records.items()}
+    table_refiner = None
+    if args.evidence_coverage_mineru_dir is not None:
+        if not args.evidence_coverage_mineru_dir.is_dir():
+            raise SystemExit(
+                "--evidence-coverage-mineru-dir must be an existing directory"
+            )
+        table_refiner = EvidenceCoverageRefiner(
+            MinerUPaperTableSource(args.evidence_coverage_mineru_dir)
+        )
 
     missing = [query_id for query_id in gold if query_id not in rankings]
     if missing:
         raise SystemExit(
             f"{len(missing)} gold queries are absent from {args.retrieval}, "
             f"first: {missing[0]}"
+        )
+    missing_questions = [query_id for query_id in gold if query_id not in query_records]
+    if missing_questions:
+        raise SystemExit(
+            f"{len(missing_questions)} gold queries are absent from {query_path}, "
+            f"first: {missing_questions[0]}"
         )
 
     print(f"{'strategy':34s} {'P':>8} {'R':>8} {'F1':>8} {'papers/q':>9}")
@@ -131,14 +172,24 @@ def main() -> None:
                 str(method_owner_index) if method_owner_index is not None else None
             ),
         )
+        selections = {
+            q: selector.select(questions.get(q, ""), rankings[q]) for q in gold
+        }
         report(
             config_path.stem,
             gold,
-            {
-                q: selector.select(questions.get(q, ""), rankings[q]).paper_ids
-                for q in gold
-            },
+            {q: selection.paper_ids for q, selection in selections.items()},
         )
+        if table_refiner is not None:
+            refined = {
+                q: table_refiner.refine(query_records[q], rankings[q], selection)
+                for q, selection in selections.items()
+            }
+            report(
+                f"{config_path.stem}+evidence_coverage",
+                gold,
+                {q: selection.paper_ids for q, selection in refined.items()},
+            )
 
     print()
     report(

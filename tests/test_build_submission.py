@@ -147,6 +147,7 @@ def _run(
     queries=None,
     ranked=None,
     owners=None,
+    extra_args=None,
 ):
     records = queries or [
         {
@@ -166,16 +167,23 @@ def _run(
     ]
     tmp_path.mkdir(parents=True, exist_ok=True)
     output = tmp_path / "submission.jsonl"
+    command = [
+        sys.executable,
+        "scripts/build_submission.py",
+        "--retrieval",
+        str(_retrieval(tmp_path, runs)),
+        "--queries",
+        str(_queries(tmp_path, records)),
+        "--select",
+        f"configs/select_style/{style}.yaml",
+        "--method-owner-index",
+        str(_method_owner_index(tmp_path, owners)),
+        "--output",
+        str(output),
+    ]
+    command.extend(extra_args or [])
     return subprocess.run(
-        [
-            sys.executable,
-            "scripts/build_submission.py",
-            "--retrieval", str(_retrieval(tmp_path, runs)),
-            "--queries", str(_queries(tmp_path, records)),
-            "--select", f"configs/select_style/{style}.yaml",
-            "--method-owner-index", str(_method_owner_index(tmp_path, owners)),
-            "--output", str(output),
-        ],
+        command,
         capture_output=True,
         text=True,
     ), output
@@ -221,6 +229,57 @@ def test_f1_style_prefers_an_explicit_method_owner(tmp_path):
     assert result.returncode == 0, result.stderr
     row = json.loads(output.read_text().splitlines()[0])
     assert row["gold_papers"] == [{"paper_id": "easy"}]
+
+
+def test_optional_evidence_coverage_uses_a_unique_mineru_table(tmp_path):
+    mineru = tmp_path / "mineru"
+    content_list = mineru / "right" / "auto" / "right_content_list.json"
+    content_list.parent.mkdir(parents=True)
+    content_list.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "table",
+                    "table_caption": ["Table 5: Kitchen distribution"],
+                    "table_body": (
+                        "<table><tr><td>Benchmark</td><td>Kitchen</td></tr>"
+                        "<tr><td>SUN RGB-D</td><td>6</td></tr>"
+                        "<tr><td>ARKitScenes</td><td>10.3</td></tr>"
+                        "<tr><td>Hypersim</td><td>0.9</td></tr>"
+                        "<tr><td>Objectron</td><td>32.4</td></tr>"
+                        "<tr><td>KITTI</td><td>-</td></tr>"
+                        "<tr><td>nuScenes</td><td>-</td></tr></table>"
+                    ),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result, output = _run(
+        tmp_path,
+        queries=[
+            {
+                "query_id": "q1",
+                "question": (
+                    "What percentage of instances belongs to the Kitchen category in "
+                    "SUN RGB-D, ARKitScenes, Hypersim, Objectron, KITTI, "
+                    "and nuScenes?"
+                ),
+                "answer_types": ["table"],
+                "table_schema": [
+                    {"name": "Benchmarks", "type": "string", "is_row_key": True},
+                    {"name": "Kitchen", "type": "string", "is_row_key": False},
+                ],
+            }
+        ],
+        ranked=[{"query_id": "q1", "ranked_papers": ["wrong", "right"]}],
+        extra_args=["--evidence-coverage-mineru-dir", str(mineru)],
+    )
+
+    assert result.returncode == 0, result.stderr
+    row = json.loads(output.read_text().splitlines()[0])
+    assert row["gold_papers"] == [{"paper_id": "right"}]
+    assert "evidence coverage changed 1 queries" in result.stdout
 
 
 def test_a_query_without_a_retrieval_result_is_an_error(tmp_path):

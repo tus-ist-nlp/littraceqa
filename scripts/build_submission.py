@@ -28,7 +28,10 @@ from littraceqa.di_pipeline.evaluation.selection_input import (
     load_rankings as load_rankings,
     load_retrieval_run,
 )
+from littraceqa.di_pipeline.contracts import Query
+from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
 from littraceqa.di_pipeline.select import build_paper_selector
+from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
 _ANSWER_SKELETONS: dict[str, dict[str, Any]] = {
     "freeform": {"text": ""},
@@ -69,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--evidence-coverage-mineru-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optionally refine paper selection with high-confidence MinerU "
+            "table evidence."
+        ),
+    )
+    parser.add_argument(
         "--read-only-root",
         type=Path,
         default=Path("/data2/iseakira"),
@@ -97,6 +109,15 @@ def main() -> None:
             str(method_owner_index) if method_owner_index is not None else None
         ),
     )
+    table_refiner = None
+    if args.evidence_coverage_mineru_dir is not None:
+        if not args.evidence_coverage_mineru_dir.is_dir():
+            parser.error(
+                "--evidence-coverage-mineru-dir must be an existing directory"
+            )
+        table_refiner = EvidenceCoverageRefiner(
+            MinerUPaperTableSource(args.evidence_coverage_mineru_dir)
+        )
 
     missing = [
         str(record["query_id"])
@@ -110,12 +131,19 @@ def main() -> None:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     paper_total = 0
+    refined_total = 0
     with output.open("w", encoding="utf-8") as handle:
         for record in queries:
             query_id = str(record["query_id"])
             selection = selector.select(
                 record.get("question", ""), rankings[query_id]
             )
+            if table_refiner is not None:
+                refined = table_refiner.refine(
+                    Query.from_dict(record), rankings[query_id], selection
+                )
+                refined_total += refined.paper_ids != selection.paper_ids
+                selection = refined
             paper_total += len(selection.paper_ids)
             handle.write(
                 json.dumps(
@@ -137,6 +165,8 @@ def main() -> None:
         f"{len(queries)} records written to {output} "
         f"({paper_total} papers, {paper_total / len(queries):.2f} per query)"
     )
+    if table_refiner is not None:
+        print(f"evidence coverage changed {refined_total} queries")
     print("evidence and answer are empty; those metrics will score zero")
 
 
