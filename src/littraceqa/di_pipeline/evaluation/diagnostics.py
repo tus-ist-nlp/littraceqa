@@ -21,6 +21,7 @@ _METHOD_RANKING_INT_FIELDS = (
     "method_dense_tail_baseline_rank",
     "method_dense_tail_rank",
     "method_dense_tail_best_neighbor_rank",
+    "structured_filter_year",
     "open_set_expansion_best_rank",
     "open_set_expansion_original_rank",
     "open_set_expansion_run_count",
@@ -50,9 +51,13 @@ _METHOD_RANKING_BOOL_FIELDS = (
     "open_set_expansion_selected",
 )
 _METHOD_RANKING_STR_FIELDS = (
+    "exact_method_alias",
     "final_rerank_status",
     "final_rerank_error_type",
     "open_set_expansion_selected_paper_id",
+    "structured_filter_chunk_type",
+    "structured_filter_matched_type",
+    "structured_filter_venue",
 )
 
 

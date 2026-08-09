@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from littraceqa.common import read_json, read_jsonl
+from littraceqa.common import compact_text, read_json, read_jsonl
 from littraceqa.di_pipeline.index.method_sidecar import METHOD_GRAPH_FILENAME
 
 
@@ -69,3 +70,46 @@ def load_queries(path: Path) -> list[dict[str, Any]]:
     if not records:
         raise ValueError(f"{path} contains no queries")
     return records
+
+
+def load_paper_metadata(
+    path: Path,
+    wanted_ids: set[str],
+    *,
+    abstract_chars: int,
+) -> dict[str, dict[str, Any]]:
+    """Read only requested records from a paper metadata JSONL file."""
+
+    remaining = set(wanted_ids)
+    if not remaining:
+        return {}
+    papers: dict[str, dict[str, Any]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
+            if not isinstance(record, dict):
+                raise ValueError(f"{path}:{line_number} must be a JSON object")
+            paper_id = record.get("paper_id")
+            if paper_id not in remaining:
+                continue
+            paper = {
+                "title": record.get("title"),
+                "authors": record.get("authors") or [],
+                "venue": record.get("venue"),
+                "year": record.get("year"),
+            }
+            if abstract_chars:
+                paper["abstract"] = compact_text(
+                    record.get("abstract"), max_chars=abstract_chars
+                )
+            papers[str(paper_id)] = paper
+            remaining.remove(paper_id)
+            if not remaining:
+                break
+    return papers

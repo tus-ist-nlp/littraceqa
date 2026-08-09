@@ -234,6 +234,11 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
             "open_set_expansion_slot_k": 20,
             "open_set_expansion_support": 2,
             "open_set_expansion_via_papers": ["seed-2", "seed-4"],
+            "exact_method_alias": "EasySpec",
+            "structured_filter_venue": "NeurIPS",
+            "structured_filter_year": 2025,
+            "structured_filter_chunk_type": "table",
+            "structured_filter_matched_type": "table",
         },
     )
 
@@ -260,6 +265,11 @@ def test_ranking_details_include_typed_final_rerank_provenance() -> None:
     assert detail["open_set_expansion_slot_k"] == 20
     assert detail["open_set_expansion_support"] == 2
     assert detail["open_set_expansion_via_papers"] == ["seed-2", "seed-4"]
+    assert detail["exact_method_alias"] == "EasySpec"
+    assert detail["structured_filter_venue"] == "NeurIPS"
+    assert detail["structured_filter_year"] == 2025
+    assert detail["structured_filter_chunk_type"] == "table"
+    assert detail["structured_filter_matched_type"] == "table"
     json.dumps(detail)
 
 
@@ -357,6 +367,11 @@ def test_ranking_details_fail_closed_for_invalid_provenance() -> None:
             "final_rerank_error_type": [],
             "open_set_expansion_via_papers": ("seed-one",),
             "open_set_expansion_selected_paper_id": "",
+            "exact_method_alias": [],
+            "structured_filter_venue": 1,
+            "structured_filter_year": True,
+            "structured_filter_chunk_type": [],
+            "structured_filter_matched_type": 1,
         },
     )
 
@@ -379,6 +394,11 @@ def test_ranking_details_fail_closed_for_invalid_provenance() -> None:
     assert detail["final_rerank_error_type"] is None
     assert detail["open_set_expansion_via_papers"] == []
     assert detail["open_set_expansion_selected_paper_id"] is None
+    assert detail["exact_method_alias"] is None
+    assert detail["structured_filter_venue"] is None
+    assert detail["structured_filter_year"] is None
+    assert detail["structured_filter_chunk_type"] is None
+    assert detail["structured_filter_matched_type"] is None
     json.dumps(detail)
 
 
