@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from littraceqa.common import read_json
+from littraceqa.di_pipeline.contracts import Query
 from littraceqa.di_pipeline.evaluation.output import (
     validate_output_path,
     write_output_atomic,
@@ -25,6 +26,9 @@ from littraceqa.di_pipeline.evaluation.selection_input import (
 )
 from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
 from littraceqa.di_pipeline.select import build_paper_selector
+from littraceqa.di_pipeline.select.citation_table_coverage import (
+    citation_table_candidate_ids,
+)
 from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
 _PRODUCTION_QUERY_FIELDS = ("question", "answer_types", "table_schema")
@@ -76,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--evidence-coverage-mineru-dir",
         type=Path,
         default=None,
-        help="optionally apply high-confidence MinerU table coverage",
+        help="optionally apply high-confidence MinerU evidence coverage",
     )
     parser.add_argument(
         "--read-only-root",
@@ -113,18 +117,6 @@ def main() -> None:
             str(method_owner_index) if method_owner_index is not None else None
         ),
     )
-    selection_refiner = None
-    if args.evidence_coverage_mineru_dir is not None:
-        if args.questions is None:
-            parser.error("--questions is required with evidence coverage")
-        if not args.evidence_coverage_mineru_dir.is_dir():
-            parser.error(
-                "--evidence-coverage-mineru-dir must be an existing directory"
-            )
-        selection_refiner = EvidenceCoverageRefiner(
-            MinerUPaperTableSource(args.evidence_coverage_mineru_dir)
-        )
-
     gold_records = load_queries(args.gold)
     if args.questions is not None:
         query_records = {
@@ -136,6 +128,43 @@ def main() -> None:
                 parser.error(f"query {record['query_id']} is missing from --questions")
             for field in _PRODUCTION_QUERY_FIELDS:
                 record[field] = query.get(field)
+    query_objects = {
+        str(record["query_id"]): Query.from_dict(record)
+        for record in gold_records
+    }
+
+    selection_refiner = None
+    selection_metadata: dict[str, dict] = {}
+    if args.evidence_coverage_mineru_dir is not None:
+        if args.questions is None:
+            parser.error("--questions is required with evidence coverage")
+        if not args.evidence_coverage_mineru_dir.is_dir():
+            parser.error(
+                "--evidence-coverage-mineru-dir must be an existing directory"
+            )
+        evidence_source = MinerUPaperTableSource(
+            args.evidence_coverage_mineru_dir
+        )
+        wanted_metadata = citation_table_candidate_ids(
+            query_objects,
+            retrieval_run.rankings,
+        )
+        selection_metadata = load_paper_metadata(
+            args.paper_metadata,
+            wanted_metadata,
+            abstract_chars=args.abstract_chars,
+        )
+        missing_metadata = wanted_metadata - selection_metadata.keys()
+        if missing_metadata:
+            parser.error(
+                f"paper metadata is missing {next(iter(sorted(missing_metadata)))}"
+            )
+        selection_refiner = EvidenceCoverageRefiner(
+            evidence_source,
+            evidence_source=evidence_source,
+            paper_metadata=selection_metadata,
+        )
+
     cases, wanted_ids = collect_review_cases(
         gold_records,
         index_retrieval_entries(retrieval_payload),
@@ -143,10 +172,13 @@ def main() -> None:
         top_candidates=args.top_candidates,
         selection_refiner=selection_refiner,
     )
-    metadata = load_paper_metadata(
-        args.paper_metadata,
-        wanted_ids,
-        abstract_chars=args.abstract_chars,
+    metadata = dict(selection_metadata)
+    metadata.update(
+        load_paper_metadata(
+            args.paper_metadata,
+            wanted_ids - metadata.keys(),
+            abstract_chars=args.abstract_chars,
+        )
     )
     checkpoint = retrieval_payload.get("_checkpoint", {})
     report = build_report(

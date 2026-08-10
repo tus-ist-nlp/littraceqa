@@ -3,7 +3,7 @@
 
 The script reports the official macro paper precision, recall, and F1 without
 running a GPU model or reading agent. Reading-agent evidence filtering remains
-inactive; an optional table-only refiner can inspect existing MinerU output.
+inactive; an optional evidence refiner can inspect existing MinerU output.
 
 Example:
     uv run python scripts/eval_paper_selection.py \\
@@ -24,6 +24,7 @@ from littraceqa.di_pipeline.evaluation.submission_scoring import (
     score_selection,
 )
 from littraceqa.di_pipeline.evaluation.selection_input import (
+    load_paper_metadata,
     load_queries,
     load_rankings as load_rankings,
     load_retrieval_run,
@@ -34,6 +35,9 @@ from littraceqa.di_pipeline.select import build_paper_selector
 from littraceqa.di_pipeline.select.cardinality import (
     expected_paper_count,
     is_open_ended_enumeration,
+)
+from littraceqa.di_pipeline.select.citation_table_coverage import (
+    citation_table_candidate_ids,
 )
 from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
@@ -112,9 +116,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Also report each strategy after high-confidence MinerU table "
+            "Also report each strategy after high-confidence MinerU "
             "coverage refinement."
         ),
+    )
+    parser.add_argument(
+        "--paper-metadata",
+        type=Path,
+        default=Path("data/paper_metadata.jsonl"),
+        help="Paper metadata used by evidence conditions.",
     )
     return parser
 
@@ -139,8 +149,24 @@ def main() -> None:
             raise SystemExit(
                 "--evidence-coverage-mineru-dir must be an existing directory"
             )
+        evidence_source = MinerUPaperTableSource(
+            args.evidence_coverage_mineru_dir
+        )
+        wanted_metadata = citation_table_candidate_ids(query_records, rankings)
+        paper_metadata = load_paper_metadata(
+            args.paper_metadata,
+            wanted_metadata,
+            abstract_chars=0,
+        )
+        missing_metadata = wanted_metadata - paper_metadata.keys()
+        if missing_metadata:
+            parser.error(
+                f"paper metadata is missing {next(iter(sorted(missing_metadata)))}"
+            )
         table_refiner = EvidenceCoverageRefiner(
-            MinerUPaperTableSource(args.evidence_coverage_mineru_dir)
+            evidence_source,
+            evidence_source=evidence_source,
+            paper_metadata=paper_metadata,
         )
 
     missing = [query_id for query_id in gold if query_id not in rankings]

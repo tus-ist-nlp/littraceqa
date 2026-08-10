@@ -282,6 +282,67 @@ def test_optional_evidence_coverage_uses_a_unique_mineru_table(tmp_path):
     assert "evidence coverage changed 1 queries" in result.stdout
 
 
+def test_optional_evidence_coverage_uses_citations_and_paper_metadata(tmp_path):
+    mineru = tmp_path / "mineru"
+    reference = {
+        "type": "list",
+        "sub_type": "ref_text",
+        "list_items": ["[7] A. Author. Base Networks. ICML, 2020."],
+    }
+    table = {
+        "type": "table",
+        "table_caption": ["Table 1: Main comparison."],
+        "table_body": (
+            "<table><tr><td>Method</td><td>Score</td><td>Accuracy</td></tr>"
+            "<tr><td>BaseNet [7]</td><td>10.0</td><td>20.0</td></tr>"
+            "<tr><td>Ours</td><td>30.0</td><td>40.0</td></tr></table>"
+        ),
+    }
+    for paper_id in ("p1", "p2"):
+        content_list = mineru / paper_id / "auto" / f"{paper_id}_content_list.json"
+        content_list.parent.mkdir(parents=True)
+        content_list.write_text(json.dumps([reference, table]), encoding="utf-8")
+
+    metadata = tmp_path / "paper_metadata.jsonl"
+    metadata.write_text(
+        "".join(
+            json.dumps({"paper_id": paper_id, "venue": "ACL", "year": 2024})
+            + "\n"
+            for paper_id in ("p1", "p2")
+        ),
+        encoding="utf-8",
+    )
+    result, output = _run(
+        tmp_path,
+        queries=[
+            {
+                "query_id": "q1",
+                "question": (
+                    "Which ACL 2024 papers cite BaseNet "
+                    "(Base Networks, ICML 2020) and use it as a baseline in "
+                    "their main comparison table?"
+                ),
+                "answer_types": ["table"],
+                "table_schema": [
+                    {"name": "Paper Title", "type": "string", "is_row_key": True}
+                ],
+            }
+        ],
+        ranked=[{"query_id": "q1", "ranked_papers": ["p1", "p2"]}],
+        extra_args=[
+            "--evidence-coverage-mineru-dir",
+            str(mineru),
+            "--paper-metadata",
+            str(metadata),
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+    row = json.loads(output.read_text().splitlines()[0])
+    assert row["gold_papers"] == [{"paper_id": "p1"}, {"paper_id": "p2"}]
+    assert "evidence coverage changed 1 queries" in result.stdout
+
+
 def test_a_query_without_a_retrieval_result_is_an_error(tmp_path):
     result, _ = _run(
         tmp_path,

@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from littraceqa.di_pipeline.contracts import Query
-from littraceqa.di_pipeline.retrieve.paper_tables import PaperTable, PaperTableSource
+from littraceqa.di_pipeline.retrieve.paper_tables import (
+    PaperDocumentSource,
+    PaperTable,
+    PaperTableSource,
+)
+from littraceqa.di_pipeline.select.citation_table_coverage import (
+    CitationTableOpenSetRefiner,
+)
+from littraceqa.di_pipeline.select.multi_paper_coverage import (
+    MultiPaperCoverageRefiner,
+)
 from littraceqa.di_pipeline.select.selector import (
     PaperSelection,
     ordered_paper_ids,
@@ -291,14 +301,38 @@ class SingleTableCoverageRefiner:
 
 
 class EvidenceCoverageRefiner:
-    """Apply independent high-confidence table checks after paper ranking."""
+    """Apply independent high-confidence evidence checks after paper ranking."""
 
-    def __init__(self, table_source: PaperTableSource, candidate_limit: int = 20) -> None:
+    def __init__(
+        self,
+        table_source: PaperTableSource,
+        candidate_limit: int = 20,
+        *,
+        evidence_source: PaperDocumentSource | None = None,
+        paper_metadata: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
         self.explicit_table = ExplicitTableAnchorRefiner(
             table_source, candidate_limit=candidate_limit
         )
         self.single_table = SingleTableCoverageRefiner(
             table_source, candidate_limit=candidate_limit
+        )
+        self.multi_paper = (
+            MultiPaperCoverageRefiner(
+                evidence_source,
+                candidate_limit=candidate_limit,
+            )
+            if evidence_source is not None
+            else None
+        )
+        self.citation_table = (
+            CitationTableOpenSetRefiner(
+                evidence_source,
+                paper_metadata,
+                candidate_limit=candidate_limit,
+            )
+            if evidence_source is not None and paper_metadata is not None
+            else None
         )
 
     def refine(
@@ -311,7 +345,17 @@ class EvidenceCoverageRefiner:
         explicit = self.explicit_table.refine(query, ranked, selection)
         if explicit != selection:
             return explicit
-        return self.single_table.refine(query, ranked, selection)
+        single = self.single_table.refine(query, ranked, selection)
+        if single != selection:
+            return single
+        multi = (
+            self.multi_paper.refine(query, ranked, selection)
+            if self.multi_paper is not None
+            else selection
+        )
+        if multi != selection or self.citation_table is None:
+            return multi
+        return self.citation_table.refine(query, ranked, selection)
 
 
 __all__ = [

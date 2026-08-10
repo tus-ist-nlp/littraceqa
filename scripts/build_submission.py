@@ -24,6 +24,7 @@ import yaml
 
 from littraceqa.di_pipeline.evaluation.output import validate_output_path
 from littraceqa.di_pipeline.evaluation.selection_input import (
+    load_paper_metadata,
     load_queries,
     load_rankings as load_rankings,
     load_retrieval_run,
@@ -31,6 +32,9 @@ from littraceqa.di_pipeline.evaluation.selection_input import (
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
 from littraceqa.di_pipeline.select import build_paper_selector
+from littraceqa.di_pipeline.select.citation_table_coverage import (
+    citation_table_candidate_ids,
+)
 from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
 _ANSWER_SKELETONS: dict[str, dict[str, Any]] = {
@@ -77,8 +81,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optionally refine paper selection with high-confidence MinerU "
-            "table evidence."
+            "evidence."
         ),
+    )
+    parser.add_argument(
+        "--paper-metadata",
+        type=Path,
+        default=Path("data/paper_metadata.jsonl"),
+        help="Paper metadata used by evidence conditions.",
     )
     parser.add_argument(
         "--read-only-root",
@@ -100,6 +110,9 @@ def main() -> None:
     retrieval = load_retrieval_run(args.retrieval)
     rankings = retrieval.rankings
     queries = load_queries(args.queries)
+    query_records = {
+        str(record["query_id"]): Query.from_dict(record) for record in queries
+    }
     method_owner_index = (
         args.method_owner_index or retrieval.method_owner_index_path
     )
@@ -115,8 +128,24 @@ def main() -> None:
             parser.error(
                 "--evidence-coverage-mineru-dir must be an existing directory"
             )
+        evidence_source = MinerUPaperTableSource(
+            args.evidence_coverage_mineru_dir
+        )
+        wanted_metadata = citation_table_candidate_ids(query_records, rankings)
+        paper_metadata = load_paper_metadata(
+            args.paper_metadata,
+            wanted_metadata,
+            abstract_chars=0,
+        )
+        missing_metadata = wanted_metadata - paper_metadata.keys()
+        if missing_metadata:
+            parser.error(
+                f"paper metadata is missing {next(iter(sorted(missing_metadata)))}"
+            )
         table_refiner = EvidenceCoverageRefiner(
-            MinerUPaperTableSource(args.evidence_coverage_mineru_dir)
+            evidence_source,
+            evidence_source=evidence_source,
+            paper_metadata=paper_metadata,
         )
 
     missing = [
@@ -140,7 +169,7 @@ def main() -> None:
             )
             if table_refiner is not None:
                 refined = table_refiner.refine(
-                    Query.from_dict(record), rankings[query_id], selection
+                    query_records[query_id], rankings[query_id], selection
                 )
                 refined_total += refined.paper_ids != selection.paper_ids
                 selection = refined

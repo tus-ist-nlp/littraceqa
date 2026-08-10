@@ -12,6 +12,7 @@ from typing import Protocol
 
 
 _TABLE_ID_RE = re.compile(r"\btable\s+([A-Z]?\d+[A-Z]?|[IVXLCDM]+)\b", re.IGNORECASE)
+_MAX_TABLE_SPAN = 128
 
 
 @dataclass(frozen=True)
@@ -23,48 +24,89 @@ class PaperTable:
     text: str
 
 
+@dataclass(frozen=True)
+class PaperEvidenceDocument:
+    """Text evidence read from one MinerU content list."""
+
+    paper_id: str
+    title: str
+    text_blocks: tuple[str, ...]
+    tables: tuple[PaperTable, ...]
+    reference_entries: tuple[str, ...] = ()
+
+
 class PaperTableSource(Protocol):
     def tables(self, paper_id: str) -> tuple[PaperTable, ...]: ...
 
 
+class PaperDocumentSource(Protocol):
+    def document(self, paper_id: str) -> PaperEvidenceDocument: ...
+
+
+class PaperEvidenceSource(PaperTableSource, PaperDocumentSource, Protocol):
+    pass
+
+
 class MinerUPaperTableSource:
-    """Read table blocks from existing MinerU content lists."""
+    """Read text and table evidence from existing MinerU content lists."""
 
     def __init__(self, mineru_dir: str | Path, cache_size: int = 32) -> None:
         if cache_size < 0:
             raise ValueError("cache_size must be non-negative")
         self.mineru_dir = Path(mineru_dir)
         self.cache_size = cache_size
-        self._cache: OrderedDict[str, tuple[PaperTable, ...]] = OrderedDict()
+        self._cache: OrderedDict[str, PaperEvidenceDocument] = OrderedDict()
 
     def tables(self, paper_id: str) -> tuple[PaperTable, ...]:
+        return self.document(paper_id).tables
+
+    def document(self, paper_id: str) -> PaperEvidenceDocument:
         _validate_paper_id(paper_id)
         cached = self._cache.get(paper_id)
         if cached is not None:
             self._cache.move_to_end(paper_id)
             return cached
 
-        tables = self._read_tables(paper_id)
+        document = self._read_document(paper_id)
         if self.cache_size:
-            self._cache[paper_id] = tables
+            self._cache[paper_id] = document
             self._cache.move_to_end(paper_id)
             while len(self._cache) > self.cache_size:
                 self._cache.popitem(last=False)
-        return tables
+        return document
 
-    def _read_tables(self, paper_id: str) -> tuple[PaperTable, ...]:
+    def _read_document(self, paper_id: str) -> PaperEvidenceDocument:
         path = self.mineru_dir / paper_id / "auto" / f"{paper_id}_content_list.json"
         try:
             with path.open(encoding="utf-8") as stream:
                 blocks = json.load(stream)
         except (OSError, UnicodeError, ValueError):
-            return ()
+            return _empty_document(paper_id)
         if not isinstance(blocks, list):
-            return ()
+            return _empty_document(paper_id)
 
+        title = ""
+        text_blocks: list[str] = []
         tables: list[PaperTable] = []
+        reference_entries: list[str] = []
         for block in blocks:
-            if not isinstance(block, dict) or block.get("type") != "table":
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = _join_text(block.get("text"))
+                if text:
+                    text_blocks.append(text)
+                    if not title and block.get("text_level") == 1:
+                        title = text
+                continue
+            if block.get("type") == "list" and block.get("sub_type") == "ref_text":
+                items = block.get("list_items")
+                if isinstance(items, list):
+                    reference_entries.extend(
+                        text for item in items if (text := _join_text(item))
+                    )
+                continue
+            if block.get("type") != "table":
                 continue
             caption = _join_text(block.get("table_caption"))
             footnote = _join_text(block.get("table_footnote"))
@@ -81,7 +123,17 @@ class MinerUPaperTableSource:
                     text=text,
                 )
             )
-        return tuple(tables)
+        return PaperEvidenceDocument(
+            paper_id=paper_id,
+            title=title,
+            text_blocks=tuple(text_blocks),
+            tables=tuple(tables),
+            reference_entries=tuple(reference_entries),
+        )
+
+
+def _empty_document(paper_id: str) -> PaperEvidenceDocument:
+    return PaperEvidenceDocument(paper_id=paper_id, title="", text_blocks=(), tables=())
 
 
 class _TableHTMLParser(HTMLParser):
@@ -91,17 +143,25 @@ class _TableHTMLParser(HTMLParser):
         self.all_text: list[str] = []
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
+        self._column = 0
+        self._rowspan = 1
+        self._colspan = 1
+        self._spans: dict[int, tuple[str, int]] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        del attrs
         if tag == "tr":
             self._finish_row()
             self._row = []
+            self._column = 0
         elif tag in {"td", "th"}:
             if self._row is None:
                 self._row = []
             self._finish_cell()
+            self._append_spans()
             self._cell = []
+            attributes = dict(attrs)
+            self._rowspan = _positive_span(attributes.get("rowspan"))
+            self._colspan = _positive_span(attributes.get("colspan"))
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"td", "th"}:
@@ -124,14 +184,41 @@ class _TableHTMLParser(HTMLParser):
             return
         if self._row is None:
             self._row = []
-        self._row.append(_normalize(" ".join(self._cell)))
+        value = _normalize(" ".join(self._cell))
+        for _ in range(self._colspan):
+            self._row.append(value)
+            if self._rowspan > 1:
+                self._spans[self._column] = (value, self._rowspan - 1)
+            self._column += 1
         self._cell = None
+        self._rowspan = 1
+        self._colspan = 1
 
     def _finish_row(self) -> None:
         self._finish_cell()
+        self._append_spans()
         if self._row:
             self.rows.append(tuple(self._row))
         self._row = None
+
+    def _append_spans(self) -> None:
+        if self._row is None:
+            return
+        while self._column in self._spans:
+            value, remaining = self._spans[self._column]
+            self._row.append(value)
+            if remaining == 1:
+                del self._spans[self._column]
+            else:
+                self._spans[self._column] = (value, remaining - 1)
+            self._column += 1
+
+
+def _positive_span(value: str | None) -> int:
+    try:
+        return min(_MAX_TABLE_SPAN, max(1, int(value or 1)))
+    except ValueError:
+        return 1
 
 
 def _parse_table_body(body: str) -> tuple[tuple[tuple[str, ...], ...], str]:
