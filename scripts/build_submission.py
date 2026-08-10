@@ -23,19 +23,16 @@ from typing import Any
 import yaml
 
 from littraceqa.di_pipeline.evaluation.output import validate_output_path
+from littraceqa.di_pipeline.evaluation.evidence_coverage_input import (
+    MissingPaperMetadataError,
+    prepare_evidence_coverage,
+)
 from littraceqa.di_pipeline.evaluation.selection_input import (
-    load_paper_metadata,
     load_queries,
-    load_rankings as load_rankings,
     load_retrieval_run,
 )
 from littraceqa.di_pipeline.contracts import Query
-from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
 from littraceqa.di_pipeline.select import build_paper_selector
-from littraceqa.di_pipeline.select.citation_table_coverage import (
-    citation_table_candidate_ids,
-)
-from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
 _ANSWER_SKELETONS: dict[str, dict[str, Any]] = {
     "freeform": {"text": ""},
@@ -122,31 +119,22 @@ def main() -> None:
             str(method_owner_index) if method_owner_index is not None else None
         ),
     )
-    table_refiner = None
+    evidence_refiner = None
     if args.evidence_coverage_mineru_dir is not None:
         if not args.evidence_coverage_mineru_dir.is_dir():
             parser.error(
                 "--evidence-coverage-mineru-dir must be an existing directory"
             )
-        evidence_source = MinerUPaperTableSource(
-            args.evidence_coverage_mineru_dir
-        )
-        wanted_metadata = citation_table_candidate_ids(query_records, rankings)
-        paper_metadata = load_paper_metadata(
-            args.paper_metadata,
-            wanted_metadata,
-            abstract_chars=0,
-        )
-        missing_metadata = wanted_metadata - paper_metadata.keys()
-        if missing_metadata:
-            parser.error(
-                f"paper metadata is missing {next(iter(sorted(missing_metadata)))}"
+        try:
+            setup = prepare_evidence_coverage(
+                args.evidence_coverage_mineru_dir,
+                args.paper_metadata,
+                query_records,
+                rankings,
             )
-        table_refiner = EvidenceCoverageRefiner(
-            evidence_source,
-            evidence_source=evidence_source,
-            paper_metadata=paper_metadata,
-        )
+        except MissingPaperMetadataError as exc:
+            parser.error(str(exc))
+        evidence_refiner = setup.refiner
 
     missing = [
         str(record["query_id"])
@@ -167,8 +155,8 @@ def main() -> None:
             selection = selector.select(
                 record.get("question", ""), rankings[query_id]
             )
-            if table_refiner is not None:
-                refined = table_refiner.refine(
+            if evidence_refiner is not None:
+                refined = evidence_refiner.refine(
                     query_records[query_id], rankings[query_id], selection
                 )
                 refined_total += refined.paper_ids != selection.paper_ids
@@ -194,7 +182,7 @@ def main() -> None:
         f"{len(queries)} records written to {output} "
         f"({paper_total} papers, {paper_total / len(queries):.2f} per query)"
     )
-    if table_refiner is not None:
+    if evidence_refiner is not None:
         print(f"evidence coverage changed {refined_total} queries")
     print("evidence and answer are empty; those metrics will score zero")
 

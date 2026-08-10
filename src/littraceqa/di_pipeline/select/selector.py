@@ -21,6 +21,21 @@ class PaperSelection:
     reason: str
     dropped_without_evidence: tuple[str, ...] = ()
 
+    def with_papers(
+        self,
+        paper_ids: Iterable[str],
+        reason_suffix: str,
+    ) -> PaperSelection:
+        """Replace selected papers while preserving evidence diagnostics."""
+
+        selected = tuple(paper_ids)
+        return PaperSelection(
+            paper_ids=selected,
+            expected_count=len(selected),
+            reason=f"{self.reason}+{reason_suffix}",
+            dropped_without_evidence=self.dropped_without_evidence,
+        )
+
 
 def ordered_paper_ids(candidates: Iterable[str]) -> list[str]:
     """Keep valid paper ids in first-seen order."""

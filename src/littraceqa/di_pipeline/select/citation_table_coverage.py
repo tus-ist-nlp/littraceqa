@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from littraceqa.di_pipeline.contracts import Query
@@ -65,6 +65,14 @@ class CitationTableCondition:
     cited_title: str
     cited_venue: str
     cited_year: int
+
+
+@dataclass(frozen=True)
+class ReferenceMatches:
+    """Reference entries matching the cited paper identity."""
+
+    numbers: frozenset[str]
+    count: int
 
 
 def _normalize(value: object) -> str:
@@ -140,7 +148,7 @@ def _alias_pattern(alias: str) -> re.Pattern[str]:
 def _matching_references(
     entries: Sequence[str],
     condition: CitationTableCondition,
-) -> tuple[set[str], int]:
+) -> ReferenceMatches:
     title = _normalize(condition.cited_title)
     venue = _normalize(condition.cited_venue)
     venue_aliases = (venue, *_REFERENCE_VENUE_ALIASES.get(venue, ()))
@@ -162,7 +170,7 @@ def _matching_references(
         number = _REFERENCE_NUMBER_RE.match(entry)
         if number is not None:
             numbers.add(number.group("number"))
-    return numbers, len(matches)
+    return ReferenceMatches(frozenset(numbers), len(matches))
 
 
 def _contains_ocr_spaced_phrase(text: str, phrase: str) -> bool:
@@ -177,7 +185,7 @@ def _contains_ocr_spaced_phrase(text: str, phrase: str) -> bool:
 def _row_mentions_cited_alias(
     row: Sequence[str],
     condition: CitationTableCondition,
-    reference_numbers: set[str],
+    reference_numbers: Collection[str],
     reference_matches: int,
 ) -> bool:
     pattern = _alias_pattern(condition.alias)
@@ -214,7 +222,7 @@ def _is_comparison_table(table: PaperTable) -> bool:
 def _has_baseline_row(
     document: PaperEvidenceDocument,
     condition: CitationTableCondition,
-    reference_numbers: set[str],
+    reference_numbers: Collection[str],
     reference_matches: int,
 ) -> bool:
     for table in document.tables[:2]:
@@ -257,10 +265,15 @@ def _paper_matches(
 ) -> bool:
     if not _metadata_matches(metadata, condition):
         return False
-    numbers, matches = _matching_references(document.reference_entries, condition)
-    if matches == 0:
+    references = _matching_references(document.reference_entries, condition)
+    if references.count == 0:
         return False
-    return _has_baseline_row(document, condition, numbers, matches)
+    return _has_baseline_row(
+        document,
+        condition,
+        references.numbers,
+        references.count,
+    )
 
 
 class CitationTableOpenSetRefiner:
@@ -313,12 +326,7 @@ class CitationTableOpenSetRefiner:
             or selection.paper_ids[0] not in verified
         ):
             return selection
-        return PaperSelection(
-            paper_ids=verified,
-            expected_count=len(verified),
-            reason=f"{selection.reason}+citation_table_coverage",
-            dropped_without_evidence=selection.dropped_without_evidence,
-        )
+        return selection.with_papers(verified, "citation_table_coverage")
 
 
 __all__ = [

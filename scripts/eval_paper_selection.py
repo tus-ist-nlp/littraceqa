@@ -23,34 +23,22 @@ from littraceqa.di_pipeline.evaluation.submission_scoring import (
     load_gold_paper_sets,
     score_selection,
 )
+from littraceqa.di_pipeline.evaluation.evidence_coverage_input import (
+    MissingPaperMetadataError,
+    prepare_evidence_coverage,
+)
 from littraceqa.di_pipeline.evaluation.selection_input import (
-    load_paper_metadata,
     load_queries,
-    load_rankings as load_rankings,
     load_retrieval_run,
 )
 from littraceqa.di_pipeline.contracts import Query
-from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
 from littraceqa.di_pipeline.select import build_paper_selector
 from littraceqa.di_pipeline.select.cardinality import (
     expected_paper_count,
     is_open_ended_enumeration,
 )
-from littraceqa.di_pipeline.select.citation_table_coverage import (
-    citation_table_candidate_ids,
-)
-from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
 SELECT_STYLE_DIR = Path("configs/select_style")
-
-
-def load_questions(path: Path) -> dict[str, str]:
-    """Read ``query_id -> question`` from a gold or input JSONL file."""
-
-    return {
-        str(record["query_id"]): str(record.get("question", ""))
-        for record in load_queries(path)
-    }
 
 
 def load_query_records(path: Path) -> dict[str, Query]:
@@ -143,31 +131,22 @@ def main() -> None:
     query_path = args.questions or args.gold
     query_records = load_query_records(query_path)
     questions = {query_id: query.question for query_id, query in query_records.items()}
-    table_refiner = None
+    evidence_refiner = None
     if args.evidence_coverage_mineru_dir is not None:
         if not args.evidence_coverage_mineru_dir.is_dir():
             raise SystemExit(
                 "--evidence-coverage-mineru-dir must be an existing directory"
             )
-        evidence_source = MinerUPaperTableSource(
-            args.evidence_coverage_mineru_dir
-        )
-        wanted_metadata = citation_table_candidate_ids(query_records, rankings)
-        paper_metadata = load_paper_metadata(
-            args.paper_metadata,
-            wanted_metadata,
-            abstract_chars=0,
-        )
-        missing_metadata = wanted_metadata - paper_metadata.keys()
-        if missing_metadata:
-            parser.error(
-                f"paper metadata is missing {next(iter(sorted(missing_metadata)))}"
+        try:
+            setup = prepare_evidence_coverage(
+                args.evidence_coverage_mineru_dir,
+                args.paper_metadata,
+                query_records,
+                rankings,
             )
-        table_refiner = EvidenceCoverageRefiner(
-            evidence_source,
-            evidence_source=evidence_source,
-            paper_metadata=paper_metadata,
-        )
+        except MissingPaperMetadataError as exc:
+            parser.error(str(exc))
+        evidence_refiner = setup.refiner
 
     missing = [query_id for query_id in gold if query_id not in rankings]
     if missing:
@@ -206,9 +185,9 @@ def main() -> None:
             gold,
             {q: selection.paper_ids for q, selection in selections.items()},
         )
-        if table_refiner is not None:
+        if evidence_refiner is not None:
             refined = {
-                q: table_refiner.refine(query_records[q], rankings[q], selection)
+                q: evidence_refiner.refine(query_records[q], rankings[q], selection)
                 for q, selection in selections.items()
             }
             report(

@@ -9,10 +9,10 @@ from littraceqa.di_pipeline.retrieve.paper_tables import (
 )
 from littraceqa.di_pipeline.select.multi_paper_coverage import (
     MultiPaperCoverageRefiner,
-    parse_two_slot_question,
 )
+from littraceqa.di_pipeline.select.two_slot_question import parse_two_slot_question
 from littraceqa.di_pipeline.select.selector import PaperSelection
-from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
+from littraceqa.di_pipeline.select.evidence_coverage import EvidenceCoverageRefiner
 
 
 class StubEvidenceSource:
@@ -212,10 +212,9 @@ def test_combined_evidence_refiner_runs_multi_paper_coverage_last():
     )
     source = StubEvidenceSource({"scm": scm, "imm": imm})
 
-    result = EvidenceCoverageRefiner(
-        source,
-        evidence_source=source,
-    ).refine(_query(question), ["imm", "scm"], _selection("imm"))
+    result = EvidenceCoverageRefiner(source, evidence_source=source).refine(
+        _query(question), ["imm", "scm"], _selection("imm")
+    )
 
     assert result.paper_ids == ("imm", "scm")
 
@@ -223,7 +222,7 @@ def test_combined_evidence_refiner_runs_multi_paper_coverage_last():
 def test_combined_refiner_keeps_the_positional_candidate_limit_api():
     source = StubEvidenceSource({})
 
-    refiner = EvidenceCoverageRefiner(source, 10, evidence_source=source)
+    refiner = EvidenceCoverageRefiner.from_evidence_source(source, 10)
 
     assert refiner.multi_paper is not None
 

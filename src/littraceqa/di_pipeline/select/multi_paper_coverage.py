@@ -5,8 +5,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import Literal
 
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.di_pipeline.retrieve.method_aliases import (
@@ -23,54 +21,13 @@ from littraceqa.di_pipeline.select.selector import (
     PaperSelection,
     ordered_paper_ids,
 )
+from littraceqa.di_pipeline.select.two_slot_question import (
+    EvidenceSlot,
+    evidence_terms,
+    parse_two_slot_question,
+)
 
-_PAIRED_ACHIEVE_RE = re.compile(
-    r"^What\s+(?P<metric1>.+?)\s+does\s+(?P<subject1>.+?)\s+"
-    r"achieve\s+(?P<condition1>.+?),\s+and\s+what\s+"
-    r"(?P<metric2>.+?)\s+does\s+(?P<subject2>.+?)\s+"
-    r"achieve\s+(?P<condition2>.+?)\?\s*$",
-    re.IGNORECASE,
-)
-_COORDINATED_USE_RE = re.compile(
-    r"^What\s+(?P<property>.+?)\s+do\s+"
-    r"(?P<target1>[A-Za-z][A-Za-z0-9.+-]{1,39})\s+and\s+"
-    r"(?P<target2>[A-Za-z][A-Za-z0-9.+-]{1,39})\s+use\s+"
-    r"(?P<context>.+?),\s+and\s+do\s+they\s+(?:match|differ)\?\s*$",
-    re.IGNORECASE,
-)
-_WITH_RE = re.compile(r"\s+with\s+", re.IGNORECASE)
 _NUMBER_VECTOR_RE = re.compile(r"\[\s*[-+−]?\s*\d")
-_ROW_NUMBER_RE = re.compile(
-    r"\b(?P<number>\d+)\s+(?:epochs?|steps?|iterations?)\b",
-    re.IGNORECASE,
-)
-_STOP_WORDS = frozenset(
-    {
-        "a",
-        "an",
-        "and",
-        "as",
-        "at",
-        "does",
-        "for",
-        "in",
-        "of",
-        "on",
-        "the",
-        "their",
-        "use",
-        "using",
-        "value",
-        "values",
-        "what",
-        "with",
-    }
-)
-_TERM_ALIASES = {
-    "accuracy": "acc",
-    "map": "ap",
-    "val": "validation",
-}
 _VARIANT_ACTION = (
     r"(?:build|builds|building|built|develop|develops|developing|developed|"
     r"introduce|introduces|introducing|introduced|present|presents|presenting|"
@@ -87,114 +44,6 @@ _COORDINATED_VARIANT_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMERIC_CELL_RE = re.compile(r"[-+−]?\d+(?:\.\d+)?(?:\s*%)?")
-
-
-@dataclass(frozen=True)
-class EvidenceSlot:
-    """One explicitly named target and the local evidence it must satisfy."""
-
-    target: str
-    terms: tuple[str, ...]
-    kind: Literal["table", "text"]
-    local_terms: tuple[str, ...] = ()
-    row_terms: tuple[str, ...] = ()
-
-
-def _normalize(text: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", text).split())
-
-
-def _term(value: str) -> str:
-    value = value.casefold()
-    if len(value) > 4 and value.endswith("s"):
-        value = value[:-1]
-    return _TERM_ALIASES.get(value, value)
-
-
-def _terms(text: str) -> tuple[str, ...]:
-    normalized = re.sub(
-        r"(?<![A-Za-z])(?:[A-Z]\s+){1,5}[A-Z](?![A-Za-z])",
-        lambda match: re.sub(r"\s+", "", match.group()),
-        _normalize(text),
-    )
-    values = (
-        _term(token)
-        for token in re.findall(r"[A-Za-z]+|[0-9]+", normalized)
-    )
-    return tuple(dict.fromkeys(value for value in values if value not in _STOP_WORDS))
-
-
-def _subject(subject: str) -> tuple[str, str]:
-    parts = _WITH_RE.split(_normalize(subject), maxsplit=1)
-    return parts[0], parts[1] if len(parts) == 2 else ""
-
-
-def _table_slot(
-    target: str,
-    metric: str,
-    qualifier: str,
-    condition: str,
-) -> EvidenceSlot:
-    return EvidenceSlot(
-        target=target,
-        terms=_terms(f"{metric} {qualifier} {condition}"),
-        kind="table",
-        row_terms=tuple(
-            match.group("number") for match in _ROW_NUMBER_RE.finditer(condition)
-        ),
-    )
-
-
-def _paired_achievement_slots(
-    match: re.Match[str],
-) -> tuple[EvidenceSlot, EvidenceSlot] | None:
-    target1, qualifier1 = _subject(match.group("subject1"))
-    target2, qualifier2 = _subject(match.group("subject2"))
-    if not target1 or not target2 or method_aliases_equal(target1, target2):
-        return None
-    metric = max(
-        (match.group("metric1"), match.group("metric2")),
-        key=lambda value: len(_terms(value)),
-    )
-    return (
-        _table_slot(target1, metric, qualifier1, match.group("condition1")),
-        _table_slot(target2, metric, qualifier2, match.group("condition2")),
-    )
-
-
-def _coordinated_use_slots(
-    match: re.Match[str],
-) -> tuple[EvidenceSlot, EvidenceSlot] | None:
-    target1 = match.group("target1")
-    target2 = match.group("target2")
-    if method_aliases_equal(target1, target2):
-        return None
-    requirements = _terms(f"{match.group('property')} {match.group('context')}")
-    local_terms = tuple(
-        term for term in _terms(match.group("property")) if term != "normalization"
-    )
-    return (
-        EvidenceSlot(target1, requirements, "text", local_terms),
-        EvidenceSlot(target2, requirements, "text", local_terms),
-    )
-
-
-def parse_two_slot_question(
-    question: object,
-) -> tuple[EvidenceSlot, EvidenceSlot] | None:
-    """Parse only two narrow question forms supported by the verifier."""
-
-    if not isinstance(question, str):
-        return None
-    text = _normalize(question)
-    match = _PAIRED_ACHIEVE_RE.match(text)
-    if match is not None:
-        return _paired_achievement_slots(match)
-
-    match = _COORDINATED_USE_RE.match(text)
-    if match is None:
-        return None
-    return _coordinated_use_slots(match)
 
 
 def _alias_pattern(alias: str) -> re.Pattern[str]:
@@ -230,10 +79,10 @@ def _owns_target(
         return True
 
     title_prefix = document.title.partition(":")[0]
-    target_key = _terms(target)
+    target_key = evidence_terms(target)
     body = "\n".join(document.text_blocks)
     for owner in owners:
-        owner_key = _terms(owner)
+        owner_key = evidence_terms(owner)
         if (
             len("".join(owner_key)) >= 4
             and owner_key
@@ -255,7 +104,8 @@ def _has_variant_claim(text: str, target: str, owner: str) -> bool:
         coordinated = _COORDINATED_VARIANT_RE.search(sentence)
         if coordinated is not None:
             previous = coordinated.group("alias")
-            if _terms(previous)[: len(_terms(owner))] == _terms(owner):
+            owner_terms = evidence_terms(owner)
+            if evidence_terms(previous)[: len(owner_terms)] == owner_terms:
                 return True
     return False
 
@@ -291,10 +141,12 @@ def _table_supports(document: PaperEvidenceDocument, slot: EvidenceSlot) -> bool
             row_text = " ".join(row)
             if not _contains_alias(row_text, slot.target):
                 continue
-            row_terms = set(_terms(row_text))
+            row_terms = set(evidence_terms(row_text))
             if not set(slot.row_terms).issubset(row_terms):
                 continue
-            scope_terms = set(_terms(f"{shared} {_row_group(table, row_index)}"))
+            scope_terms = set(
+                evidence_terms(f"{shared} {_row_group(table, row_index)}")
+            )
             measurements = sum(
                 bool(_NUMERIC_CELL_RE.fullmatch(cell.strip())) for cell in row
             )
@@ -313,10 +165,10 @@ def _text_supports(document: PaperEvidenceDocument, slot: EvidenceSlot) -> bool:
     for index, block in enumerate(blocks):
         if not _NUMBER_VECTOR_RE.search(block):
             continue
-        if not set(slot.local_terms).issubset(_terms(block)):
+        if not set(slot.local_terms).issubset(evidence_terms(block)):
             continue
         window = " ".join(blocks[max(0, index - 4) : index + 5])
-        present = set(_terms(window))
+        present = set(evidence_terms(window))
         if required.issubset(present):
             return True
     return False
@@ -394,12 +246,7 @@ class MultiPaperCoverageRefiner:
             or not set(selection.paper_ids).issubset(paper_ids)
         ):
             return selection
-        return PaperSelection(
-            paper_ids=paper_ids,
-            expected_count=2,
-            reason=f"{selection.reason}+multi_paper_coverage",
-            dropped_without_evidence=selection.dropped_without_evidence,
-        )
+        return selection.with_papers(paper_ids, "multi_paper_coverage")
 
 
 __all__ = ["EvidenceSlot", "MultiPaperCoverageRefiner", "parse_two_slot_question"]

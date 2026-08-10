@@ -23,7 +23,10 @@ from littraceqa.di_pipeline.select.owner_aware import (
     OwnerAwarePaperSelector,
     explicitly_names_paper,
 )
-from littraceqa.di_pipeline.select.selector import CardinalityPaperSelector
+from littraceqa.di_pipeline.select.selector import (
+    CardinalityPaperSelector,
+    PaperSelection,
+)
 
 
 def _method_owner_index(tmp_path, owners=None):
@@ -33,6 +36,24 @@ def _method_owner_index(tmp_path, owners=None):
         encoding="utf-8",
     )
     return path
+
+
+def test_with_papers_preserves_evidence_diagnostics():
+    selection = PaperSelection(
+        ("old",),
+        expected_count=1,
+        reason="default",
+        dropped_without_evidence=("dropped",),
+    )
+
+    refined = selection.with_papers(("new-1", "new-2"), "coverage")
+
+    assert refined == PaperSelection(
+        ("new-1", "new-2"),
+        expected_count=2,
+        reason="default+coverage",
+        dropped_without_evidence=("dropped",),
+    )
 
 
 @pytest.mark.parametrize(

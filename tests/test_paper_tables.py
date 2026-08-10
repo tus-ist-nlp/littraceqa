@@ -4,7 +4,10 @@ import json
 
 import pytest
 
-from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
+from littraceqa.di_pipeline.retrieve.paper_tables import (
+    MinerUPaperEvidenceSource,
+    MinerUPaperTableSource,
+)
 
 
 def _content_list_path(tmp_path, paper_id: str):
@@ -15,6 +18,10 @@ def _write_content_list(tmp_path, paper_id: str, content: object) -> None:
     path = _content_list_path(tmp_path, paper_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(content), encoding="utf-8")
+
+
+def test_old_table_source_name_remains_compatible():
+    assert MinerUPaperTableSource is MinerUPaperEvidenceSource
 
 
 def test_reads_caption_visible_id_rows_and_searchable_text(tmp_path):

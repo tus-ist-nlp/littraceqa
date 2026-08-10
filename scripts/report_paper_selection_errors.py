@@ -14,6 +14,10 @@ from littraceqa.di_pipeline.evaluation.output import (
     validate_output_path,
     write_output_atomic,
 )
+from littraceqa.di_pipeline.evaluation.evidence_coverage_input import (
+    MissingPaperMetadataError,
+    prepare_evidence_coverage,
+)
 from littraceqa.di_pipeline.evaluation.paper_selection_report import (
     build_report,
     collect_review_cases,
@@ -24,12 +28,7 @@ from littraceqa.di_pipeline.evaluation.selection_input import (
     load_queries,
     load_retrieval_run,
 )
-from littraceqa.di_pipeline.retrieve.paper_tables import MinerUPaperTableSource
 from littraceqa.di_pipeline.select import build_paper_selector
-from littraceqa.di_pipeline.select.citation_table_coverage import (
-    citation_table_candidate_ids,
-)
-from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
 
 _PRODUCTION_QUERY_FIELDS = ("question", "answer_types", "table_schema")
 
@@ -142,28 +141,18 @@ def main() -> None:
             parser.error(
                 "--evidence-coverage-mineru-dir must be an existing directory"
             )
-        evidence_source = MinerUPaperTableSource(
-            args.evidence_coverage_mineru_dir
-        )
-        wanted_metadata = citation_table_candidate_ids(
-            query_objects,
-            retrieval_run.rankings,
-        )
-        selection_metadata = load_paper_metadata(
-            args.paper_metadata,
-            wanted_metadata,
-            abstract_chars=args.abstract_chars,
-        )
-        missing_metadata = wanted_metadata - selection_metadata.keys()
-        if missing_metadata:
-            parser.error(
-                f"paper metadata is missing {next(iter(sorted(missing_metadata)))}"
+        try:
+            setup = prepare_evidence_coverage(
+                args.evidence_coverage_mineru_dir,
+                args.paper_metadata,
+                query_objects,
+                retrieval_run.rankings,
+                abstract_chars=args.abstract_chars,
             )
-        selection_refiner = EvidenceCoverageRefiner(
-            evidence_source,
-            evidence_source=evidence_source,
-            paper_metadata=selection_metadata,
-        )
+        except MissingPaperMetadataError as exc:
+            parser.error(str(exc))
+        selection_refiner = setup.refiner
+        selection_metadata = setup.paper_metadata
 
     cases, wanted_ids = collect_review_cases(
         gold_records,

@@ -13,7 +13,7 @@ from littraceqa.di_pipeline.select.citation_table_coverage import (
     parse_citation_table_condition,
 )
 from littraceqa.di_pipeline.select.selector import PaperSelection
-from littraceqa.di_pipeline.select.table_coverage import EvidenceCoverageRefiner
+from littraceqa.di_pipeline.select.evidence_coverage import EvidenceCoverageRefiner
 
 _QUESTION = (
     "Which ACL 2024 papers cite BaseNet (Base Networks, ICML2020) and use it "
@@ -248,9 +248,8 @@ def test_combined_evidence_refiner_runs_citation_coverage_last():
         {"p1": _document("p1"), "p2": _document("p2", "BaseNet")}
     )
 
-    result = EvidenceCoverageRefiner(
+    result = EvidenceCoverageRefiner.from_evidence_source(
         source,
-        evidence_source=source,
         paper_metadata=_metadata("p1", "p2"),
     ).refine(_query(), ["p1", "p2"], _selection())
 

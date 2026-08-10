@@ -1,4 +1,4 @@
-"""Read paper tables without coupling selection logic to MinerU files."""
+"""Load normalized paper evidence from existing MinerU content lists."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class PaperTable:
 
 @dataclass(frozen=True)
 class PaperEvidenceDocument:
-    """Text evidence read from one MinerU content list."""
+    """Normalized text, tables, and references for one paper."""
 
     paper_id: str
     title: str
@@ -47,8 +47,8 @@ class PaperEvidenceSource(PaperTableSource, PaperDocumentSource, Protocol):
     pass
 
 
-class MinerUPaperTableSource:
-    """Read text and table evidence from existing MinerU content lists."""
+class MinerUPaperEvidenceSource:
+    """Read one paper at a time from existing MinerU output."""
 
     def __init__(self, mineru_dir: str | Path, cache_size: int = 32) -> None:
         if cache_size < 0:
@@ -77,59 +77,76 @@ class MinerUPaperTableSource:
 
     def _read_document(self, paper_id: str) -> PaperEvidenceDocument:
         path = self.mineru_dir / paper_id / "auto" / f"{paper_id}_content_list.json"
+        blocks = self._load_content_list(path)
+        if blocks is None:
+            return _empty_document(paper_id)
+        return _parse_content_blocks(paper_id, blocks)
+
+    @staticmethod
+    def _load_content_list(path: Path) -> list[object] | None:
         try:
             with path.open(encoding="utf-8") as stream:
                 blocks = json.load(stream)
         except (OSError, UnicodeError, ValueError):
-            return _empty_document(paper_id)
+            return None
         if not isinstance(blocks, list):
-            return _empty_document(paper_id)
+            return None
+        return blocks
 
-        title = ""
-        text_blocks: list[str] = []
-        tables: list[PaperTable] = []
-        reference_entries: list[str] = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "text":
-                text = _join_text(block.get("text"))
-                if text:
-                    text_blocks.append(text)
-                    if not title and block.get("text_level") == 1:
-                        title = text
-                continue
-            if block.get("type") == "list" and block.get("sub_type") == "ref_text":
-                items = block.get("list_items")
-                if isinstance(items, list):
-                    reference_entries.extend(
-                        text for item in items if (text := _join_text(item))
-                    )
-                continue
-            if block.get("type") != "table":
-                continue
-            caption = _join_text(block.get("table_caption"))
-            footnote = _join_text(block.get("table_footnote"))
-            body = block.get("table_body")
-            body = body if isinstance(body, str) else ""
-            rows, body_text = _parse_table_body(body)
-            text = "\n".join(part for part in (caption, body_text, footnote) if part)
-            tables.append(
-                PaperTable(
-                    paper_id=paper_id,
-                    table_id=_table_id(caption),
-                    caption=caption,
-                    rows=rows,
-                    text=text,
+
+# Compatibility name for callers written before the source exposed body text.
+MinerUPaperTableSource = MinerUPaperEvidenceSource
+
+
+def _parse_content_blocks(
+    paper_id: str,
+    blocks: list[object],
+) -> PaperEvidenceDocument:
+    title = ""
+    text_blocks: list[str] = []
+    tables: list[PaperTable] = []
+    reference_entries: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text = _join_text(block.get("text"))
+            if text:
+                text_blocks.append(text)
+                if not title and block.get("text_level") == 1:
+                    title = text
+            continue
+        if block.get("type") == "list" and block.get("sub_type") == "ref_text":
+            items = block.get("list_items")
+            if isinstance(items, list):
+                reference_entries.extend(
+                    text for item in items if (text := _join_text(item))
                 )
+            continue
+        if block.get("type") != "table":
+            continue
+        caption = _join_text(block.get("table_caption"))
+        footnote = _join_text(block.get("table_footnote"))
+        body = block.get("table_body")
+        body = body if isinstance(body, str) else ""
+        rows, body_text = _parse_table_body(body)
+        text = "\n".join(part for part in (caption, body_text, footnote) if part)
+        tables.append(
+            PaperTable(
+                paper_id=paper_id,
+                table_id=_table_id(caption),
+                caption=caption,
+                rows=rows,
+                text=text,
             )
-        return PaperEvidenceDocument(
-            paper_id=paper_id,
-            title=title,
-            text_blocks=tuple(text_blocks),
-            tables=tuple(tables),
-            reference_entries=tuple(reference_entries),
         )
+    return PaperEvidenceDocument(
+        paper_id=paper_id,
+        title=title,
+        text_blocks=tuple(text_blocks),
+        tables=tuple(tables),
+        reference_entries=tuple(reference_entries),
+    )
 
 
 def _empty_document(paper_id: str) -> PaperEvidenceDocument:
@@ -259,3 +276,14 @@ def _validate_paper_id(paper_id: str) -> None:
         or "\\" in paper_id
     ):
         raise ValueError("paper_id must be a single path component")
+
+
+__all__ = [
+    "MinerUPaperEvidenceSource",
+    "MinerUPaperTableSource",
+    "PaperDocumentSource",
+    "PaperEvidenceDocument",
+    "PaperEvidenceSource",
+    "PaperTable",
+    "PaperTableSource",
+]
