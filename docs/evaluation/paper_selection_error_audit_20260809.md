@@ -73,29 +73,45 @@ the intended behavior without changing the established validation result.
 
 ## Evidence coverage experiment
 
-An optional post-ranking step now handles two cases where the question gives
-enough table structure to override the global paper order safely:
+An optional post-ranking step now handles four cases where the question gives
+enough local evidence to override the global paper order safely:
 
 - an explicitly named paper, Table ID, and at least two equations all match
   one table in the top-20 papers; or
 - a two-column output schema names non-method rows and one value column, and
-  one table uniquely contains every enumerated row plus that value column.
+  one table uniquely contains every enumerated row plus that value column; or
+- two explicit answer slots resolve to distinct top-20 papers, each paper
+  claims the named method and contains the requested table or text evidence.
+- an open-set venue/year question identifies one cited paper and requires it
+  as a baseline: candidate metadata must match the outer venue and year, the
+  MinerU references must contain the cited title and year, and one of the
+  first two comparison tables must contain the cited alias in a row with
+  numeric measurements.
 
-The second rule excludes method, model, system, and paper rows. Both rules
-fall back to `f1_method_owner` when no unique table is found or MinerU output
-is missing or malformed. They read only the top-20 papers and never add a
-paper outside the retrieval result.
+The second rule excludes method, model, system, and paper rows. The fourth rule
+accepts only two to ten verified papers, requires the original selected seed
+to be among them, and preserves their retrieval order. All four rules fall
+back to `f1_method_owner` when their evidence conditions cannot be verified
+conservatively. They inspect only the top-20 papers and never add a paper
+outside the retrieval result.
 
-On validation, only q_033 and q_052 changed. q_033 moved from an unrelated
+On validation, q_023, q_033, q_042, q_043, q_045, and q_052 changed. q_023
+expanded one selected gold paper to all nine required CVPR 2025 papers at
+ranks 1, 2, 4, 5, 6, 7, 8, 9, and 10. Each selected paper cites
+"Planning-oriented Autonomous Driving" from 2023 and reports UniAD as a
+measured baseline in an early comparison table; the non-gold rank-3 candidate
+and ranks 11-20 failed at least one condition. q_033 moved from an unrelated
 rank-1 paper to the rank-6 ECM paper whose Table 3 contains both requested
 weighting equations. q_052 replaced four submitted papers with the rank-3
 paper whose Table 5 contains all six benchmark rows and the Kitchen column.
+q_042, q_043, and q_045 added the uniquely supported second paper for sCM/IMM,
+DEIM/Mr. DETR, and VTI/MoD respectively.
 
 | Gold definition | F1 before | F1 after evidence coverage |
 |---|---:|---:|
-| Answer-bearing | 0.8982 | 0.9273 |
-| Evidence-backed | 0.7788 | 0.8079 |
-| Official | 0.7030 | 0.7212 |
+| Answer-bearing | 0.8982 | 0.9600 |
+| Evidence-backed | 0.7788 | 0.8382 |
+| Official | 0.7030 | 0.7503 |
 
 The 71 test and 4,901 `test_extra` selections did not change. This establishes
 that the current gates are fail-closed on those inputs, but not that the gain
@@ -118,9 +134,11 @@ gold files do not retain `table_schema`.
 Two experiments were intentionally not kept:
 
 1. Counting parallel `what ... does A ..., and what ... does B ...` clauses as
-   two papers improved two validation questions, but changed 33 `test_extra`
-   records. Manual inspection found 12 clear same-paper comparisons and 3
-   ambiguous cases, so the rule was not reliable enough for F1-oriented use.
+   two papers without checking evidence improved two validation questions, but
+   changed 33 `test_extra` records. Manual inspection found 12 clear same-paper
+   comparisons and 3 ambiguous cases. The accepted implementation therefore
+   requires unique self-owned targets and direct local evidence before adding
+   a second paper.
 2. Sending the query-matched chunk instead of the paper head to Qwen improved
    some individual ranks, but reduced eight-query selector F1 from 0.5917 to
    0.5292. The implementation change was reverted.
@@ -151,22 +169,34 @@ differences.
 
 ## Remaining work
 
-After evidence coverage, the answer-bearing result has eight imperfect
-queries, 21 missed papers, and two false positives. The most useful next steps
-are:
+After evidence coverage, the answer-bearing result has four imperfect queries,
+ten missed papers, and two false positives. Eight misses belong to the
+unresolved open-set questions q_020, q_022, and q_025. The remaining two misses
+and both false positives belong to q_029.
 
-1. Resolve explicitly named methods or variants to distinct supporting papers
-   for q_042, q_043, and q_045. This targets three misses.
-2. Select open-set papers from verified venue/year/modality and evidence
-   constraints instead of a fixed count. This targets 16 of the 21 misses.
-3. Match each requested answer slot to a paper that actually reports the
-   value before cutting the final list. This is different from method
-   ownership: in q_029, two required papers contain comparison-table rows for
-   other methods but are not the papers that introduced those methods.
+All four remaining queries need data review before another selector rule is
+accepted:
 
-These changes require evidence coverage or reliable owner resolution. Adding
-more question-only regular expressions would be simpler, but the rejected
-ablation shows that it would overfit the validation wording.
+1. q_020 has non-gold papers whose primary framework figures explicitly use
+   MCTS, including SAPIENT and THOUGHTSCULPT. A caption-based verifier cannot
+   separate them from the gold papers on the stated condition.
+2. q_022 has a non-gold ICML paper, ConfPO, that proposes a preference
+   objective without a reference policy in its equation. Excluding it would
+   require wording specific to the annotated gold set.
+3. q_025 has non-gold papers, including ReflectionFlow and UniGen, that satisfy
+   the stated year, scaling, text-to-image, GenEval, and base-model conditions.
+   Conversely, the gold ScaleKV paper describes cache compression rather than
+   identifying its method as test-time scaling.
+4. q_029 contains inconsistent reporter evidence. Multiple top-20 papers
+   reproduce the requested values, while the question, datasets, values, and
+   gold evidence do not provide a unique paper assignment. A weighted slot
+   matcher can reinforce the current false positives instead of resolving
+   them.
+
+No additional validation rule was accepted for these cases. The next useful
+step is to adjudicate the gold sets or evaluate a general evidence verifier on
+independent labels. Adding more question-only patterns would overfit the
+validation wording.
 
 Count-only open-set ablations confirmed this risk. A fixed count of ten was
 helpful mainly for q_023 and reduced q_022 F1. A fused-score elbow over-selected

@@ -210,26 +210,34 @@ validation 55問（公式 gold 146本）での実測:
 | `f1_balanced` | 0.8667 | 0.6101 | 0.6561 |
 | `high_precision` | 0.8970 | 0.6081 | 0.6588 |
 | **`f1_method_owner`** | **0.9591** | **0.6490** | **0.7030** |
-| **`f1_method_owner` + Evidence Coverage** | **0.9909** | **0.6535** | **0.7212** |
+| **`f1_method_owner` + Evidence Coverage** | **0.9909** | **0.6833** | **0.7503** |
 | 上限（top50から完璧に選ぶ） | 1.0000 | 0.9091 | 0.9406 |
 
 `f1_method_owner` の増分は、単一の実験主体を明示する2文型の過大選択を抑えた結果である。
-Evidence Coverage はその後段でMinerUのTableをTop20だけ確認し、次のどちらかが一意に
-成立した場合だけ既存選択を置き換える。
+Evidence Coverage はその後段でMinerUの本文、Table、参考文献と論文メタデータを
+Top20だけ確認し、次のいずれかを保守的に検証できた場合だけ既存選択を変更する。
 
 - 質問中のpaper名、Table番号、2つ以上の式が同じTableに一致する
 - 非method系の行項目が別々の行に現れ、値列名も同じ1つのTable内に現れる
+- 明示された2つの回答slotが、自己所有手法と局所Evidenceの一致する別々の2論文で
+  被覆される
+- 外側の会議名・年が論文メタデータに一致し、指定された引用論文のタイトル・年が
+  参考文献にあり、その手法が冒頭2表の比較行でbaselineとして数値付きで使われている
 
-validationで変わったのはq_033とq_052だけで、Answer-bearing / Evidence / Officialの
-F1はそれぞれ0.9273 / 0.8079 / 0.7212になった。test 71問とtest_extra 4,901問の
-選択は変わらず、独立goldでの改善は未確認。このためEvidence Coverageは既定ではなく
-paper-only提出時のopt-inである。MinerU欠損、表構造の不一致、候補が複数の場合は
+validationで変わったのはq_023、q_033、q_042、q_043、q_045、q_052である。
+q_023では「指定論文を引用し、主比較表でbaselineとして使う」という条件を満たす
+CVPR 2025論文9本をTop20から過不足なく取得した。Answer-bearing / Evidence /
+OfficialのF1はそれぞれ0.9600 / 0.8382 / 0.7503になった。test 71問と
+test_extra 4,901問の選択は変わらず、独立goldでの改善は未確認である。このため
+Evidence Coverageは既定ではなくpaper-only提出時のopt-inである。MinerU欠損、
+メタデータ欠損、構造の不一致、または条件を十分に検証できない場合は
 `f1_method_owner`へ戻る。
 
 **この順位を鵜呑みにしない。** validation がクラスタ注釈である以上、test で同じとは
 限らない。`eval_paper_selection.py` はReading AgentのLLM evidence判定を動かさないため、
 `require_evidence` 付き構成は本数規則だけの値である。一方、
-`--evidence-coverage-mineru-dir`を指定した場合だけ、上記の表限定refinerを評価できる。
+`--evidence-coverage-mineru-dir`を指定した場合だけ、上記のMinerU Evidence refinerを
+評価できる。
 どちらの処理も正解候補と不正解候補を落とし得るので、precision/recallの上下は
 実測で確認する。
 
@@ -256,6 +264,7 @@ uv run python scripts/build_submission.py \
   --retrieval test_retrieval_4b.json --queries data/test.jsonl \
   --select configs/select_style/f1_method_owner.yaml \
   --evidence-coverage-mineru-dir /data2/iseakira/pdfs/mineru \
+  --paper-metadata data/paper_metadata.jsonl \
   --output submission.jsonl
 ```
 
@@ -293,13 +302,22 @@ uv run python scripts/report_paper_selection_errors.py \
 最終/リランク前順位、Selectorの本数判断、Top候補のabstractとprovenanceを記録する。
 `--analysis-cutoff`は診断用の境界であり、Selectorへ渡す候補を切り詰めない。
 
-Evidence Coverage後のanswer-bearing監査では、誤り8問、未選択21本、false positive
-2本。未選択はすべてTop20内で、16本がq_020/q_022/q_023/q_025のopen/implicit
-enumeration、3本がq_042/q_043/q_045の明示的な複数手法比較、2本がq_029の
-paper-to-answer-slot割当だった。
-固定本数やscore gapはtest_extraで過大選択を起こしたため、open-setは候補ごとの条件・
-evidence検証を作るまでcount=1へフォールバックする。q_029はmethod ownerではなく、
-各回答値を実際に掲載する表・論文へのslot coverageが必要。
+Evidence Coverage後のanswer-bearing監査では、誤り4問、未選択10本、false positive
+2本。未選択はすべてTop20内で、8本がq_020/q_022/q_025の未解決open/implicit
+enumeration、2本がq_029だった。q_023の9本列挙は引用と比較表の同時検証で解決した。
+
+q_029は単純なpaper-to-answer-slot検証では安全に解けない。複数のTop20論文が同じ
+目標値を掲載し、gold evidenceと質問中のデータセット・値の帰属にも不整合があるため、
+現在の情報だけで自動割当すると誤った論文集合も完全一致に見える。実装で最適化せず、
+データ注釈の人手確認対象として残す。
+
+残るopen-set 3問にも同様の網羅性問題がある。q_020では非goldのSAPIENTと
+THOUGHTSCULPTもMCTSを主framework図で扱い、質問条件を満たす。q_022では非goldの
+ConfPOもreference modelを含まないpreference objectiveを提案する。q_025では非goldの
+ReflectionFlowとUniGenもtest-time scaling、text-to-image、GenEval、base modelの条件を
+満たす一方、goldのScaleKVは自身をscaling手法とは呼んでいない。これらをgoldだけに
+合わせる規則はvalidationへの過適合になるため追加しない。次の精度改善は、独立に
+監査したgoldまたはheld-out正解を用意してからEvidence verifierを評価する。
 
 `question_entities.py`のgeneric alias比較はcasefold済み集合を使う。旧実装は小文字keyを
 大文字集合と比較しており、ACL/LoRA/RAG等を除外できていなかった。修正後に影響する
