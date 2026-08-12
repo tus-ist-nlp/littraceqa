@@ -28,13 +28,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+# 我々が上げるのは candidate_recall。提出物側（paper_* など）は evaluate.py が
+# 既定で出さないので、新しい行では欠けて "-" になる（--metrics で明示すれば見られる）。
 _DEFAULT_METRICS = (
-    "paper_f1_macro",
-    "paper_precision_macro",
-    "paper_recall_macro",
     "candidate_recall_at20_single_macro",
     "candidate_recall_at20_multi_macro",
     "candidate_recall_at20_total_macro",
+    "evidence_candidate_recall_at20_total_macro",
+    "evidence_candidate_recall_at50_total_macro",
 )
 
 

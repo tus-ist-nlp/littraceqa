@@ -1,0 +1,41 @@
+# reading_expand_rrf/rrf.yaml + **質問が名指しした論文の引き上げ**。
+#
+# 質問文に `D-FINE` のような論文識別子（正式タイトル or コロン前の見出し）があり、
+# その論文が候補列に居るのに沈んでいたら promote_to の順位へ引き上げる。
+#
+# **候補外の論文は追加しない**（検索が拾えなかったものは救えない）。
+# single_paper の候補1位は既に 1.000 で飽和しているので、効くとしたら
+# 「FooNet と BarTune を比較せよ」型の**2本目以降**。
+#
+# 識別子は関係グラフと同じキャッシュから読む（索引は1本で済む）。
+# 大文字小文字も含めて一致させ、コーパス内で一意な名前だけを使い、
+# ハブになった名前（ALLCAPS の普通の英単語）は除外する
+# （retrieve/paper_titles.py のモジュール docstring を参照）。
+#
+# **判定: 発火0件なら即捨てる。** 実装の複雑さに見合わない。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 50
+  anchors: 1
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 60
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10
+  title_protect:
+    enabled: true
+    max_papers: 4     # 引き上げる上限
+    promote_to: 10    # 引き上げ先の順位（1始まり）

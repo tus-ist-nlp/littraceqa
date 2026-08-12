@@ -1,0 +1,47 @@
+# reading_expand_rrf/rrf.yaml のランキングB に**明示的な関係**2種を足した版。
+#
+# 既存3ソース（specter2 / bib_coupling / bm25_mlt）はどれも「内容が近い」を測っている。
+# ここで足す2つは「**名指ししているか**」を測るので、拾う gold が違うはず。
+#
+#   * title_mention    : A の本文に B の名前（正式タイトル / コロン前の見出し）が出る
+#   * method_comention : A と B が**同じ論文の名前を挙げている**（共言及の Jaccard）
+#
+# CLAUDE.md の「引用グラフはほぼ張れない（実測でコーパス内引用1本）」は
+# **arXiv ID 解決ベース**の結論。参考文献の ID が取れなくても本文に名前が
+# 書かれていれば繋がるので、ここは覆る可能性がある。
+#
+# 索引は初回に1回だけコーパスを走査して作る（GPU 不要、キャッシュ後は即ロード）。
+# 先に作っておくなら:
+#   uv run python scripts/build_relation_graphs.py \
+#     --paths configs/paths/default.yaml --process configs/process_style/mineru.yaml
+#
+# **判定の仕方**（replay_expansion.py、GPU 不要・15秒）:
+#   - ecr の multi@5 / @10 / @20 を既存3ソース構成と比べる
+#   - 「この2つだけが拾えた gold」が0本なら既存と冗長なので捨てる
+#   - method_comention はピア gold（evidence を持たない gold 29本）の回収本数で見る
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+    # 直接リンク（双方向）+ ハブを避けた2ホップ。
+    - { name: title_mention, two_hop_weight: 0.05, max_hub_degree: 4 }
+    # 共言及。共有1本だけのペアは有名手法1つで繋がるので切る（bib_coupling と同じ）。
+    - { name: method_comention, min_shared: 2 }
+  neighbors: 50
+  anchors: 1
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 60
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

@@ -1,6 +1,3 @@
-# BM25 + SPECTER2 のハイブリッド。
-# SPECTER2 は学術論文特化の密埋め込み（proximity / adhoc_query アダプタで
-# 文書側・クエリ側を切替）。論文検索ドメインに合わせた密ベクトルを BM25 と融合。
 per_index_k: 100
 indexers:
   - name: bm25s
