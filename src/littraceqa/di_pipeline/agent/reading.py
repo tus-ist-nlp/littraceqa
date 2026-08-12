@@ -169,9 +169,6 @@ class ReadingAgent:
         # 検索の深さをリランカのスコア分布で決める。
         # {enabled, probe_rank, gap_threshold, shallow_k, deep_k}
         adaptive_depth: dict | None = None,
-        # 質問が名指しした論文が候補内に居るのに低順位なら引き上げる。
-        # {enabled, chunks, cache_path, max_papers, promote_to}
-        title_protect: dict | None = None,
         # **論文の代表スコアに使わないチャンク種別**（`["table"]` が実測での最良）。
         # 表チャンクは数値と短いラベルが密なので、論文が質問の主題でなくても
         # 表1枚で代表スコアが跳ね上がる。詳細は retrieve/hybrid.py の to_gold_papers。
@@ -267,12 +264,6 @@ class ReadingAgent:
             if isinstance(adaptive_depth, dict) and adaptive_depth.get("enabled")
             else None
         )
-        # enabled: false と未指定を同じ None に畳む（以降は None 判定だけで済む）。
-        self.title_protect = (
-            dict(title_protect)
-            if isinstance(title_protect, dict) and title_protect.get("enabled")
-            else None
-        )
         # enabled: false と未指定を同じ None に畳む。None なら `_refine()` の
         # 従来経路をそのまま通る（既存の yaml は1ビットも挙動が変わらない）。
         self.rewriter = (
@@ -282,10 +273,6 @@ class ReadingAgent:
         )
         # 書き換えを使わない構成でも重複除去は効かせられる（独立したキー）。
         self.deduper = SubqueryDeduper.from_retriever(retriever, subquery_dedup)
-        # 識別子辞書は初回の保護判定まで遅延ロードする（関係グラフと同じ
-        # キャッシュを読むだけだが、使わない構成で読み込ませない）。
-        self._title_index = None
-        self._title_hubs: frozenset[str] = frozenset()
         # scripts/run_search.py の --dump-runs が読む。Prediction.trace には入れない
         # （提出ファイルが膨らむため）。
         self.last_runs: list[SubqueryRun] = []
@@ -901,12 +888,6 @@ class ReadingAgent:
                 candidate_papers, self._rawq_ranking(query, runs or [])
             )
 
-        # 質問が名指しした論文の引き上げ。展開・統合のあと（＝最終の候補列）に効かせる。
-        if self.title_protect is not None and candidate_papers:
-            candidate_papers = self._apply_title_protect(
-                candidate_papers, self._named_papers(query), trace
-            )
-
         # **どれを提出するかは選ばない**（`submit_from: candidates`、既定）。検索の
         # 順位をそのまま渡し、選定は読解チーム側に任せる。`submit_from: llm` にすると
         # 従来どおり読解 LLM の選定結果を使う（選定込みで測りたい ablation 用）。
@@ -1196,56 +1177,6 @@ class ReadingAgent:
             }
         )
         return fused
-
-    def _named_papers(self, query: Query) -> set[str]:
-        """質問文が名指ししている論文（`title_protect`）。
-
-        **元の質問から1回だけ取る。** サブクエリは論文名を落とすことがあるので、
-        属性フィルタ（会議名・年）と同じ扱いにする。
-        """
-        if self.title_protect is None:
-            return set()
-        if self._title_index is None:
-            from littraceqa.di_pipeline.retrieve.relation_graph import load_title_index
-
-            self._title_index, self._title_hubs = load_title_index(
-                Path(self.title_protect["chunks"]), Path(self.title_protect["cache_path"])
-            )
-        return self._title_index.lookup_text(query.question, self._title_hubs)
-
-    def _apply_title_protect(
-        self, candidate_papers: list[str], named: set[str], trace: list[dict]
-    ) -> list[str]:
-        """質問が名指しした論文が沈んでいたら引き上げる。
-
-        **候補に無い論文は追加しない**（検索が拾えなかったものは救えない）。
-        single_paper の候補1位は既に飽和しているので、効くとしたら
-        「FooNet と BarTune を比較せよ」型の**2本目以降**。
-
-        `promote_to` は1始まりの順位で、そこへ詰めて挿し込む。
-        """
-        if not named:
-            return candidate_papers
-        promote_to = self.title_protect.get("promote_to", 10)
-        max_papers = self.title_protect.get("max_papers", 4)
-        cut = max(promote_to - 1, 0)
-
-        sunk = [p for p in candidate_papers[cut:] if p in named][:max_papers]
-        if not sunk:
-            return candidate_papers
-        sunk_set = set(sunk)
-        kept = [p for p in candidate_papers if p not in sunk_set]
-        trace.append(
-            {
-                "title_protect": {
-                    "named": sorted(named),
-                    "promoted": sunk,
-                    "from_ranks": [candidate_papers.index(p) + 1 for p in sunk],
-                    "promote_to": promote_to,
-                }
-            }
-        )
-        return kept[:cut] + sunk + kept[cut:]
 
     def _reranker(self):
         """retriever が持つ reranker。無い / NoneReranker なら None。

@@ -20,11 +20,11 @@ dictを合成し、`build_pipeline()` に渡す。
 
 ## なぜ分けているか
 
-- **本文チャンク(mineru)を図表チャンク(figure_vlm)に差し替えても、検索手法やエージェントの設定を書き直さなくていい**
+- **前処理を差し替えても、検索手法やエージェントの設定を書き直さなくていい**
 - **同じ検索手法(search_style)を別の前処理(process_style)と組み合わせても、索引の保存先が衝突しない**
   - `process_style`/`search_style` のファイルには `pdf_dir`/`index_dir` を書かない
   - `compose_config()` が `paths` から `{index_dir}/{process名}/{indexer名}` のように自動導出する
-  - 例: `mineru + bm25s` → `index/mineru/bm25s`、`figure_vlm + bm25s` → `index/figure_vlm/bm25s`（別物として保存される）
+  - 例: `mineru + bm25s` → `index/mineru/bm25s`（前処理ごとに別物として保存される）
 - 新しい手法を1つ追加したいだけなのに、既存の組み合わせファイルを全部複製・修正する必要がない
 
 ## 使い方
@@ -43,11 +43,8 @@ uv run python scripts/run_search.py \
 組み合わせを変えたいときは、該当する引数だけ差し替える。他の3つはそのままでよい。
 
 ```bash
-# 検索手法だけColBERTに変える
-  --search configs/search_style/bm25_colbert/colbert.yaml
-
-# 前処理を図表チャンク(figure_vlm)に変える
-  --process configs/process_style/figure_vlm.yaml
+# 検索手法だけ論文単位BM25の併用に変える
+  --search configs/search_style/bm25_dual.yaml
 ```
 
 4フォルダのファイルはどう組み合わせても壊れない設計なので、新しいyamlを
@@ -61,9 +58,7 @@ configs/
 ├── paths/
 │   └── default.yaml
 ├── process_style/
-│   ├── marker.yaml           : PDFをブロック単位でチャンク化
-│   ├── mineru.yaml           : MinerU。事前に scripts/run_mineru.py で変換が必要（デフォルト、構築済み）
-│   └── figure_vlm.yaml       : Docling+Qwen2-VLで図表をチャンク化
+│   └── mineru.yaml           : MinerU。事前に scripts/run_mineru.py で変換が必要（デフォルト、構築済み）
 ├── search_style/
 │   ├── bm25.yaml             : BM25 単体（chunk単位）
 │   ├── bm25_paper.yaml       : BM25 単体（論文単位、ablation）
@@ -72,14 +67,6 @@ configs/
 │   ├── bm25_qwen3.yaml       : BM25 + Qwen3-Embedding-0.6B
 │   ├── bm25_qwen3_0.6b_rerank_qwen3_0.6b.yaml : 上記 + Qwen3-Reranker-0.6B（2索引ablation）
 │   ├── bm25_specter2.yaml    : BM25 + SPECTER2（全チャンク版）
-│   ├── bm25_azure_openai.yaml : BM25 + Azure OpenAI text-embedding-3-large（全chunk、ablation。API課金あり）
-│   ├── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-0.6B + SigLIP（図表画像を直接embedding）
-│   ├── bm25_qwen3_vl_8b_rerank_qwen3vl_8b.yaml : BM25 + Qwen3-Embedding-0.6B +
-│   │     Qwen3-VL-Embedding-8B(図表画像) + Qwen3-VL-Reranker-8B。
-│   │     図表を画像のまま扱う唯一の構成（隔離venv .venv-vl が必要）
-│   ├── bm25_colbert/         : ColBERT 系列（遅延相互作用）
-│   │   ├── colbert.yaml      : colbertv2.0 ベースライン
-│   │   └── gte_modern.yaml   : GTE-ModernColBERT-v1（長コンテキスト版）
 │   ├── bm25_specter2_body_qwen3/ : デフォルト系列。各モデルを設計どおりの粒度で使う3索引
 │   │   ├── qwen3.yaml        : BM25 + SPECTER2(title_abstractのみ) +
 │   │   │                       Qwen3-Embedding-0.6B(本文のみ)（デフォルト、構築済み）
@@ -105,9 +92,8 @@ configs/
     │   │                     ランキングを RRF 統合して候補列を作り直す）
     │   ├── rrf.yaml          : 3ソース（SPECTER2 / 書誌結合 / 全文MLT）統合（現状のベスト）
     │   ├── cand50.yaml       : 上記の候補幅を 50 に広げた版
-    │   ├── stacked.yaml      : rrf + 反復ループの3キー + title_protect
-    │   │                     （いま足せるものを全部足した構成。実測はまだ無い）
-    │   └── rel.yaml / consensus.yaml / protect.yaml : 実測で不採用（再評価用に保存）
+    │   ├── stacked.yaml      : rrf + 反復ループの3キー（いま足せるものを全部足した構成）
+    │   └── consensus.yaml    : 実測で不採用（再評価用に保存）
 ```
 
 `agent_style` は agent が `reading` 一本なので、分けているのは**どの任意キーを使うか**。
@@ -121,11 +107,11 @@ reranker を使う構成は末尾に reranker のモデルとサイズを書い�
 （各構成のモデル名と主要パラメータの一覧は `CLAUDE.md` の「3. configs/ のディレクトリ構成」、
 選定理由は各 yaml 冒頭のコメントを参照）。
 
-**同じ土台から派生した3系列だけフォルダに畳んである。** `agent_style` と同じく
+**同じ土台から派生した系列だけフォルダに畳んである。** `agent_style` と同じく
 `config_label()`（`src/littraceqa/common.py`）が `{フォルダ名}_{stem}` に畳むので、
 **フォルダ名には既存ファイル名の接頭辞をそのまま使い**、その系列の素の構成には
-フォルダ名の末尾の語をファイル名として付ける（`bm25_colbert/colbert.yaml` ->
-ラベル `bm25_colbert`）。こうすると畳む前と実験ラベルが1文字も変わらないので、
+フォルダ名の末尾の語をファイル名として付ける（`reading_expand_rrf/rrf.yaml` ->
+ラベル `reading_expand_rrf`）。こうすると畳む前と実験ラベルが1文字も変わらないので、
 過去の `report/*.md` や `results/experiments.jsonl` と同じ名前で並べて読める。
 
 推奨デフォルトの組み合わせ: `process_style/mineru.yaml` + `search_style/bm25_specter2_body_qwen3/qwen3.yaml` + `agent_style/reading.yaml`

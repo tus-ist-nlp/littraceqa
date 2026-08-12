@@ -605,39 +605,6 @@ def test_consensus_off_is_the_existing_path():
     assert "pE3" not in _run(off)
 
 
-def test_title_protect_promotes_a_named_paper():
-    """質問が名指しした論文が沈んでいたら引き上げる。候補外は追加しない。"""
-    agent = ReadingAgent(
-        _StubRetriever(),
-        llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
-        title_protect={"enabled": True, "promote_to": 2, "max_papers": 4},
-    )
-    # 辞書のロードを省いて、名指し結果だけを差し込む。
-    agent._named_papers = lambda query: {"p4", "pMISSING"}
-    prediction = agent.run(_query())
-    candidates = prediction.candidate_papers
-    assert candidates.index("p4") == 1  # promote_to=2 -> 2位（1始まり）
-    assert "pMISSING" not in candidates  # 候補外は追加しない
-    protect = [s["title_protect"] for s in prediction.trace if "title_protect" in s]
-    assert protect and protect[0]["promoted"] == ["p4"]
-
-
-def test_title_protect_off_by_default():
-    """title_protect を書かなければ候補列に一切手を付けない。"""
-    llm_responses = [_subqueries("sq"), _judge(["p0"], sufficient=True)]
-    plain = ReadingAgent(
-        _StubRetriever(),
-        llm=FakeLLM(responses=list(llm_responses)),
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
-    ).run(_query())
-    assert not any("title_protect" in step for step in plain.trace)
-
-
 class _ScoreReranker:
     """paper_id -> スコアの対応表で並べ替える偽 reranker。"""
 
