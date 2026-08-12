@@ -241,15 +241,12 @@ def build_paper_expander(agent_cfg: dict):
 
     expansion_cfg = dict(expansion_cfg)
     source_cfgs = expansion_cfg.pop("sources", [])
-    # 挿入や rerank の設定は全ソースに配る（単一ソース時はそのまま効く）。
+    # 統合まわりの設定は全ソースに配る（単一ソース時はそのまま効く）。
     shared = {
         key: expansion_cfg[key]
         for key in (
             "neighbors",
             "anchors",
-            "rerank",
-            "rerank_top_k",
-            "insert_at",
             # A（質問→論文）と B（論文→論文）の RRF 統合。ソース側では使わないが、
             # 単一ソース構成でも ReadingAgent が読めるように同じ経路で配る。
             "combine",

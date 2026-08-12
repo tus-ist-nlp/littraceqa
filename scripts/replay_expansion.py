@@ -5,7 +5,7 @@
 数秒〜数十秒で回るので、`related_offset` や `neighbors` の調整はここで詰める。
 
 **ReadingAgent 本体のメソッドをそのまま呼ぶ。** ロジックを書き写すとオフラインの
-結論が本走行に効かなくなるため、`_combine_rrf` / `_expand_candidates` を再実装しない。
+結論が本走行に効かなくなるため、`_combine_rrf` を再実装しない。
 
     uv run python scripts/replay_expansion.py \
       --paths configs/paths/default.yaml \
@@ -144,10 +144,8 @@ def main() -> None:
 
         if expander is None:
             fused = candidates
-        elif getattr(expander, "combine", None) == "rrf":
-            fused = agent._combine_rrf(candidates, trace)[:CANDIDATE_PAPERS_LIMIT]
         else:
-            fused = agent._expand_candidates(query, candidates, {}, trace)
+            fused = agent._combine_rrf(candidates, trace)[:CANDIDATE_PAPERS_LIMIT]
 
         # 名指し保護も候補列の並べ替えだけなのでオフラインで再生できる。
         # 本走行と同じく展開・統合のあとに効かせる（_build_prediction と同じ順番）。

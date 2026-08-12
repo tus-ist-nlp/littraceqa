@@ -42,31 +42,28 @@ def index_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_expand_appends_neighbors_excluding_existing(index_dir: Path) -> None:
+def test_rank_returns_neighbors_in_order(index_dir: Path) -> None:
     expander = Specter2PaperExpander(str(index_dir), neighbors=3, anchors=1)
-    # p1 は既に候補に居るので返らない。p0(anchor自身)も返らない。
-    added = expander.expand(["p0", "p1"])
-    assert added == ["p2", "p3"]
+    # anchor 自身（p0）は近傍に入らない。既存候補の p1 は落とさない（統合での加点源）。
+    assert expander.rank(["p0", "p1"]) == ["p1", "p2", "p3"]
 
 
-def test_expand_unknown_anchor_is_silent(index_dir: Path) -> None:
+def test_rank_unknown_anchor_is_silent(index_dir: Path) -> None:
     expander = Specter2PaperExpander(str(index_dir), neighbors=3, anchors=1)
-    assert expander.expand(["unknown_paper"]) == []
-    assert expander.expand([]) == []
+    assert expander.rank(["unknown_paper"]) == []
+    assert expander.rank([]) == []
 
 
-def test_expand_multi_anchor_interleaves_by_rank(index_dir: Path) -> None:
+def test_rank_multi_anchor_interleaves_by_rank(index_dir: Path) -> None:
     expander = Specter2PaperExpander(str(index_dir), neighbors=3, anchors=2)
     # anchor p0 の近傍: p1,p2,p3 / anchor p4 の近傍: p3,p2,p1
     # 交互配置: rank0 -> p1(p0側), p3(p4側), rank1 -> p2 ... 重複は除去。
-    added = expander.expand(["p0", "p4"])
-    assert added == ["p1", "p3", "p2"]
+    assert expander.rank(["p0", "p4"]) == ["p1", "p3", "p2"]
 
 
-def test_expand_caps_at_neighbors(index_dir: Path) -> None:
+def test_rank_caps_at_neighbors(index_dir: Path) -> None:
     expander = Specter2PaperExpander(str(index_dir), neighbors=2, anchors=2)
-    added = expander.expand(["p0", "p4"])
-    assert len(added) <= 2
+    assert len(expander.rank(["p0", "p4"])) <= 2
 
 
 def _bib_corpus(tmp_path: Path) -> Path:
@@ -97,10 +94,8 @@ def test_bib_coupling_ranks_by_shared_references(tmp_path: Path) -> None:
         neighbors=5, min_shared=2,
     )
     # p0 と2本共有する p1 のみ。p2 は1本しか共有しないので min_shared で落ちる。
-    assert ex.expand(["p0"]) == ["p1"]
-    # 既存候補にある論文は返さない
-    assert ex.expand(["p0", "p1"]) == []
-    # rerank 用テキストは title_abstract
+    assert ex.rank(["p0"]) == ["p1"]
+    # 代表テキストは title_abstract
     assert "abstract one" in ex.text_of("p1")
     # 2回目はキャッシュから読む（走査しない）
     assert (tmp_path / "refs.pkl").exists()
@@ -108,7 +103,7 @@ def test_bib_coupling_ranks_by_shared_references(tmp_path: Path) -> None:
         chunks="/nonexistent", cache_path=str(tmp_path / "refs.pkl"),
         neighbors=5, min_shared=2,
     )
-    assert again.expand(["p0"]) == ["p1"]
+    assert again.rank(["p0"]) == ["p1"]
 
 
 def test_bib_coupling_min_shared_one_includes_weak_links(tmp_path: Path) -> None:
@@ -118,7 +113,7 @@ def test_bib_coupling_min_shared_one_includes_weak_links(tmp_path: Path) -> None
         chunks=str(_bib_corpus(tmp_path)), cache_path=str(tmp_path / "refs1.pkl"),
         neighbors=5, min_shared=1,
     )
-    added = ex.expand(["p0"])
+    added = ex.rank(["p0"])
     assert added[0] == "p1"          # Jaccard が高い順
     assert set(added) == {"p1", "p2"}  # p3 は共有ゼロなので入らない
 
@@ -130,29 +125,17 @@ def test_fused_expander_rrf_merges_sources(index_dir: Path, tmp_path: Path) -> N
 
     class _Fixed:
         def __init__(self, ids): self.ids = ids
-        def expand(self, ranked): return [p for p in self.ids if p not in ranked]
+        def rank(self, ranked): return list(self.ids)
         def text_of(self, pid): return f"text of {pid}"
 
     # A: [x, y] / B: [y, z] -> y が両方で上位なので RRF で先頭に来る
     fused = FusedPaperExpander(
         sources=[_Fixed(["x", "y"]), _Fixed(["y", "z"])], neighbors=5, rrf_k=1
     )
-    assert fused.expand(["anchor"])[0] == "y"
-    assert set(fused.expand(["anchor"])) == {"x", "y", "z"}
+    assert fused.rank(["anchor"])[0] == "y"
+    assert set(fused.rank(["anchor"])) == {"x", "y", "z"}
     # テキストは最初に持っていたソースから引く
     assert fused.text_of("y") == "text of y"
-    # rerank に渡す RetrievalResult も作れる
-    results = fused.expand_results(["anchor"])
-    assert [r.paper_id for r in results][0] == "y"
-    assert results[0].source == "paper_expansion"
-
-
-def test_rank_keeps_existing_candidates(index_dir: Path) -> None:
-    """rank() は既存候補を落とさない。RRF 統合では重なりこそが加点の源なので。"""
-    expander = Specter2PaperExpander(str(index_dir), neighbors=3, anchors=1)
-    # expand() は p1 を落とすが、rank() は残す（anchor 自身だけが入らない）
-    assert expander.expand(["p0", "p1"]) == ["p2", "p3"]
-    assert expander.rank(["p0", "p1"]) == ["p1", "p2", "p3"]
 
 
 def _bm25_paper_index(tmp_path: Path) -> Path:
@@ -182,7 +165,7 @@ def test_bm25_mlt_ranks_lexically_close_papers(tmp_path: Path) -> None:
     index_dir = _bm25_paper_index(tmp_path)
     ex = BM25MLTExpander(str(index_dir), cache_path=str(tmp_path / "mlt.pkl"), neighbors=5)
     # anchor 自身は返さず、語彙が重なる p1 が p2 より先
-    added = ex.expand(["p0"])
+    added = ex.rank(["p0"])
     assert added[0] == "p1"
     assert "p0" not in added
     # anchor のクエリ文は papers.jsonl の先頭（title+abstract）から取る
@@ -190,25 +173,19 @@ def test_bm25_mlt_ranks_lexically_close_papers(tmp_path: Path) -> None:
     # 2回目はキャッシュから読む（papers.jsonl を走査しない）
     assert (tmp_path / "mlt.pkl").exists()
     again = BM25MLTExpander(str(index_dir), cache_path=str(tmp_path / "mlt.pkl"), neighbors=5)
-    assert again.expand(["p0"])[0] == "p1"
+    assert again.rank(["p0"])[0] == "p1"
 
 
-def test_fused_rank_falls_back_to_expand_for_sources_without_rank() -> None:
-    """rank() を持たないソース（自作 expander）が混ざっても落ちない。"""
+def test_fused_rank_keeps_existing_candidates() -> None:
+    """既存候補は落とさない。両ソースに乗っている論文が先頭に来る。"""
     from littraceqa.di_pipeline.retrieve.paper_expander import FusedPaperExpander
 
     class _Fixed:
         def __init__(self, ids): self.ids = ids
-        def expand(self, ranked): return [p for p in self.ids if p not in ranked]
+        def rank(self, ranked): return list(self.ids)
         def text_of(self, pid): return f"text of {pid}"
 
-    class _Ranked(_Fixed):
-        def rank(self, ranked): return list(self.ids)
-
-    # _Ranked は既存候補 x を落とさないので、x が両ソースに乗って先頭に来る
     fused = FusedPaperExpander(
-        sources=[_Ranked(["x", "y"]), _Fixed(["x", "z"])], neighbors=5, rrf_k=1
+        sources=[_Fixed(["x", "y"]), _Fixed(["x", "z"])], neighbors=5, rrf_k=1
     )
     assert fused.rank(["x"])[0] == "x"
-    # expand() 側は従来どおり両ソースとも既存候補を落としてから融合する
-    assert "x" not in fused.expand(["x"])

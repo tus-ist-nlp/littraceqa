@@ -726,11 +726,12 @@ class ReadingAgent:
         material_b = ""
         if self.paper_expander is not None:
             ranked = to_gold_papers(merged)
-            # expand() は**既存候補を除いた**近傍だけを返す。書き換えの狙いは
+            # **既存候補を除いた**近傍だけを材料にする。書き換えの狙いは
             # 「まだ候補圏内に居ない論文の語彙」なので、既に居る論文を材料に
-            # しても取りに行く先が無い。
-            expand = getattr(self.paper_expander, "expand", None)
-            related = list(expand(ranked)) if callable(expand) else []
+            # しても取りに行く先が無い。`rank()` は統合のために既存候補を
+            # 落とさないので、ここで落とす（除外分だけ本数は減る）。
+            seen = set(ranked)
+            related = [p for p in self.paper_expander.rank(ranked) if p not in seen]
             material_b = self.rewriter.material_b(
                 related, query.question, self.snippet_chars
             )
@@ -863,8 +864,11 @@ class ReadingAgent:
         # cutoff の後なので、検索力と選定力が混ざってしまう）。
         merged = self._merged_results(runs or [], chunks)
         merged = self._rescore_pool(query, merged, trace)
-        if getattr(self.paper_expander, "combine", None) == "rrf":
-            # RRF 統合では**50件で切る前の全長**を A のランキングとして使う。
+        if self.paper_expander is not None:
+            # 論文→論文展開は**A/B の RRF 統合のみ**（位置挿入は順位融合に全指標で
+            # 負けたので実装ごと削除した。詳細は CLAUDE.md）。
+            #
+            # 統合では**50件で切る前の全長**を A のランキングとして使う。
             # 51位の論文を関連ランキングが強く推していても、先に切ってしまうと
             # そもそも押し上げようがないため。切るのは統合したあと。
             candidate_papers = to_gold_papers(
@@ -896,10 +900,6 @@ class ReadingAgent:
             candidate_papers = self._pin_front(
                 candidate_papers, self._rawq_ranking(query, runs or [])
             )
-            if self.paper_expander is not None and candidate_papers:
-                candidate_papers = self._expand_candidates(
-                    query, candidate_papers, chunks, trace
-                )
 
         # 質問が名指しした論文の引き上げ。展開・統合のあと（＝最終の候補列）に効かせる。
         if self.title_protect is not None and candidate_papers:
@@ -1112,8 +1112,9 @@ class ReadingAgent:
 
             score(p) = w_A / (k + rank_A) + w_B / (k + offset + rank_B)
 
-        位置挿入（`_expand_candidates`）との違いは2つ。**A にも B にも居る論文が加点
-        される**こと（例: A 30位 × B 3位 → 実効1位相当）と、本数決め打ちが要らないこと。
+        かつてあった位置挿入（決まった位置に差し込む方式）との違いは2つ。
+        **A にも B にも居る論文が加点される**こと（例: A 30位 × B 3位 → 実効1位相当）と、
+        本数決め打ちが要らないこと。位置挿入は全指標で負けたので削除した。
         スコアで混ぜて壊れた（cr@20 0.822 -> 0.773）のは reranker の絶対スコアと
         展開の仮スコアを足していたからで、RRF は順位しか見ないのでその問題が無い。
 
@@ -1245,86 +1246,6 @@ class ReadingAgent:
             }
         )
         return kept[:cut] + sunk + kept[cut:]
-
-    def _expand_candidates(
-        self,
-        query: Query,
-        candidate_papers: list[str],
-        chunks: dict[str, RetrievalResult],
-        trace: list[dict],
-    ) -> list[str]:
-        """論文→論文展開で候補列を広げる。取り込み方は2通りある。
-
-        **rerank あり**: 展開論文の title+abstract を検索と同じ reranker にかけ、
-        **上位 rerank_top_k 本だけ**を insert_at の位置へ挿入する（残りは末尾）。
-        cr@20 を動かせる唯一の経路（実測 0.783 -> 0.813、multi 0.589 -> 0.646）。
-
-        **rerank なし（既定）**: LLM 可視域（max_candidates）の直後に全件挿入する。
-        上位を汚さないので cr@20 は不変のまま cr@50 が伸びる（0.836 -> 0.880）。
-
-        **スコアで既存候補と混ぜてはいけない。** 実測で cr@20 が 0.773 に悪化した。
-        reranker は展開20本の中での序列は正しく付ける（gold の順位が中央値9位 -> 5位）
-        が、絶対スコアは既存候補と比較可能ではなく、gold を含まないクエリからも
-        高スコアの非 gold が流れ込む。top20 に押し込まれた91本の gold は0本で、
-        代わりに既存 gold を2本追い出した。だから「上位K本に絞ってから位置挿入」にする。
-        """
-        expander = self.paper_expander
-        reranker = self._expansion_reranker()
-
-        if reranker is None:
-            expanded = expander.expand(candidate_papers)
-            if not expanded:
-                return candidate_papers
-            cut = min(self.max_candidates, len(candidate_papers))
-            trace.append(
-                {
-                    "paper_expansion": {
-                        "anchor": candidate_papers[0],
-                        "added": len(expanded),
-                        "inserted_at": cut,
-                        "reranked": False,
-                    }
-                }
-            )
-            return candidate_papers[:cut] + expanded + candidate_papers[cut:]
-
-        results = expander.expand_results(candidate_papers)
-        if not results:
-            return candidate_papers
-        # 展開論文だけを rerank する（既存チャンクは検索時に同じ reranker で
-        # スコア済みなので、掛け直さずに済ませてコストを増やさない）。
-        ranked = [r.paper_id for r in reranker.rerank(query.question, results, len(results))]
-        top_k = getattr(expander, "rerank_top_k", 5)
-        promoted = [p for p in ranked[:top_k] if p not in candidate_papers]
-        rest = [p for p in ranked[top_k:] if p not in candidate_papers]
-
-        insert_at = getattr(expander, "insert_at", None)
-        if insert_at is None:
-            insert_at = self.max_candidates
-        cut = min(insert_at, len(candidate_papers))
-        trace.append(
-            {
-                "paper_expansion": {
-                    "anchor": candidate_papers[0],
-                    "added": len(ranked),
-                    "reranked": True,
-                    "promoted": len(promoted),
-                    "inserted_at": cut,
-                }
-            }
-        )
-        return candidate_papers[:cut] + promoted + candidate_papers[cut:] + rest
-
-    def _expansion_reranker(self):
-        """展開論文の rerank に使う reranker。無効なら None。
-
-        検索と同じインスタンスを使い回すので、スコアの尺度が揃う（どちらも
-        同一モデルの yes 確率）。expander 側が rerank を要求していないとき、
-        retriever が reranker を持たないとき、NoneReranker のときは None。
-        """
-        if not getattr(self.paper_expander, "rerank", False):
-            return None
-        return self._reranker()
 
     def _reranker(self):
         """retriever が持つ reranker。無い / NoneReranker なら None。
