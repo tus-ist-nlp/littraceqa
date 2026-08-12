@@ -29,14 +29,12 @@ class _StubRelated:
 
     def __init__(self, related: list[str]):
         self.related = related
-        self.expand_calls: list[list[str]] = []
+        self.rank_calls: list[list[str]] = []
 
     def rank(self, ranked: list[str]) -> list[str]:
-        return [p for p in self.related if p != ranked[0]]
-
-    def expand(self, ranked: list[str]) -> list[str]:
-        self.expand_calls.append(list(ranked))
-        return [p for p in self.related if p not in set(ranked)]
+        # 本物と同じく**既存候補を落とさない**（落とすのは呼び出し側）。
+        self.rank_calls.append(list(ranked))
+        return list(self.related)
 
 
 class _StubStore:
@@ -159,7 +157,7 @@ def test_rewrite_replaces_refine_and_carries_hit_chunks_and_related_papers():
     # _refine() のプロンプトではない
     assert "Propose at most" not in prompt
     # 展開は候補列を渡して呼ばれている（ループの中で走る）
-    assert expander.expand_calls and expander.expand_calls[0][0] == "p0"
+    assert expander.rank_calls and expander.rank_calls[0][0] == "p0"
 
 
 def test_rewrite_starts_at_the_configured_step():

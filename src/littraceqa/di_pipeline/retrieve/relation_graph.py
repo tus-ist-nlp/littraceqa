@@ -42,12 +42,10 @@ import pickle
 from collections import Counter
 from pathlib import Path
 
-from littraceqa.di_pipeline.contracts import RetrievalResult
 from littraceqa.di_pipeline.registry import register
 from littraceqa.di_pipeline.retrieve import paper_titles
 from littraceqa.di_pipeline.retrieve.paper_expander import (
     _interleave,
-    _results_from,
     _set_combine,
 )
 
@@ -177,7 +175,7 @@ def load_title_index(
 
 
 class _RelationExpanderBase:
-    """``paper_expander`` の各 expander と同じ形（rank / rank_pools / expand）。"""
+    """``paper_expander`` の各 expander と同じ形（rank / rank_pools / text_of）。"""
 
     def __init__(
         self,
@@ -185,9 +183,6 @@ class _RelationExpanderBase:
         cache_path: str,
         neighbors: int = 20,
         anchors: int = 1,
-        rerank: bool = False,
-        rerank_top_k: int = 5,
-        insert_at: int | None = None,
         max_key_degree: int = 20,
         **combine_kwargs,
     ):
@@ -196,9 +191,6 @@ class _RelationExpanderBase:
         self.cache_path = Path(cache_path)
         self.neighbors = neighbors
         self.anchors = anchors
-        self.rerank = rerank
-        self.rerank_top_k = rerank_top_k
-        self.insert_at = insert_at
         # キャッシュが既にあるときは使われない（作り直すときだけ効く）。
         self.max_key_degree = max_key_degree
         self._payload: dict | None = None
@@ -229,16 +221,8 @@ class _RelationExpanderBase:
     def rank_pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
         return [pool[: self.neighbors] for pool in self._pools(ranked_paper_ids)]
 
-    def expand(self, ranked_paper_ids: list[str]) -> list[str]:
-        return _interleave(
-            self._pools(ranked_paper_ids), self.neighbors, exclude=set(ranked_paper_ids)
-        )
-
     def text_of(self, paper_id: str) -> str:
         return self._ensure()["text"].get(paper_id, "")
-
-    def expand_results(self, ranked_paper_ids: list[str]) -> list[RetrievalResult]:
-        return _results_from(self, self.expand(ranked_paper_ids))
 
 
 @register("expander", "title_mention")

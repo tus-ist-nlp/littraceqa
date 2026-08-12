@@ -7,11 +7,12 @@
 - ``bm25_mlt``: 論文全文の more-like-this。anchor の title+abstract をクエリにして
   構築済みの ``bm25s_paper`` 索引を引く。レキシカルな近さ。
 
-取り込み方は2通りある。**位置挿入**（既定）は「追記すべき論文」を候補列の決まった位置に
-差し込む方式で、``expand()`` が既存候補を除いた追加分だけを返す。**RRF 統合**
-（agent yaml の ``combine: rrf``）は関連ランキングそのものを候補列と順位融合する方式で、
-``rank()`` が既存候補も含めた関連度順を返す（重なった論文を加点するのが目的なので
-落としてはいけない）。統合の式と根拠は agent/reading.py の ``_combine_rrf`` を参照。
+取り込み方は**関連ランキングと候補列の RRF 統合**の1通りだけ。``rank()`` が
+既存候補も含めた関連度順を返す（重なった論文を加点するのが目的なので落としてはいけない）。
+統合の式と根拠は agent/reading.py の ``_combine_rrf`` を参照。
+
+かつては「追記すべき論文を候補列の決まった位置に差し込む」位置挿入方式もあったが、
+順位融合に全指標で負けたので実装ごと削除した。
 
 **3つとも違う gold を拾うので併用する価値がある**（実測: 候補圏外 gold 37本の回収は
 SPECTER2 15本 / 書誌結合 11本 / 全文MLT 16本で、MLT だけが拾えたのが2本、
@@ -81,7 +82,8 @@ _ARXIV_RE = re.compile(r"ar\s*X\s*iv[:\s]*(\d{4}\.\d{4,5})")
 # ここは値の置き場所。全 expander が同じキーを受けられるようにしておく
 # （config.build_pipeline が expansion ブロックの設定を全ソースに配るため）。
 _COMBINE_DEFAULTS: dict = {
-    # "rrf" なら統合、None（既定）なら従来どおりの位置挿入。
+    # 歴史的なキー。取り込み方は RRF 統合の1通りだけになったので**読まれない**
+    # （書いてあっても害は無いので、既存 yaml のために受けられるようにしてある）。
     "combine": None,
     "combine_rrf_k": 60,
     # 素の RRF（重み1.0・下駄なし）が実測で最良。詳細は agent/reading.py の _combine_rrf。
@@ -126,8 +128,7 @@ def _interleave(
     """複数 anchor の近傍リストをランク順に交互配置して1本にする。
 
     1つの anchor の遠い近傍より、別の anchor の近い近傍を先に置く。
-    ``exclude`` に入っている論文は飛ばす（``expand()`` は既存候補を除外し、
-    ``rank()`` は除外しない）。
+    ``exclude`` に入っている論文は飛ばす（``rank()`` は何も除外しない）。
     """
     seen = set(exclude or ())
     merged: list[str] = []
@@ -148,26 +149,13 @@ class Specter2PaperExpander:
         index_dir: str,
         neighbors: int = 20,
         anchors: int = 1,
-        rerank: bool = False,
-        rerank_top_k: int = 5,
-        insert_at: int | None = None,
         **combine_kwargs,
     ):
         _set_combine(self, combine_kwargs)
         self.index_dir = Path(index_dir)
         self.neighbors = neighbors
         self.anchors = anchors
-        # True なら ReadingAgent が検索と同じ reranker で展開論文をスコアリングし、
-        # **上位 rerank_top_k 本だけ**を insert_at の位置に挿入する（agent/reading.py）。
-        self.rerank = rerank
-        # rerank 後に上位側へ差し込む本数。増やしても cr@20 は頭打ちで、
-        # 溢れたノイズが50位圏内を圧迫して cr@50 が下がる（実測: K=5 で cr@50 0.895、
-        # K=10 で 0.876）。
-        self.rerank_top_k = rerank_top_k
-        # 挿入位置。None なら max_candidates（LLM 可視域の直後）。
-        # rerank 有効時は 15 前後が良い（実測: 10位/15位は同値、20位だと cr@20 が動かない）。
-        self.insert_at = insert_at
-        # 索引のロードは初回 expand() まで遅延する（--build だけの実行や
+        # 索引のロードは初回 rank() まで遅延する（--build だけの実行や
         # テストで索引が無くても構築できるように）。
         self._index: faiss.Index | None = None
         self._row_of: dict[str, int] = {}
@@ -230,49 +218,11 @@ class Specter2PaperExpander:
         """
         return [pool[: self.neighbors] for pool in self._pools(ranked_paper_ids)]
 
-    def expand(self, ranked_paper_ids: list[str]) -> list[str]:
-        """既存の候補列（関連度順）に**追記すべき**論文IDだけを返す。
-
-        anchor が複数のときは各 anchor の近傍リストをランク順に交互配置する
-        （1つの anchor の遠い近傍より、別の anchor の近い近傍を先に）。
-        既存候補と重複するものは返さない。
-        """
-        return _interleave(
-            self._pools(ranked_paper_ids), self.neighbors, exclude=set(ranked_paper_ids)
-        )
-
     def text_of(self, paper_id: str) -> str:
         """rerank に渡す代表テキスト（title+abstract）。無ければ空文字。"""
         if self._index is None:
             self._load()
         return (self._chunk_of.get(paper_id) or {}).get("text", "")
-
-    def expand_results(self, ranked_paper_ids: list[str]) -> list[RetrievalResult]:
-        """expand() と同じ論文を ``RetrievalResult`` として返す（reranker へ渡す用）。
-
-        本文は索引の chunks.jsonl が持つ title+abstract をそのまま使う。
-        score は近傍の順位から作った仮の値で、reranker が上書きする前提
-        （Qwen3Reranker.rerank は score を yes 確率で上書きする）。既存候補の
-        score とはスケールが違うので、**rerank せずに score で混ぜてはいけない**。
-        """
-        added = self.expand(ranked_paper_ids)
-        results: list[RetrievalResult] = []
-        for rank, paper_id in enumerate(added):
-            chunk = self._chunk_of.get(paper_id)
-            if not chunk:
-                continue
-            results.append(
-                RetrievalResult(
-                    chunk_id=chunk.get("chunk_id", f"{paper_id}#paper"),
-                    paper_id=paper_id,
-                    score=1.0 / (rank + 1),
-                    text=chunk.get("text", ""),
-                    chunk_type=chunk.get("chunk_type", "title_abstract"),
-                    metadata=chunk.get("metadata") or {},
-                    source="paper_expansion",
-                )
-            )
-        return results
 
 
 @register("expander", "bib_coupling")
@@ -295,9 +245,6 @@ class BibCouplingExpander:
         neighbors: int = 20,
         anchors: int = 1,
         min_shared: int = 2,
-        rerank: bool = False,
-        rerank_top_k: int = 5,
-        insert_at: int | None = None,
         **combine_kwargs,
     ):
         _set_combine(self, combine_kwargs)
@@ -308,9 +255,6 @@ class BibCouplingExpander:
         # 共有文献がこの本数未満のペアは切る。1本だけの共有は汎用的な引用
         # （Adam, ResNet 等）で繋がってしまい、ノイズにしかならない。
         self.min_shared = min_shared
-        self.rerank = rerank
-        self.rerank_top_k = rerank_top_k
-        self.insert_at = insert_at
         self._refs: dict[str, set[str]] | None = None
         self._inv: dict[str, set[str]] = {}
         self._text: dict[str, str] = {}
@@ -399,18 +343,10 @@ class BibCouplingExpander:
         """anchor ごとのランキングを潰さずに返す（`consensus: true` 用）。"""
         return [pool[: self.neighbors] for pool in self._pools(ranked_paper_ids)]
 
-    def expand(self, ranked_paper_ids: list[str]) -> list[str]:
-        return _interleave(
-            self._pools(ranked_paper_ids), self.neighbors, exclude=set(ranked_paper_ids)
-        )
-
     def text_of(self, paper_id: str) -> str:
         if self._refs is None:
             self._load()
         return self._text.get(paper_id, "")
-
-    def expand_results(self, ranked_paper_ids: list[str]) -> list[RetrievalResult]:
-        return _results_from(self, self.expand(ranked_paper_ids))
 
 
 def _json_string_prefix(line: str, start: int, max_chars: int) -> str:
@@ -465,9 +401,6 @@ class BM25MLTExpander:
         # anchor のクエリに使う先頭文字数。title+abstract を覆う程度に取る
         # （短い abstract では本文の冒頭まで入るが、MLT のクエリとしては害がない）。
         query_chars: int = 1200,
-        rerank: bool = False,
-        rerank_top_k: int = 5,
-        insert_at: int | None = None,
         **combine_kwargs,
     ):
         self.index_dir = Path(index_dir)
@@ -475,9 +408,6 @@ class BM25MLTExpander:
         self.neighbors = neighbors
         self.anchors = anchors
         self.query_chars = query_chars
-        self.rerank = rerank
-        self.rerank_top_k = rerank_top_k
-        self.insert_at = insert_at
         _set_combine(self, combine_kwargs)
         self._bm25 = None
         self._pids: list[str] = []
@@ -542,18 +472,10 @@ class BM25MLTExpander:
         """anchor ごとのランキングを潰さずに返す（`consensus: true` 用）。"""
         return [pool[: self.neighbors] for pool in self._pools(ranked_paper_ids)]
 
-    def expand(self, ranked_paper_ids: list[str]) -> list[str]:
-        return _interleave(
-            self._pools(ranked_paper_ids), self.neighbors, exclude=set(ranked_paper_ids)
-        )
-
     def text_of(self, paper_id: str) -> str:
         if self._bm25 is None:
             self._load()
         return self._text.get(paper_id, "")
-
-    def expand_results(self, ranked_paper_ids: list[str]) -> list[RetrievalResult]:
-        return _results_from(self, self.expand(ranked_paper_ids))
 
 
 @register("expander", "fused")
@@ -570,18 +492,12 @@ class FusedPaperExpander:
         sources: list,
         neighbors: int = 20,
         rrf_k: int = 60,
-        rerank: bool = False,
-        rerank_top_k: int = 5,
-        insert_at: int | None = None,
         **combine_kwargs,
     ):
         _set_combine(self, combine_kwargs)
         self.sources = sources
         self.neighbors = neighbors
         self.rrf_k = rrf_k
-        self.rerank = rerank
-        self.rerank_top_k = rerank_top_k
-        self.insert_at = insert_at
 
     def _fuse(self, per_source: list[list[str]]) -> list[str]:
         scores: dict[str, float] = {}
@@ -592,16 +508,12 @@ class FusedPaperExpander:
         return ordered[: self.neighbors]
 
     def rank(self, ranked_paper_ids: list[str]) -> list[str]:
-        """各ソースの rank()（既存候補を落とさない側）を RRF 融合する。
+        """各ソースの rank()（**既存候補を落とさない**側）を RRF 融合する。
 
-        expand() とは別経路にしてある。expand() は「各ソースが既存候補を落としてから
-        RRF」で、こちらは「落とさずに RRF」なので順位が変わる。既に実測で詰めてある
-        位置挿入の構成（reading_expand_insert/fused.yaml）の挙動を1ビットも変えないため、
-        統合用の経路だけを新設した。
+        既存候補と重なる論文こそ統合での加点対象なので、ここで落としてはいけない
+        （詳細は agent/reading.py の `_combine_rrf`）。
         """
-        return self._fuse(
-            [getattr(s, "rank", s.expand)(ranked_paper_ids) for s in self.sources]
-        )
+        return self._fuse([s.rank(ranked_paper_ids) for s in self.sources])
 
     def rank_pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
         """各ソースの anchor 別ランキングを**連結して**返す（`consensus: true` 用）。
@@ -616,11 +528,8 @@ class FusedPaperExpander:
             if hasattr(source, "rank_pools"):
                 pools.extend(source.rank_pools(ranked_paper_ids))
             else:
-                pools.append(getattr(source, "rank", source.expand)(ranked_paper_ids))
+                pools.append(source.rank(ranked_paper_ids))
         return [pool for pool in pools if pool]
-
-    def expand(self, ranked_paper_ids: list[str]) -> list[str]:
-        return self._fuse([s.expand(ranked_paper_ids) for s in self.sources])
 
     def text_of(self, paper_id: str) -> str:
         for source in self.sources:
@@ -629,31 +538,4 @@ class FusedPaperExpander:
                 return text
         return ""
 
-    def expand_results(self, ranked_paper_ids: list[str]) -> list[RetrievalResult]:
-        return _results_from(self, self.expand(ranked_paper_ids))
 
-
-def _results_from(expander, paper_ids: list[str]) -> list[RetrievalResult]:
-    """paper_id 列を rerank に渡せる RetrievalResult 列にする。
-
-    score は近傍順位から作った仮の値で、reranker が上書きする前提。
-    既存候補の score とはスケールが違うので、**rerank せずに score で
-    混ぜてはいけない**（cr@20 が悪化する。詳細は reading.py のコメント）。
-    """
-    results: list[RetrievalResult] = []
-    for rank, paper_id in enumerate(paper_ids):
-        text = expander.text_of(paper_id)
-        if not text:
-            continue
-        results.append(
-            RetrievalResult(
-                chunk_id=f"{paper_id}#paper",
-                paper_id=paper_id,
-                score=1.0 / (rank + 1),
-                text=text,
-                chunk_type="title_abstract",
-                metadata={},
-                source="paper_expansion",
-            )
-        )
-    return results
