@@ -27,14 +27,13 @@ import json
 import sys
 from pathlib import Path
 
-from littraceqa.di_pipeline.agent.reading import CANDIDATE_PAPERS_LIMIT, ReadingAgent
+from littraceqa.di_pipeline.agent.reading import ReadingAgent
 from littraceqa.di_pipeline.config import (
     build_paper_expander,
     build_pipeline,
     compose_config,
     load_config,
 )
-from littraceqa.di_pipeline.contracts import Query
 from littraceqa.di_pipeline.retrieve.hybrid import paper_scores, to_gold_papers
 
 
@@ -187,24 +186,11 @@ def main() -> None:
             # 深い順位の論文をランキングB が押し上げられるようにするため。
             ranked_papers = to_gold_papers(results, skip_chunk_types=skip_chunk_types)
             if ranked_papers:
-                trace: list[dict] = []
-                if getattr(agent.paper_expander, "combine", None) == "rrf":
-                    ranked_papers = agent._combine_rrf(
-                        ranked_papers,
-                        trace,
-                        paper_scores=paper_scores(
-                            results, skip_chunk_types=skip_chunk_types
-                        ),
-                    )
-                else:
-                    query = Query(
-                        query_id=record["query_id"],
-                        question=record["question"],
-                        answer_types=[],
-                    )
-                    ranked_papers = agent._expand_candidates(
-                        query, ranked_papers[:CANDIDATE_PAPERS_LIMIT], {}, trace
-                    )
+                ranked_papers = agent._combine_rrf(
+                    ranked_papers,
+                    [],
+                    paper_scores=paper_scores(results, skip_chunk_types=skip_chunk_types),
+                )
             ranked_papers = ranked_papers[:max_k]
         if backed:
             evidence_query_count += 1

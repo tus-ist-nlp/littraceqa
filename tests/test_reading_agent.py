@@ -477,55 +477,6 @@ def test_no_venue_tag_without_a_constraint():
     assert all("limits the search to" not in p for p in _subquery_prompts(llm))
 
 
-class _StubExpander:
-    """論文→論文展開のスタブ。渡された候補列を記録し、固定の追加分を返す。"""
-
-    def __init__(self, added: list[str]):
-        self.added = added
-        self.calls: list[list[str]] = []
-
-    def expand(self, ranked: list[str]) -> list[str]:
-        self.calls.append(list(ranked))
-        return self.added
-
-
-def test_paper_expander_inserts_after_llm_visible_range():
-    """展開は max_candidates 直後への挿入。LLM が読む範囲と提出は不変。"""
-    retriever = _StubRetriever()  # 5論文を返す
-    expander = _StubExpander(["pE1", "pE2"])
-    llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(
-        retriever,
-        llm=llm,
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
-        paper_expander=expander,
-        submit_from="llm",
-    )
-    prediction = agent.run(_query())
-
-    plain = ReadingAgent(
-        _StubRetriever(),
-        llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
-        submit_from="llm",
-    ).run(_query())
-    # LLM 可視域(上位2本)は不変、その直後に挿入、残りは順序を保って後ろへ
-    assert prediction.candidate_papers == (
-        plain.candidate_papers[:2] + ["pE1", "pE2"] + plain.candidate_papers[2:]
-    )
-    # expander には展開前の候補列（関連度順）が渡る
-    assert expander.calls == [plain.candidate_papers]
-    # LLM 選定を使う設定（submit_from="llm"）では提出は不変
-    assert prediction.gold_papers == plain.gold_papers
-    # trace に挿入位置つきで記録が残る
-    steps = [s["paper_expansion"] for s in prediction.trace if "paper_expansion" in s]
-    assert steps and steps[0]["inserted_at"] == 2 and steps[0]["added"] == 2
-
-
 def test_no_expander_means_identical_behavior():
     """paper_expander を渡さなければ候補列に一切手を付けない（既定経路の保全）。"""
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
@@ -687,22 +638,6 @@ def test_title_protect_off_by_default():
     assert not any("title_protect" in step for step in plain.trace)
 
 
-class _StubRerankExpander:
-    """rerank 経路のスタブ。expand_results で RetrievalResult を返す。"""
-
-    def __init__(self, results, rerank_top_k=5, insert_at=None):
-        self.results = results
-        self.rerank = True
-        self.rerank_top_k = rerank_top_k
-        self.insert_at = insert_at
-
-    def expand(self, ranked):
-        return [r.paper_id for r in self.results]
-
-    def expand_results(self, ranked):
-        return list(self.results)
-
-
 class _ScoreReranker:
     """paper_id -> スコアの対応表で並べ替える偽 reranker。"""
 
@@ -728,52 +663,6 @@ class _RerankingRetriever(_StubRetriever):
     def __init__(self, reranker, **kwargs):
         super().__init__(**kwargs)
         self.reranker = reranker
-
-
-def test_expansion_rerank_promotes_only_top_k():
-    """rerank 有効なら、上位 rerank_top_k 本だけを insert_at に挿入し残りは末尾へ。
-
-    スコアで既存候補と混ぜる実装は cr@20 を悪化させた（reranker の絶対スコアは
-    既存候補と比較可能でない）ため、必ず本数で絞ってから位置挿入する。
-    """
-    expander = _StubRerankExpander(
-        [_result(0, "pA", 0.0), _result(0, "pB", 0.0), _result(0, "pC", 0.0)],
-        rerank_top_k=2,
-        insert_at=1,
-    )
-    reranker = _ScoreReranker({"pC": 0.9, "pA": 0.5, "pB": 0.01})
-    retriever = _RerankingRetriever(reranker)
-    llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(
-        retriever, llm=llm, max_steps=1, retrieve_top_k=5, paper_expander=expander
-    )
-    prediction = agent.run(_query())
-
-    cands = prediction.candidate_papers
-    # 1位の直後に rerank 上位2本（pC, pA）が入り、残り（pB）は末尾
-    assert cands[1:3] == ["pC", "pA"], cands
-    assert cands[-1] == "pB", cands
-    # 既存候補の相対順序は保たれる
-    assert [c for c in cands if c.startswith("p") and c[1:].isdigit()] == [
-        "p0", "p1", "p2", "p3", "p4"
-    ]
-    # reranker には元の質問が渡る（サブクエリではない）
-    assert reranker.calls == ["Which papers report FID on CIFAR-10?"]
-    step = [s["paper_expansion"] for s in prediction.trace if "paper_expansion" in s][0]
-    assert step["reranked"] is True and step["promoted"] == 2 and step["inserted_at"] == 1
-
-
-def test_expansion_rerank_falls_back_without_reranker():
-    """retriever が reranker を持たなければ位置挿入に落ちる（壊れない）。"""
-    expander = _StubRerankExpander([_result(0, "pE1", 0.0)])
-    llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(
-        _StubRetriever(), llm=llm, max_steps=1, retrieve_top_k=5,
-        max_candidates=2, paper_expander=expander,
-    )
-    prediction = agent.run(_query())
-    step = [s["paper_expansion"] for s in prediction.trace if "paper_expansion" in s][0]
-    assert step["reranked"] is False and step["inserted_at"] == 2
 
 
 # ---------------------------------------------------------------------------

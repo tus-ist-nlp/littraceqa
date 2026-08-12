@@ -180,8 +180,10 @@ configs/
     決まった位置に差し込む方式で、順位融合に**全指標で負けた**（方式内のベストが
     cr@20 0.822 / multi@20 0.663 に対し、順位融合は 0.879 / 0.770）。上位を汚さない
     代わりに上位を良くもできず、`cr@20` が定義上動かないのが効かない理由。
-    実装（`_expand_candidates()` と expander の `expand()` / `rerank` / `insert_at`）は
-    残してあるので、`expansion` ブロックに `combine: rrf` を**書かなければ**その経路を通る。
+    **実装も削除した**（`_expand_candidates()` / expander の `expand()` /
+    `expand_results()` / `rerank` / `rerank_top_k` / `insert_at`）。`expansion` ブロックを
+    書けば必ず A/B の RRF 統合になる。`combine: rrf` は歴史的なキーで、**もう読まれない**
+    （既存 yaml のために受け付けるだけ）。
 
     reading_expand_rrf/ の中身（順位融合）:
     └── reading_expand_rrf/rrf.yaml : **ランキングを2本に分けて RRF 統合する版（現状のベスト）。**
@@ -421,9 +423,9 @@ B の1位に置くのが定義どおりでもある。
 統合するときは**50本で切る前の全長**をランキングA に使う（`_build_prediction`）。
 51位の論文を B が強く推していても、先に切ると押し上げようがないため。
 
-**`combine` を書かなければ挙動は1ビットも変わらない**（位置挿入の経路に落ちる）。
-位置挿入のプリセット yaml は削除したが、実装は残してあるので比較が要るときは
-`expansion` ブロックから `combine: rrf` を外した yaml を1枚置けば取れる。
+**`expansion` ブロックを書かなければ統合は走らない**（`paper_expander` が None なら
+候補列は検索の順位そのまま）。逆に書けば必ず統合される——位置挿入を削除したので
+`combine` による分岐は無くなった。
 
 #### 展開まわりの調整は**土台を4本使う**（1本だと結論が反転する）
 
