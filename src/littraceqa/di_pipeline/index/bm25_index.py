@@ -25,18 +25,51 @@ _CHUNKS_FILENAME = "chunks.jsonl"
 class BM25Index:
     name = "bm25s"
 
-    def __init__(self, index_dir: str):
+    def __init__(
+        self,
+        index_dir: str,
+        k1: float = 1.5,
+        b: float = 0.75,
+        method: str = "lucene",
+        stopwords: str | None = "en",
+        stemmer: str | None = None,
+    ):
+        """BM25 のスコアリング・トークナイズ系パラメータを config から差し替えられる。
+
+        - k1 / b / method: bm25s.BM25 のスコアリングパラメータ（scripts/sweep_bm25_params.py
+          で validation の recall を見て決める）。build 時にスコア行列へ焼き込まれる。
+        - stopwords / stemmer: bm25s.tokenize のトークナイズ系。build と search で
+          同じ設定を使う必要があるため、この2つはインスタンスに保持して両方で使う
+          （yaml が build 時・load 時の両方で同じ params を渡す前提）。
+        - stemmer は言語名（例: "english"）を渡すと PyStemmer で語幹化する。
+          省略時は語幹化しない。PyStemmer 未導入の環境で stemmer を指定すると
+          build/load 時に ImportError になる。
+        """
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
+        self.k1 = k1
+        self.b = b
+        self.method = method
+        self.stopwords = stopwords
+        self._stemmer = self._build_stemmer(stemmer)
         self._chunks: list[Chunk] = []
         self._retriever: bm25s.BM25 | None = None
 
+    @staticmethod
+    def _build_stemmer(stemmer: str | None):
+        if not stemmer:
+            return None
+        import Stemmer  # PyStemmer。指定時のみ必要にして通常構成の依存を増やさない。
+
+        return Stemmer.Stemmer(stemmer)
+
+    def _tokenize(self, texts: list[str]):
+        return bm25s.tokenize(texts, stopwords=self.stopwords, stemmer=self._stemmer)
+
     def build(self, chunks: Iterable[Chunk]) -> None:
         self._chunks = list(chunks)
-        corpus_tokens = bm25s.tokenize(
-            [chunk.text for chunk in self._chunks], stopwords="en"
-        )
-        retriever = bm25s.BM25()
+        corpus_tokens = self._tokenize([chunk.text for chunk in self._chunks])
+        retriever = bm25s.BM25(k1=self.k1, b=self.b, method=self.method)
         retriever.index(corpus_tokens)
         retriever.save(str(self.index_dir))
         self._save_chunks()
@@ -52,7 +85,7 @@ class BM25Index:
         k = min(top_k, len(self._chunks))
         if k <= 0:
             return []
-        query_tokens = bm25s.tokenize([query], stopwords="en")
+        query_tokens = self._tokenize([query])
         doc_indices, scores = self._retriever.retrieve(query_tokens, k=k)
         results: list[RetrievalResult] = []
         for doc_index, score in zip(doc_indices[0], scores[0]):

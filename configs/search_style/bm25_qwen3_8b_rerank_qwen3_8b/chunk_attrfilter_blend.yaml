@@ -1,0 +1,91 @@
+# bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter_k100_blend.yaml と
+# **索引・reranker・rerank_blend の重みまで完全に同一**で、
+# 取る幅だけを per_index_k / pool_k = 1000 にした版（追加構築ゼロ）。
+#
+# つまり同フォルダの2枚に対して、それぞれ「幅違い」「blend 有無」の対照になる:
+#
+#                        per_index_k / pool_k    rerank_blend
+#   chunk_attrfilter          1000 / 1000            なし
+#   chunk_attrfilter_blend    1000 / 1000          **あり**   <- これ
+#   chunk_attrfilter_k100      100 /  200            あり
+#
+# 既定では reranker が RRF 融合後の順位を**完全に置き換える**（retrieve/hybrid.py）。
+# だが reranker は「質問に答えるか」で判定するので、質問文が名指ししないピア gold を
+# 必ず下げる。この危険を避けるために `reading_expand_rrf/rrf` はランキングB を reranker に
+# 通していないが、**ランキングA の内部では無防備なまま**だった。
+#
+#   score(c) = original_weight / (k + 融合前の順位) + rerank_weight / (k + rerank の順位)
+#
+# `protect_top` は融合前の上位N件の「集合」を先頭に残す（並び順は融合結果に従う）。
+# 21位以下が無条件に上位へ侵入するのを防ぐ。**幅を1000にしても protect_top は
+# 20 のまま**でよい——守る対象は「融合前の上位20件」であって、プールの深さとは
+# 別の量だから。ここを広げると reranker がほぼ効かなくなる。
+#
+# **重みは実測で決める。** 外部チームは 0.59 : 0.41 を使っているが、同じ validation で
+# 選んだ値なので過学習の可能性を本人たちも認めている。original_weight を
+# 0.0（= 現行の純置換）/ 0.4 / 0.6 / 1.0（= reranker 無視）で振って選び直す。
+#
+# **cr と ecr を必ず並べて読む。** reranker を弱めると「質問に答える論文」の選別が
+# 緩むので、ecr が下がって cr が上がる向きに出ることがある。その形なら捨てる
+# （打ち手の評価は ecr で見る、が既定方針）。
+#
+# **幅を 100/200 -> 1000/1000 にすると reranker の推論が5倍になる**（推論件数は
+# pool_k で決まる）。索引側は増えない。**この重さは実測で効いてくる**——
+# devices 2枚（cuda:1,cuda:2）で走らせたところ **2.5分/サブクエリ**で、
+# runs_fat.jsonl の実測（55件で812サブクエリ）から総計**約34時間**になった。
+# なので chunk_attrfilter.yaml と同じ **3枚**にしてある（スレッド並列。
+# CUDA forward が GIL を解放するので実測2.7倍速）。VRAM も分散する——2枚だと
+# 22.6GB / 23.5GB（各24.5GB中）で20時間走らせるには余裕が薄かった。
+#
+# **devices は結果に影響しない**（どのGPUで推論するかだけの話）ので、
+# k100_blend との比較可能性は保たれる。CLAUDE.md の方針どおり
+# 「実行時に空いているGPUへ書き換える前提の値」として扱う。
+#
+# **max_fetch_k は 3000 のまま上げない。** per_index_k に比例させて広げたくなるが、
+# IndexFlatIP は全走査して top-k を選ぶので k が効き、per_index_k=1000 に合わせて
+# 40000 にしたところ faiss search が 1.5秒 -> 91.1秒（61倍）に膨らんだ実測がある。
+# 足りなければ min_results の fail-open で「絞り込みなし」に戻るだけ。
+
+per_index_k: 1000
+pool_k: 1000
+
+rerank_blend:
+  original_weight: 0.6
+  rerank_weight: 0.4
+  rrf_k: 60
+  protect_top: 20
+
+attribute_filter:
+  enabled: true
+  safety: 1.5
+  max_fetch_k: 3000
+  min_results: 10
+
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: faiss_qwen3
+    index_name: faiss_qwen3_8b
+    params:
+      model: Qwen/Qwen3-Embedding-8B
+      devices: "cuda:0"
+      fp16: true
+      max_tokens: 8192
+      doc_prefix: "passage: "
+      query_prefix: "query: "
+      batch_size: 8
+
+fuser:
+  name: rrf
+  params: { k: 60, weights: { bm25s: 1.0, faiss_qwen3: 1.0 } }
+
+reranker:
+  name: qwen3
+  params:
+    model: Qwen/Qwen3-Reranker-8B
+    devices: "cuda:1,cuda:2,cuda:3"
+    fp16: true
+    max_batch_tokens: 2048
+    batch_size: 4
+    max_tokens: 2048

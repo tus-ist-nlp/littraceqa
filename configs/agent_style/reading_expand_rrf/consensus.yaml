@@ -1,0 +1,44 @@
+# reading_expand_rrf/rrf.yaml の**ランキングB を anchor ごとに分けた**版（Consensus）。
+#
+# 既定では各 expander が複数 anchor の近傍を _interleave() で1本に潰すので、
+# 2本の anchor が同じ論文を推しても候補列には1回しか現れず、
+# 「**揃って推した**」という情報が消える。
+#
+# `consensus: true` にすると anchor × ソースごとのランキングを潰さずに
+# RRF へ渡すので、複数の pool に居る論文が項の数だけ加点される。
+#
+#   score(p) = 1/(k + rank_A) + Σ_pool (w/|pools|) / (k + related_offset + rank_pool)
+#
+# **B の重みは pool 数で割る**（agent/reading.py の _combine_rrf）。ソース3 × anchor3 で
+# 9本になるため、割らないと B 側が A（1項）を圧倒する。割っても「複数 pool に
+# 居る論文が単独より高い」関係は保たれるので、A/B の釣り合いだけが元に戻る。
+#
+# CLAUDE.md の「anchor を3本に増やしても ecr は動かず候補だけ増えた」は
+# **位置挿入方式での実測**。位置挿入には合意情報を使う場所が無かったが、
+# 順位融合には有るので結論が変わりうる。
+#
+# 判定: replay_expansion.py で anchors を 1/2/3/5 に振り、multi の ecr が動くか。
+#   uv run python scripts/replay_expansion.py ... --set consensus=true --set anchors=3
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 50
+  anchors: 3
+  consensus: true
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 60
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

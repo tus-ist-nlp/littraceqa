@@ -1,0 +1,78 @@
+# reading_expand_rrf/rrfk10.yaml + `anchor_from: verdict`（差分1行）。
+#
+# **ランキングB の起点を「検索の1位」から「読解 LLM が根拠を確認した論文」に広げる。**
+# `_read_and_judge()` が返す paper_ids は本文を読んだうえでの判定なのに、これまで
+# 順位付けには一切使っていなかった（`submit_from: candidates` なので提出にも使わない）。
+# 実装は agent/reading.py の `_anchor_papers()` / `_rank_related()`。
+#
+# ## 何を直しているのか
+#
+# multi_paper の根拠あり gold を**クエリ内で順位順に並べる**と、こうなっていた
+# （全長A・rrfk10 土台）:
+#
+#   クエリ内 何本目   n    中央順位   @1     @5     @20
+#     1本目         29     1位     79%   100%   100%
+#     2本目         23     4位      0%    83%    91%
+#     3本目         22     8位      0%    27%    86%
+#     4本目         12    14位      0%     8%    67%
+#
+# **1本目は29クエリ全部が @5 に入っていて実質解けている。落ちているのは3本目以降。**
+# anchor が1本だと展開できるトピッククラスタも1つなので、そこが埋まらない。
+#
+# ## 実測（土台4本 + 全長A）
+#
+#   土台           single cr@1      multi@5          multi@10         multi@20
+#   k100_cand50   0.923（不変）    0.682 -> 0.717   0.767 -> 0.830   0.869 -> 0.885
+#   chunk_cand50  1.000（不変）    0.610 -> 0.686   0.762 -> 0.842   0.899 -> 0.908
+#   fat           0.923（不変）    0.666 -> 0.669   0.809 -> 0.848   0.914 -> 0.914
+#   b_merged      0.962（不変）    0.680 -> 0.726   0.786 -> 0.868   0.876 -> 0.899
+#   全長A          0.923（不変）    0.683 -> 0.677   0.814 -> 0.844   0.910 -> 0.914
+#
+# **伸びは @10 に集中する**（+0.030〜+0.082）。上の表のとおり2本目・3本目が
+# 中央4位・8位に居るので、ちょうどそこが動く。悪化は全長A の multi@5 が
+# -0.006（gold 1本ぶん）だけ。
+#
+# ## 候補1位を必ず起点に残す（`_anchor_papers()`）
+#
+# **LLM の確認済みだけを起点にすると single が壊れる**——候補1位が B の先頭から
+# 外れて「A にも B にも居る」論文に抜かれ、実測で single の cr@1 が
+# 0.923 -> 0.885 に落ちた（`anchors: 3` を入れたときと同じ事故）。
+# 候補1位との和集合（候補1位が先頭）にすれば single は5条件とも完全に不変。
+#
+# ## 効いているのは精度ではなく本数
+#
+# LLM 確認済みの gold 率は 68本中52本 = **76%** で、候補1位の 85%（47/55）より
+# **低い**。それでも効くのは1本の anchor では1クラスタしか展開できないため。
+# anchor が2本以上になるのは 55件中16件で、**うち14件が multi_paper**
+# （anchor 集合の大きさ: 1本 39件 / 2本 9件 / 3本 2件 / 4本以上 5件）。
+# single に副作用が出ないのはこの偏りによる。
+#
+# ## 既定では1ビットも変わらない
+#
+# `anchor_from` を書かなければ `_anchor_papers()` が None を返し、
+# `expander.rank(candidate_papers)` を従来どおり呼ぶ。土台4本で
+# 現行 `_combine_rrf` と出力が完全一致することを検算済み。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }   # 共有1本だけのペアは汎用引用で繋がるので切る
+    - { name: bm25_mlt, query_chars: 1200 }
+  # 以下3行は rrfk10.yaml と同じ（理由と数字はそちらのコメントに書いてある）。
+  neighbors: 100       # combine_rrf_k: 10 とセット。k=60 のまま増やすと悪化する
+  anchors: 1           # `anchor_from` を使うときの「候補列から取る本数」。1 のまま
+  rrf_k: 60            # ソース間の融合（ランキングB の中）。ここは下げない
+  combine: rrf
+  combine_rrf_k: 10
+  anchor_from: verdict # ← rrfk10.yaml との唯一の差分
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10
