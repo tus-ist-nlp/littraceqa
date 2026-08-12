@@ -32,6 +32,9 @@ results/
 # LLM によるデータセット品質監査の結果（生成物。scripts/audit_queries.py と
 # scripts/audit_nongold.py が --resume 付きで再生成できる）
 audits/
+# --dump-runs が出すサブクエリ単位の検索結果（オフライン再生の土台。1本10MB規模で、
+# scripts/run_search.py --dump-runs / scripts/dump_rawq_runs.py で採り直せる）
+runs_*.jsonl
 
 # Local pipeline outputs
 archives/
