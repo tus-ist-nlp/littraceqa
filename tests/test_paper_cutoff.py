@@ -13,7 +13,6 @@ import pytest
 from littraceqa.di_pipeline.agent.reading import ReadingAgent
 from littraceqa.di_pipeline.agent.simple import SimpleAgent
 from littraceqa.di_pipeline.agent.task_family import TaskFamilyClassifier, apply_paper_cutoff
-from littraceqa.di_pipeline.agent.verifying import VerifyingAgent
 from littraceqa.di_pipeline.contracts import Query, RetrievalResult
 from littraceqa.di_pipeline.llm.fake import FakeLLM
 
@@ -89,33 +88,26 @@ def test_unknown_cutoff_mode_is_rejected():
 def test_all_agents_submit_the_same_count_under_task_family_cutoff(task_family, expected):
     """paper_cutoff=task_family なら、LLM が何本選ぼうと全エージェントが同じ本数を出す。
 
-    これが揃っていないと simple → verifying → reading の引き算が成立しない。
+    これが揃っていないと simple → reading の引き算が成立しない。
     """
     query = _query(task_family)
 
     simple = SimpleAgent(_StubRetriever(), top_k=20)
-    verifying = VerifyingAgent(
-        _StubRetriever(),
-        llm=FakeLLM(responses=[json.dumps({"paper_ids": [f"p{i}" for i in range(12)]})]),
-        top_k=20,
-        paper_cutoff="task_family",
-    )
     reading = ReadingAgent(
         _StubRetriever(),
         llm=FakeLLM(
             responses=[json.dumps({"subqueries": ["sq"]}), _judge_all_12()]
         ),
-        top_k=20,
+        retrieve_top_k=20,
         max_steps=1,
         paper_cutoff="task_family",
     )
 
     counts = {
         "simple": len(simple.run(query).gold_papers),
-        "verifying": len(verifying.run(query).gold_papers),
         "reading": len(reading.run(query).gold_papers),
     }
-    assert counts == {"simple": expected, "verifying": expected, "reading": expected}
+    assert counts == {"simple": expected, "reading": expected}
 
 
 def test_llm_cutoff_lets_the_llm_decide_the_count():
@@ -123,7 +115,7 @@ def test_llm_cutoff_lets_the_llm_decide_the_count():
     reading = ReadingAgent(
         _StubRetriever(),
         llm=FakeLLM(responses=[json.dumps({"subqueries": ["sq"]}), _judge_all_12()]),
-        top_k=20,
+        retrieve_top_k=20,
         max_steps=1,
         paper_cutoff="llm",
         max_papers=10,
@@ -137,7 +129,7 @@ def test_evidence_is_dropped_for_papers_cut_by_the_cutoff():
     reading = ReadingAgent(
         _StubRetriever(),
         llm=FakeLLM(responses=[json.dumps({"subqueries": ["sq"]}), _judge_all_12()]),
-        top_k=20,
+        retrieve_top_k=20,
         max_steps=1,
         paper_cutoff="task_family",  # multi_paper → 5本に切られる
     )

@@ -50,28 +50,55 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from littraceqa.common import ROOT
 from littraceqa.di_pipeline import registry
 
 # APIキー等はリポジトリ直下の .env から読む（コードにも yaml にも書かない）。
 # 既に export されている環境変数は上書きしない。
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-from littraceqa.di_pipeline.agent.iterative import IterativeAgent  # noqa: F401
+load_dotenv(ROOT / ".env")
 from littraceqa.di_pipeline.agent.reading import ReadingAgent  # noqa: F401
 from littraceqa.di_pipeline.agent.simple import SimpleAgent  # noqa: F401
-from littraceqa.di_pipeline.agent.verifying import VerifyingAgent  # noqa: F401
 from littraceqa.di_pipeline.index.bm25_index import BM25Index  # noqa: F401
-from littraceqa.di_pipeline.index.colbert_index import ColBERTIndex  # noqa: F401
+from littraceqa.di_pipeline.index.bm25_paper_index import BM25PaperIndex  # noqa: F401
+from littraceqa.di_pipeline.index.faiss_azure_openai import AzureOpenAIFAISSIndex  # noqa: F401
 from littraceqa.di_pipeline.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: F401
 from littraceqa.di_pipeline.index.faiss_specter2 import Specter2FAISSIndex  # noqa: F401
+from littraceqa.di_pipeline.index.qwen3_vl_image import Qwen3VLImageIndex  # noqa: F401
 from littraceqa.di_pipeline.index.siglip_image import SiglipImageIndex  # noqa: F401
 from littraceqa.di_pipeline.llm.azure_openai import AzureOpenAILLM  # noqa: F401
 from littraceqa.di_pipeline.llm.fake import FakeLLM  # noqa: F401
 from littraceqa.di_pipeline.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
 from littraceqa.di_pipeline.preprocess.marker_chunker import MarkerChunker  # noqa: F401
 from littraceqa.di_pipeline.preprocess.mineru_chunker import MinerUChunker  # noqa: F401
+from littraceqa.di_pipeline.retrieve.attribute_filter import (
+    AttributeExtractor,
+    LLMAttributeExtractor,
+)
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
+from littraceqa.di_pipeline.retrieve.paper_expander import (  # noqa: F401
+    BibCouplingExpander,
+    BM25MLTExpander,
+    FusedPaperExpander,
+    Specter2PaperExpander,
+)
+from littraceqa.di_pipeline.retrieve.relation_graph import (  # noqa: F401
+    MethodCoMentionExpander,
+    TitleMentionExpander,
+)
 from littraceqa.di_pipeline.retrieve.reranker import NoneReranker  # noqa: F401
+from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker  # noqa: F401
 from littraceqa.di_pipeline.retrieve.rrf import RRFFuser  # noqa: F401
+from littraceqa.di_pipeline.retrieve.vl_reranker import Qwen3VLReranker  # noqa: F401
+
+# ColBERT(pylate) は任意依存。pylate が sentence-transformers==5.3.0 を固定するため、
+# Qwen3-VL-Embedding(5.4.0以降が必要)を使う隔離 venv (.venv-vl) には入れられない。
+# そこで import 失敗を握りつぶし、「colbert indexer だけが registry に登録されない」
+# 状態にする。colbert を使う search_style を指定したときだけ registry.build が
+# 「未登録」で落ちるので、他の構成が pylate 不在で巻き添えになることはない。
+try:
+    from littraceqa.di_pipeline.index.colbert_index import ColBERTIndex  # noqa: F401
+except ImportError:  # pragma: no cover - 環境依存
+    pass
 
 
 def load_config(path: str | Path) -> dict:
@@ -110,17 +137,147 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
     resolved_paths = dict(paths)
     resolved_paths["chunks"] = f"{paths['chunks_dir']}/{process_name}_chunks.jsonl"
 
+    # agent の expansion（論文→論文展開）は索引の**名前**だけを yaml に書き、
+    # 実際のパスは indexers と同じ規則で paths から導出する
+    # （agent_style に絶対パスを書かない方針を保つ）。
+    #
+    # 単一ソース（旧形式）と複数ソース（sources: [...]、RRF融合）の両方を受ける。
+    agent_cfg = dict(agent)
+    expansion = agent_cfg.get("expansion")
+    if expansion:
+        expansion = dict(expansion)
+        sources = expansion.pop("sources", None)
+        if sources is None:
+            sources = [
+                {"name": "specter2", "index_name": expansion.pop("index_name", None)}
+            ]
+        resolved_sources = []
+        for source in sources:
+            source = dict(source)
+            name = source.pop("name", "specter2")
+            params = dict(source.pop("params", {}))
+            params.update(source)  # name 以外はそのまま params 扱い
+            if name == "specter2":
+                index_name = params.pop("index_name", None) or "faiss_specter2_abstract"
+                params.setdefault(
+                    "index_dir", f"{paths['index_dir']}/{process_name}/{index_name}"
+                )
+            elif name == "bib_coupling":
+                index_name = params.pop("index_name", None) or "bib_coupling"
+                params.setdefault("chunks", resolved_paths["chunks"])
+                params.setdefault(
+                    "cache_path",
+                    f"{paths['index_dir']}/{process_name}/{index_name}/refs.pkl",
+                )
+            elif name in ("title_mention", "method_comention"):
+                # 2つとも「どの論文がどの論文を名指ししているか」という同じ索引を
+                # 読む（解釈だけが違う）ので、キャッシュを共有する。
+                # コーパス走査は初回の1回だけで済む。
+                params.setdefault("chunks", resolved_paths["chunks"])
+                params.setdefault(
+                    "cache_path",
+                    f"{paths['index_dir']}/{process_name}/relations/mentions.pkl",
+                )
+            elif name == "bm25_mlt":
+                # 構築済みの bm25s_paper 索引をそのまま読む（追加構築なし）。
+                # 行番号 -> paper_id と anchor 用 title+abstract のキャッシュだけ
+                # 別ディレクトリに置く（索引ディレクトリを汚さないため）。
+                index_name = params.pop("index_name", None) or "bm25s_paper"
+                params.setdefault(
+                    "index_dir", f"{paths['index_dir']}/{process_name}/{index_name}"
+                )
+                params.setdefault(
+                    "cache_path",
+                    f"{paths['index_dir']}/{process_name}/bm25_mlt/anchor_text.pkl",
+                )
+            resolved_sources.append({"name": name, "params": params})
+        expansion["sources"] = resolved_sources
+        agent_cfg["expansion"] = expansion
+
+    # 名指し保護（agent params の title_protect）も識別子辞書のパスを要る。
+    # 関係グラフと同じキャッシュを読むので、索引は1本で済む。
+    agent_params = agent_cfg.get("params")
+    if isinstance(agent_params, dict) and agent_params.get("title_protect"):
+        agent_params = dict(agent_params)
+        protect = dict(agent_params["title_protect"])
+        protect.setdefault("chunks", resolved_paths["chunks"])
+        protect.setdefault(
+            "cache_path", f"{paths['index_dir']}/{process_name}/relations/mentions.pkl"
+        )
+        agent_params["title_protect"] = protect
+        agent_cfg["params"] = agent_params
+
     return {
         "paths": resolved_paths,
         "preprocessor": {"name": process_name, "params": preprocessor_params},
         "retriever": {
             "per_index_k": search["per_index_k"],
+            # reranker に渡す候補プール件数。search_style 側で省略可 (既定は top_k*3)。
+            "pool_k": search.get("pool_k"),
             "indexers": indexers,
             "fuser": search["fuser"],
             "reranker": search["reranker"],
+            # 質問が明示した会議名・年で絞り込む設定。search_style 側で省略可
+            # （省略すると無効で、従来どおりのコードパスを通る）。
+            "attribute_filter": search.get("attribute_filter"),
+            # reranker の順位を融合前の順位と RRF で混ぜる設定。省略すると
+            # 従来どおり reranker が順位を完全に置き換える。
+            "rerank_blend": search.get("rerank_blend"),
         },
-        "agent": agent,
+        "agent": agent_cfg,
     }
+
+
+def build_paper_expander(agent_cfg: dict):
+    """agent_cfg の expansion ブロックから論文→論文展開を組み立てる。無ければ None。
+
+    ソースが1つならそのまま、複数なら RRF 融合する FusedPaperExpander で包む。
+    索引もLLMも要らないので、scripts/replay_expansion.py はここだけを呼んで
+    オフラインで展開・統合をやり直せる。
+    """
+    expansion_cfg = agent_cfg.get("expansion")
+    if not expansion_cfg:
+        return None
+
+    expansion_cfg = dict(expansion_cfg)
+    source_cfgs = expansion_cfg.pop("sources", [])
+    # 挿入や rerank の設定は全ソースに配る（単一ソース時はそのまま効く）。
+    shared = {
+        key: expansion_cfg[key]
+        for key in (
+            "neighbors",
+            "anchors",
+            "rerank",
+            "rerank_top_k",
+            "insert_at",
+            # A（質問→論文）と B（論文→論文）の RRF 統合。ソース側では使わないが、
+            # 単一ソース構成でも ReadingAgent が読めるように同じ経路で配る。
+            "combine",
+            "combine_rrf_k",
+            "related_weight",
+            "related_offset",
+            # anchor / ソースごとのランキングを潰さず RRF に渡す（Consensus）。
+            "consensus",
+            # ランキングB の起点を読解 LLM の確認済み論文から取る。
+            # "score" ならリランカのスコアで代替する（LLM 不要＝エージェント抜き用）。
+            "anchor_from",
+            "anchor_score_min",
+            "anchor_score_ratio",
+            "anchor_max",
+        )
+        if key in expansion_cfg
+    }
+    sources = [
+        registry.build("expander", s["name"], **{**shared, **s.get("params", {})})
+        for s in source_cfgs
+    ]
+    if len(sources) == 1:
+        return sources[0]
+    return FusedPaperExpander(
+        sources=sources,
+        **{k: v for k, v in shared.items() if k != "anchors"},
+        **{k: v for k, v in expansion_cfg.items() if k == "rrf_k"},
+    )
 
 
 def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
@@ -142,18 +299,52 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
             "reranker", reranker_cfg["name"], **reranker_cfg.get("params", {})
         )
 
-    retriever = HybridRetriever(
-        indexers=indexers,
-        fuser=fuser,
-        reranker=reranker,
-        per_index_k=cfg["retriever"]["per_index_k"],
-    )
-
     agent_cfg = cfg["agent"]
     llm_kwargs: dict[str, Any] = {}
     llm_cfg = agent_cfg.get("llm")
     if llm_cfg:
         llm_kwargs["llm"] = registry.build("llm", llm_cfg["name"], **llm_cfg.get("params", {}))
+
+    # 論文→論文展開（agent yaml の expansion ブロック）。無ければ従来どおり。
+    expander = build_paper_expander(agent_cfg)
+    if expander is not None:
+        llm_kwargs["paper_expander"] = expander
+
+    # 検索結果に接地したクエリ書き換えと、サブクエリの重複除去。
+    # どちらも agent yaml の**トップレベル**ブロック（params ではない）で、
+    # 書かなければキー自体を渡さないので既存構成の挙動は変わらない。
+    # rewrite は A（検索）と B（展開）の両方を材料にするので expansion の中に
+    # 入れない。
+    for key in ("rewrite", "subquery_dedup"):
+        block = agent_cfg.get(key)
+        if block:
+            llm_kwargs[key] = block
+
+    # 属性フィルタ（会議名・年）。設定が無い / enabled: false なら無効のまま。
+    attribute_cfg = cfg["retriever"].get("attribute_filter") or {}
+    attribute_kwargs: dict[str, Any] = {}
+    if attribute_cfg.get("enabled"):
+        extractor: Any = AttributeExtractor(cfg["paths"]["paper_metadata"])
+        # llm_extract: true のとき、正規表現が取れなかった質問だけ LLM に判定させる
+        # （エージェントと同じ LLM を使い回す）。LLM が無い構成では黙って正規表現のまま。
+        if attribute_cfg.get("llm_extract") and "llm" in llm_kwargs:
+            extractor = LLMAttributeExtractor(extractor, llm_kwargs["llm"])
+        attribute_kwargs = {
+            "attribute_extractor": extractor,
+            "fetch_safety": attribute_cfg.get("safety", 1.5),
+            "max_fetch_k": attribute_cfg.get("max_fetch_k", 5000),
+            "min_filtered_results": attribute_cfg.get("min_results", 10),
+        }
+
+    retriever = HybridRetriever(
+        indexers=indexers,
+        fuser=fuser,
+        reranker=reranker,
+        per_index_k=cfg["retriever"]["per_index_k"],
+        pool_k=cfg["retriever"].get("pool_k"),
+        rerank_blend=cfg["retriever"].get("rerank_blend"),
+        **attribute_kwargs,
+    )
 
     agent = registry.build(
         "agent",

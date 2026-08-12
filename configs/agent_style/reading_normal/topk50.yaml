@@ -1,0 +1,13 @@
+# reading.yaml の retrieve_top_k だけを 20 -> 50 に広げた幅 ablation。
+# LLM が読む本数（max_candidates）は 20 のままなので、差分は「サブクエリ1本あたり
+# 何件受け取るか」だけ。reranker の推論件数は search_style の pool_k で決まるので増えない。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+params:
+  max_steps: 3
+  retrieve_top_k: 50
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

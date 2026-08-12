@@ -1,0 +1,28 @@
+# --dump-runs の土台にする「太い」走行用。**retrieve_top_k=100 の幅 ablation も兼ねる**
+# （旧 reading_topk100.yaml は中身が1文字も違わなかったので、この1枚に統合した）。
+#
+# retrieve_top_k を 100 にして、サブクエリ1本あたり100件まで受け取る。
+# **reranker の推論は1件も増えない**——推論件数は search_style の pool_k で決まって
+# いて、retrieve_top_k は「スコアリング済みの上位何件を受け取るか」でしかないため
+# （捨てていた分を拾うだけ）。
+#
+# この構成で1回だけフル走行して runs_fat.jsonl を作れば、scripts/replay_merge.py が
+# 100以下の任意の retrieve_top_k と、サブクエリ間マージ・検索の深さ・プールの剪定を
+# 数十秒で振れる（本走行は4〜5時間）。
+#
+#   tmux new-session -d -s littrace-fat "PYTHONUNBUFFERED=1 uv run python scripts/run_search.py \
+#     --paths configs/paths/default.yaml --process configs/process_style/mineru.yaml \
+#     --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter.yaml \
+#     --agent configs/agent_style/reading_normal/fat.yaml \
+#     --queries data/validation_inputs.jsonl --output predictions_fat.jsonl \
+#     --dump-runs runs_fat.jsonl --production-input 2>&1 | tee logs/fat.log"
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+params:
+  max_steps: 3
+  retrieve_top_k: 100
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

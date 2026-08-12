@@ -1,0 +1,60 @@
+# bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter_k100.yaml に
+# **論文単位の BM25（bm25s_paper）を1索引として足した**版。
+#
+#   * chunk BM25 (bm25s)      : 質問に直接答える「当たり段落」を探す
+#   * paper BM25 (bm25s_paper): 論文全体が質問のテーマに合うかを見る
+#
+# 質問語が論文内の離れた場所に分散していると chunk 側は弱くなる（1チャンクに
+# 語が揃わないため）。逆に paper 側は表の1セルや数式のような局所的な根拠が
+# 埋もれる。RRF で順位融合すると「両方から支持された論文」が上がる。
+#
+# **索引は両方とも構築済みなので追加構築はゼロ**（bm25s 5.1G / bm25s_paper 2.9G）。
+# index_name を書かないので既存のパスをそのまま読む。
+#
+# **注意: bm25s_paper の chunk_id は "{paper_id}#paper" という擬似 ID で、
+# evidence には使えない**（CLAUDE.md 冒頭の方針）。candidate_recall は論文単位の
+# 指標なので影響を受けないが、この索引由来のチャンクが ReadingAgent の可視域に
+# 入ると evidence の材料にならない。**evaluate.py の evidence_f1 が下がらないかを
+# 必ず確認する**（下がるなら reranker の pool までに留める運用に切り替える）。
+
+per_index_k: 100
+pool_k: 200
+
+attribute_filter:
+  enabled: true
+  safety: 1.5
+  max_fetch_k: 3000
+  min_results: 10
+
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: bm25s_paper
+    params: {}
+
+  - name: faiss_qwen3
+    index_name: faiss_qwen3_8b
+    params:
+      model: Qwen/Qwen3-Embedding-8B
+      devices: "cuda:0"
+      fp16: true
+      max_tokens: 8192
+      doc_prefix: "passage: "
+      query_prefix: "query: "
+      batch_size: 8
+
+fuser:
+  name: rrf
+  # 3索引とも等重み。外部チームも chunk/paper BM25 を 1.0 : 1.0 で融合している。
+  params: { k: 60, weights: { bm25s: 1.0, bm25s_paper: 1.0, faiss_qwen3: 1.0 } }
+
+reranker:
+  name: qwen3
+  params:
+    model: Qwen/Qwen3-Reranker-8B
+    devices: "cuda:1,cuda:2"
+    fp16: true
+    max_batch_tokens: 2048
+    batch_size: 4
+    max_tokens: 2048

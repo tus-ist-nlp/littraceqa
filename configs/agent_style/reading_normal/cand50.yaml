@@ -1,0 +1,13 @@
+# reading.yaml の retrieve_top_k と max_candidates を両方 50 に広げた版。
+# topk50.yaml との違いは max_candidates で、**LLM が読む本数そのもの**が増える。
+# reading_expand_rrf/cand50.yaml の「展開なし」対照として使う。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+params:
+  max_steps: 3
+  retrieve_top_k: 50
+  max_candidates: 50
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10
