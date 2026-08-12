@@ -168,43 +168,20 @@ configs/
     │   │                   reading_expand_rrf/cand50.yaml の「展開なし」対照
     │   └── fat.yaml      : retrieve_top_k 100。`--dump-runs` の土台（replay_merge.py 用）を
     │                       兼ねる。旧 reading_topk100.yaml と中身が同一だったので統合した
-    ├── reading_expand_insert/ : 論文→論文展開（位置挿入）。既存の候補列は動かさず、
-    │                       決まった位置に差し込む。**cr@20 は定義上動かない**
     └── reading_expand_rrf/ : 論文→論文展開（順位融合）。ランキングを A/B に分けて
-                            RRF 統合し、候補列そのものを作り直す。**@20 から動く**
+                            RRF 統合し、候補列そのものを作り直す。
 
     **`reading_loop/` は削除した。** 反復ループの拡張キー（`subquery_merge` /
     `grounded_refine` / `pool_rescore` / `adaptive_depth`）は `agent/reading.py` に
     そのまま残っているので、必要なら任意の agent yaml の `params` に直接書けばよい
     （下記の表を参照）。プリセットの yaml を置くのをやめただけ。
 
-    **`expansion` ブロックを持つ点は同じで、違うのは取り込み方だけ**（実装は
-    `agent/reading.py` の `_expand_candidates()` と `_combine_rrf()`。分岐は
-    `expansion.combine: rrf` の有無で、書かなければ位置挿入）。位置挿入は
-    `candidate_papers[:cut] + expanded + candidate_papers[cut:]` で上位を汚さない
-    代わりに上位を良くもできない。順位融合は「A にも B にも居る論文」を加点でき、
-    50本で切る**前**の全長をランキングA に使える。
-
-    reading_expand_insert/ の中身（位置挿入）:
-    └── insert.yaml : reading + 論文→論文展開。候補1位論文の SPECTER2 近傍20本を
-          **max_candidates 直後に挿入**する（`expansion` ブロック、実装は
-          retrieve/paper_expander.py）。質問文が名指ししないピア gold（トピッククラスタの
-          残り）を拾う。LLM が読む上位 max_candidates 本と提出は不変。オフライン検証
-          （8b_chunk merged 土台）で cr@50 0.836->0.880 / ecr@50 0.908->0.924。
-          **@100 で比較してはいけない**（下記）。挿入位置は実測比較で決めた: 末尾追記だと拾った分が51位
-          以降に沈み、10位挿入は LLM 可視域を押し出して cr@20 が悪化する。索引は
-          faiss_specter2_abstract を使い回すので追加構築なし・クエリ時のモデルロードもなし
-          （faiss reconstruct + CPU検索1回）
-    └── reading_expand_insert/rerank.yaml : 上記 + 展開論文を検索と同じ reranker にかけ、
-          **上位 rerank_top_k(5) 本だけ**を insert_at(15) に挿入する。**cr@20 を動かせる
-          唯一の経路**（0.783->0.813、multi 0.589->0.646、cr@50 0.895）。
-          **スコアで既存候補と混ぜてはいけない**——実測で cr@20 が 0.773 に悪化した。
-          reranker は展開20本の中での序列は正しく付ける（gold の順位が中央値9位->5位）が、
-          絶対スコアは既存候補と比較可能でなく、top20 に押し込まれた91本の gold が0本で
-          既存 gold を2本追い出した。必ず本数で絞ってから位置挿入する。
-          rerank_top_k を増やしても cr@20 は頭打ちで cr@50 が下がる（K=10 で 0.876）
-    └── reading_expand_insert/fused.yaml : 上記の展開元を **SPECTER2 × 書誌結合の RRF 融合**にした版。
-          位置挿入方式でのベスト（cr@20 0.822 / multi@20 0.663 / cr@50 0.905 / multi@50 0.819）。
+    **`reading_expand_insert/`（位置挿入）は削除した。** 展開した論文を候補列の
+    決まった位置に差し込む方式で、順位融合に**全指標で負けた**（方式内のベストが
+    cr@20 0.822 / multi@20 0.663 に対し、順位融合は 0.879 / 0.770）。上位を汚さない
+    代わりに上位を良くもできず、`cr@20` が定義上動かないのが効かない理由。
+    実装（`_expand_candidates()` と expander の `expand()` / `rerank` / `insert_at`）は
+    残してあるので、`expansion` ブロックに `combine: rrf` を**書かなければ**その経路を通る。
 
     reading_expand_rrf/ の中身（順位融合）:
     └── reading_expand_rrf/rrf.yaml : **ランキングを2本に分けて RRF 統合する版（現状のベスト）。**
@@ -444,8 +421,9 @@ B の1位に置くのが定義どおりでもある。
 統合するときは**50本で切る前の全長**をランキングA に使う（`_build_prediction`）。
 51位の論文を B が強く推していても、先に切ると押し上げようがないため。
 
-**`combine` を書かなければ挙動は1ビットも変わらない。** 既存の `reading_expand_insert/insert*.yaml`
-（位置挿入）はそのまま動くので、いつでも A/B が取れる。
+**`combine` を書かなければ挙動は1ビットも変わらない**（位置挿入の経路に落ちる）。
+位置挿入のプリセット yaml は削除したが、実装は残してあるので比較が要るときは
+`expansion` ブロックから `combine: rrf` を外した yaml を1枚置けば取れる。
 
 #### 展開まわりの調整は**土台を4本使う**（1本だと結論が反転する）
 

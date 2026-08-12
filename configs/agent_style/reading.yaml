@@ -1,6 +1,6 @@
 # 既定の ReadingAgent。分解→読解→不足分の再検索を反復する（任意キーは一切使わない）。
 # retrieve_top_k / max_candidates を振った版は reading_normal/、論文→論文展開は
-# reading_expand_insert/（位置挿入）と reading_expand_rrf/（順位融合）、
+# reading_expand_rrf/（順位融合）、
 # 反復ループの拡張キー（subquery_merge / grounded_refine / pool_rescore /
 # adaptive_depth）は params に直接書く。プリセット yaml は置いていない。
 name: reading
