@@ -1,14 +1,15 @@
-# 検索 → 読解 → 不足分の再検索 を繰り返す唯一の本命エージェント。
-# 打ち切りは LLM の sufficient 判定のみで行い、task_family には一切依存しない
-# （本番入力には task_family が無く、推定は正解率0.67程度で当てにならないため）。
-# 実行には .env の AZURE_OPENAI_* が必要。
+# 既定の ReadingAgent。分解→読解→不足分の再検索を反復する（任意キーは一切使わない）。
+# retrieve_top_k / max_candidates を振った版は reading_normal/、論文→論文展開は
+# reading_expand_insert/（位置挿入）と reading_expand_rrf/（順位融合）、
+# 反復ループの拡張キー（subquery_merge / grounded_refine / pool_rescore /
+# adaptive_depth）は params に直接書く。プリセット yaml は置いていない。
 name: reading
 llm: { name: azure_openai, params: { reasoning_effort: medium } }
 params:
   max_steps: 3
-  top_k: 20
-  max_candidates: 15
+  retrieve_top_k: 20
+  max_candidates: 20
   chunks_per_paper: 2
-  snippet_chars: 1800 # 200文字ではタイトルしか読めない
-  paper_cutoff: llm # LLMが十分と判断した時点の選定をそのまま提出本数にする
+  snippet_chars: 1800
+  paper_cutoff: llm
   max_papers: 10

@@ -16,6 +16,7 @@ from pathlib import Path
 from pylate import indexes, models, retrieve
 
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
+from littraceqa.di_pipeline.index.chunk_filter import filter_chunk_types
 from littraceqa.di_pipeline.registry import register
 
 _CHUNKS_FILENAME = "chunks.jsonl"
@@ -32,12 +33,28 @@ class ColBERTIndex:
         model: str = "colbert-ir/colbertv2.0",
         batch_size: int = 32,
         device: str = "cuda",
+        # 索引に入れる chunk_type を絞る（None なら全部）。faiss_qwen3 等と同じ流儀。
+        chunk_types: list[str] | None = None,
+        # ColBERT が1文書を何トークンまで見るか。PyLate/モデルの既定は 300 で、
+        # GTE-ModernColBERT のような長コンテキストモデルでもそのままだと 300 で
+        # 切られる（表チャンクの後半が根拠から欠落する）。表の p99≈3497 トークンを
+        # 拾うため明示的に上げる。None ならモデル既定。
+        document_length: int | None = None,
+        # 256万チャンクを一度に encode するとトークン単位の埋め込みが RAM に載り切らない
+        # （概算 >100GB）。この件数ごとに encode → PLAID へ逐次 add_documents して
+        # ピークメモリを1バッチ分に抑える。PLAID は2回目以降の add が追記になる
+        # （実測確認済み）。centroid は最初のバッチで学習されるので、代表性のため
+        # ある程度大きめにする。
+        build_batch_size: int = 50000,
     ):
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.model_name = model
         self.batch_size = batch_size
         self.device = device
+        self.chunk_types = chunk_types
+        self.document_length = document_length
+        self.build_batch_size = build_batch_size
 
         self._model = None
         self._index: indexes.PLAID | None = None
@@ -46,14 +63,18 @@ class ColBERTIndex:
         self._chunk_by_id: dict[str, Chunk] = {}
 
     def build(self, chunks: Iterable[Chunk]) -> None:
-        self._chunks = list(chunks)
+        self._chunks = filter_chunk_types(chunks, self.chunk_types)
+        if not self._chunks:
+            raise ValueError(
+                f"chunk_types={self.chunk_types} に一致するチャンクが1件もありません"
+            )
         self._chunk_by_id = {chunk.chunk_id: chunk for chunk in self._chunks}
         self._ensure_model()
-        doc_embeddings = self._model.encode(
-            sentences=[chunk.text for chunk in self._chunks],
-            batch_size=self.batch_size,
-            is_query=False,
-            show_progress_bar=False,
+        n = len(self._chunks)
+        print(
+            f"  {self.name}: {n:,} 件を document_length="
+            f"{self.document_length or 'モデル既定'} で埋め込み "
+            f"({self.build_batch_size:,} 件ごとに PLAID へ逐次追加)"
         )
         self._index = indexes.PLAID(
             index_folder=str(self.index_dir),
@@ -61,10 +82,20 @@ class ColBERTIndex:
             override=True,
             show_progress=False,
         )
-        self._index.add_documents(
-            documents_ids=[chunk.chunk_id for chunk in self._chunks],
-            documents_embeddings=doc_embeddings,
-        )
+        # 全件を一度に持たず、build_batch_size ごとに encode → add_documents する。
+        for start in range(0, n, self.build_batch_size):
+            batch = self._chunks[start : start + self.build_batch_size]
+            doc_embeddings = self._model.encode(
+                sentences=[chunk.text for chunk in batch],
+                batch_size=self.batch_size,
+                is_query=False,
+                show_progress_bar=False,
+            )
+            self._index.add_documents(
+                documents_ids=[chunk.chunk_id for chunk in batch],
+                documents_embeddings=doc_embeddings,
+            )
+            print(f"    {min(start + self.build_batch_size, n):,}/{n:,} 追加済み")
         self._retriever = retrieve.ColBERT(index=self._index)
         self._save_chunks()
 
@@ -122,10 +153,10 @@ class ColBERTIndex:
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
-        self._model = models.ColBERT(
-            model_name_or_path=self.model_name,
-            device=self.device,
-        )
+        kwargs: dict = {"model_name_or_path": self.model_name, "device": self.device}
+        if self.document_length is not None:
+            kwargs["document_length"] = self.document_length
+        self._model = models.ColBERT(**kwargs)
 
     def _save_chunks(self) -> None:
         path = self.index_dir / _CHUNKS_FILENAME

@@ -205,8 +205,14 @@ class FigureVLMChunker:
         from qwen_vl_utils import process_vision_info
         from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            self.vlm_model, torch_dtype="auto", device_map=self.device
+        from littraceqa.di_pipeline.accel import load_with_best_attn
+
+        model = load_with_best_attn(
+            Qwen2VLForConditionalGeneration.from_pretrained,
+            self.vlm_model,
+            self.device,
+            torch_dtype="auto",
+            device_map=self.device,
         )
         processor = AutoProcessor.from_pretrained(self.vlm_model)
 

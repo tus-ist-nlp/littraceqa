@@ -1,0 +1,14 @@
+per_index_k: 100
+indexers:
+  - name: bm25s
+    params: {}
+  - name: faiss_azure_openai
+    params:
+      batch_size: 256
+      workers: 4
+fuser:
+  name: rrf
+  params: { k: 60, weights: { bm25s: 1.0, faiss_azure_openai: 1.0 } }
+reranker:
+  name: none
+  params: {}

@@ -121,7 +121,7 @@ class TaskFamilyClassifier:
 
     LLM を渡すと LLM で推定し、渡さない（または LLM が失敗した）場合は
     heuristic_task_family() にフォールバックする。同じ query_id への再問い合わせは
-    キャッシュして LLM の呼び出し回数を抑える（IterativeAgent は1クエリ中に複数回引く）。
+    キャッシュして LLM の呼び出し回数を抑える（ReadingAgent は1クエリ中に複数回引く）。
 
     **検索してから判定する。** 質問文だけからの推定は実測で正解率0.673 が頭打ちだった
     （ヒューリスティックも LLM も同じ）。「NCFM, AP-BPTT, ATT, DEDA の精度は？」を見て、

@@ -4,7 +4,7 @@
 
     llm: { name: azure_openai, params: {} }
 
-と書けば IterativeAgent / VerifyingAgent / ReadingAgent / TaskFamilyClassifier から使える。
+と書けば ReadingAgent / TaskFamilyClassifier から使える。
 
 設定は .env から読む（値はコードに書かない）:
 

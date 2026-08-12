@@ -1,13 +1,11 @@
-# BM25 + Qwen3-Embedding-8B + SigLIP のハイブリッド（ablation 用）。
-# デフォルト構成に SigLIP による図表画像の直接 embedding を加え、
-# テキスト2本＋画像1本を RRF 融合。図表が効くかを検証するための拡張構成。
 per_index_k: 100
 indexers:
   - name: bm25s
     params: {}
   - name: faiss_qwen3
     params:
-      model: Qwen/Qwen3-Embedding-8B
+      model: Qwen/Qwen3-Embedding-0.6B
+      fp16: true
       doc_prefix: "passage: "
       query_prefix: "query: "
   - name: siglip_image
