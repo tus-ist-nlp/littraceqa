@@ -101,13 +101,8 @@ configs/
     │   ├── topk50.yaml       : retrieve_top_k 50（LLM が読む本数は 20 のまま）
     │   ├── cand50.yaml       : retrieve_top_k / max_candidates とも 50
     │   └── fat.yaml          : retrieve_top_k 100。--dump-runs の土台も兼ねる
-    ├── reading_expand_insert/ : 論文→論文展開・**位置挿入**（既存の候補列は動かさず
-    │   │                     決まった位置に差し込む。cr@20 は定義上動かない）
-    │   ├── insert.yaml       : SPECTER2 近傍を挿入する素朴版
-    │   ├── rerank.yaml       : 展開分を rerank して上位K本だけ挿入
-    │   └── fused.yaml        : 展開元を SPECTER2 × 書誌結合の RRF 融合に（位置挿入のベスト）
     ├── reading_expand_rrf/   : 論文→論文展開・**順位融合**（検索ランキングと関連
-    │   │                     ランキングを RRF 統合して候補列を作り直す。@20 から動く）
+    │   │                     ランキングを RRF 統合して候補列を作り直す）
     │   ├── rrf.yaml          : 3ソース（SPECTER2 / 書誌結合 / 全文MLT）統合（現状のベスト）
     │   ├── cand50.yaml       : 上記の候補幅を 50 に広げた版
     │   ├── stacked.yaml      : rrf + 反復ループの3キー + title_protect

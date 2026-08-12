@@ -25,7 +25,7 @@ reranker の instruction は
 
 で、「質問に答えるか」を測る。ピア gold は**定義上その質問に答えない**
 （`evidence` が1件も紐づかない同トピック論文）ので、必ず下がる。
-実測でも `reading_expand_insert/rerank.yaml`（質問相対で展開を rerank）は
+実測でも、質問相対で展開を rerank する構成（位置挿入方式。yaml は削除済み）は
 cr@20 0.813 止まりだった。
 
 **anchor 相対なら測る量が違う**:
