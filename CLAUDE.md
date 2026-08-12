@@ -38,8 +38,8 @@
 （`src/littraceqa/common.py`）が `{フォルダ名}_{stem}` に畳む。畳む前のファイル名と
 同じラベルになるよう、**フォルダ名は既存ファイル名の接頭辞をそのまま使い、
 その系列の素の構成にはフォルダ名の末尾の語をファイル名として付ける**
-（`bm25_colbert/colbert.yaml` -> `bm25_colbert`、
-`bm25_colbert/gte_modern.yaml` -> `bm25_colbert_gte_modern`）。
+（`reading_expand_rrf/rrf.yaml` -> `reading_expand_rrf`、
+`reading_expand_rrf/notable.yaml` -> `reading_expand_rrf_notable`）。
 新しい語を挟むとラベルが変わり、過去の `results/experiments.jsonl` や
 監査HTMLの実験セレクタと名前が繋がらなくなる。
 
@@ -99,9 +99,7 @@ configs/
 ├── paths/
 │   └── default.yaml
 ├── process_style/
-│   ├── marker.yaml
-│   ├── mineru.yaml          : MinerU。事前に scripts/run_mineru.py で変換が必要（デフォルト、構築済み）
-│   └── figure_vlm.yaml
+│   └── mineru.yaml          : MinerU。事前に scripts/run_mineru.py で変換が必要（デフォルト、構築済み）
 ├── search_style/
 │   │   （全ファイルが indexer に bm25s/bm25s_paper を含むので全ファイル名が bm25_ で
 │   │    始まる。bm25_ の後ろは「土台(BM25)に何を足すか」を表す。
@@ -114,7 +112,7 @@ configs/
 │   │    作る実験ラベルは畳む前と1文字も変わらない（過去の report/*.md や
 │   │    results/experiments.jsonl と同じ名前で並べて読める）。
 │   │    フォルダ内でその系列の素の構成は**フォルダ名の末尾の語**を名前にする
-│   │    ——`bm25_colbert/colbert.yaml` のラベルは `bm25_colbert`）
+│   │    ——`bm25_specter2_body_qwen3/qwen3.yaml` のように書く）
 │   ├── bm25.yaml            : BM25 単体（chunk単位）
 │   ├── bm25_paper.yaml      : BM25 単体（論文単位、ablation。bm25s_paper indexer）
 │   ├── bm25_dual.yaml       : chunk BM25 + paper BM25 の RRF（ablation、GPU不要。下記）
@@ -123,15 +121,6 @@ configs/
 │   ├── bm25_qwen3.yaml      : BM25 + Qwen3-Embedding-0.6B
 │   ├── bm25_qwen3_0.6b_rerank_qwen3_0.6b.yaml : bm25_qwen3.yaml + Qwen3-Reranker-0.6B（2索引ablation）
 │   ├── bm25_specter2.yaml   : BM25 + SPECTER2（全チャンク版）
-│   ├── bm25_azure_openai.yaml : BM25 + Azure OpenAI text-embedding-3-large（全chunk、ablation。
-│   │     API課金あり、全chunk埋め込みで概算$75〜100）
-│   ├── bm25_qwen3_siglip.yaml : BM25 + Qwen3-Embedding-0.6B + SigLIP（図表画像を直接embedding、ablation用）
-│   ├── bm25_qwen3_vl_8b_rerank_qwen3vl_8b.yaml : BM25 + Qwen3-Embedding-0.6B +
-│   │     Qwen3-VL-Embedding-8B(図表画像) + Qwen3-VL-Reranker-8B。
-│   │     図表を画像のまま扱う唯一の構成（隔離venv .venv-vl が必要）
-│   ├── bm25_colbert/        : ColBERT 系列（遅延相互作用）
-│   │   ├── colbert.yaml     : colbertv2.0 ベースライン
-│   │   └── gte_modern.yaml  : GTE-ModernColBERT-v1（長コンテキスト版）
 │   ├── bm25_specter2_body_qwen3/ : **デフォルト系列。** 各モデルを設計どおりの粒度で使う3索引
 │   │   ├── qwen3.yaml       : BM25 + SPECTER2(title_abstractのみ) +
 │   │   │                      Qwen3-Embedding-0.6B(本文のみ)（デフォルト、構築済み）
@@ -216,14 +205,14 @@ configs/
     └── reading_expand_rrf/cand50.yaml : 上記の候補幅を 20 -> 50 に広げただけの版。
           統合ロジックは同一で、差分は「LLM が読む本数」と「候補列の長さ」だけ。
           per_index_k / pool_k を 1000 にした search_style と組む。
-    └── reading_expand_rrf/rel.yaml / reading_expand_rrf/consensus.yaml /
-          reading_expand_rrf/protect.yaml : 外部チームの構成から移植した3案
-          （明示的な関係 / Consensus / 名指し保護）。**3つとも実測で不採用**。
-          残してあるのは再評価のため。理由と数字は下記の各節。
+    └── reading_expand_rrf/consensus.yaml : 外部チームの構成から移植した案
+          （anchor ごとに B を分けて「揃って推された」を信号にする）。**実測で不採用**。
+          残してあるのは再評価のため。理由と数字は下記。
+          （同じ経緯で移植した「明示的な関係」と「名指し保護」は、実装ごと削除した）
 
     └── reading_expand_rrf/stacked.yaml : **いま足せるものを全部足した構成**。
           同フォルダの rrf.yaml + 反復ループの3キー（subquery_merge / grounded_refine /
-          adaptive_depth）+ title_protect。レイヤが違う（expansion はトップレベル、
+          adaptive_depth）。レイヤが違う（expansion はトップレベル、
           残りは params）ので同居できる。**この組み合わせの実測はまだ無い。**
           `reading_loop/` を消したので、**拡張キーを持つ唯一の yaml がこれ**になった。
 
@@ -307,8 +296,8 @@ BM25 の引き当ては索引を1回叩くだけ。**重複したクエリに re
 索引は `retriever.indexers` から `bm25s` を名前で探す（見つからない構成では
 `max_queries` の上限だけが効く）。
 
-**論文→論文展開の近さは5種類あり、registry の "expander" で差し替え・併用する**
-（`retrieve/paper_expander.py` と `retrieve/relation_graph.py`）:
+**論文→論文展開の近さは3種類あり、registry の "expander" で差し替え・併用する**
+（`retrieve/paper_expander.py`）:
 
 - `specter2`: SPECTER2(proximity) 埋め込みの近傍。構築済み索引を再利用（追加構築なし）。
 - `bib_coupling`: 書誌結合。参考文献の arXiv ID 集合の Jaccard。初回のみコーパス
@@ -317,18 +306,13 @@ BM25 の引き当ては索引を1回叩くだけ。**重複したクエリに re
   構築済みの `bm25s_paper` 索引を引く。LLM 呼び出しゼロ・追加構築ゼロ。
   `papers.jsonl`(2.5GB) は**クエリ時には読まない**——BM25 本体は `mmap=True` で開き、
   行番号→paper_id と anchor 用テキストは初回1回だけ流し読みして pickle に落とす。
-- `title_mention`: **A の本文に B の名前が出てくるか**（正式タイトル / コロン前の
-  見出し）。上3つが「内容が近い」なのに対し、これは「名指ししているか」を測る。
-  直接リンク（双方向）+ ハブを避けた2ホップ（`max_hub_degree: 4`）。**不採用**（下記）。
-- `method_comention`: **A と B が同じ論文の名前を挙げているか**（共言及の Jaccard）。
-  「A が B を挙げた」ではなく「A と B が同じ手法群を論じている仲間か」。**不採用**（下記）。
 - `fused`: 上記を RRF 融合（agent yaml の `expansion.sources` に並べると自動でこれになる）。
 
 **併用の根拠は「違う gold を拾う」こと**——候補圏外 gold 37本の回収は
 SPECTER2 15本 / 書誌結合 11本 / 全文MLT 16本で、**MLT だけが拾えた gold が2本**、
 既存2つだけが拾えたのが6本、重複14本。
 
-#### `title_mention` / `method_comention` は**採用しない**（同じ基準で落ちた）
+#### 「明示的な関係」で繋ぐ展開は**採用せず、実装ごと削除した**
 
 同じ集計を5ソースでやり直した実測（`predictions_8b_chunk_k100_cand50.jsonl` 土台、
 候補圏外 gold 35本・うちピア gold 18本）:
@@ -351,14 +335,14 @@ SPECTER2 15本 / 書誌結合 11本 / 全文MLT 16本で、**MLT だけが拾え
 が、**その辺が指す論文はトピック類似ですでに届く範囲**だった。
 同時期の論文どうしは互いを名指しする機会そのものが少ない。
 
-コードは registry に残してある（既定では `sources` に書かなければ一切動かない）。
-コーパスが広がって明示的な言及が増えたときに再評価できる。
+**コードは削除した**（`retrieve/relation_graph.py` / `retrieve/paper_titles.py` /
+`scripts/build_relation_graphs.py`）。コーパスが広がって明示的な言及が増えたら、
+この節の数字を出発点に作り直す。
 
-#### 名前の照合（`title_mention` / `method_comention` / 名指し保護の共通土台）
+#### 名前の照合でハマった点（実装は削除済み。作り直すときのために残す）
 
-実装は `retrieve/paper_titles.py`。索引は `scripts/build_relation_graphs.py` が
-コーパス1走査で作る（GPU 不要、キャッシュ後は即ロード。`title_mention` と
-`method_comention` と名指し保護が**同じキャッシュを共有する**ので走査は1回）。
+論文の「名前」を本文から拾う辞書（旧 `retrieve/paper_titles.py`）で踏んだ罠。
+コーパス1走査で索引を作り、キャッシュして使っていた。
 
 **MinerU のタイトルは分かち書きが壊れている。** `M o RE : A Mixture of Low-Rank
 Experts` / `T oken S hapley:` / `D e F ine:` / `AIMSC heck:` のように大文字の前で
@@ -708,12 +692,7 @@ TCM とピア3本の Jaccard 0.19〜0.24 に対し無作為30本は中央値 0.0
 | `bm25.yaml` | `bm25s`（params なし） | `none` |
 | `bm25_paper.yaml` | `bm25s_paper`（1論文=1ドキュメント） | `none` |
 | `bm25_qwen3.yaml` | `bm25s` + `faiss_qwen3`: `Qwen/Qwen3-Embedding-0.6B`, devices=`cuda:0-3`, batch_size=16, fp16, max_tokens=8192, doc/query_prefix=`passage: `/`query: ` | `none` |
-| `bm25_azure_openai.yaml` | `bm25s` + `faiss_azure_openai`: `text-embedding-3-large`（.env のデプロイ名/次元）, batch_size=256, workers=4 | `none` |
-| `bm25_colbert/colbert.yaml` | `bm25s` + `colbert`: `colbert-ir/colbertv2.0` | `none` |
-| `bm25_colbert/gte_modern.yaml` | `bm25s` + `colbert`(index_name=`colbert_gte_modern`): `lightonai/GTE-ModernColBERT-v1`, device=cuda, batch_size=32, document_length=2048, build_batch_size=50000 | `none` |
 | `bm25_specter2.yaml` | `bm25s` + `faiss_specter2`: `allenai/specter2_base`, batch_size=128, fp16, doc_adapter=`proximity`, query_adapter=`adhoc_query` | `none` |
-| `bm25_qwen3_siglip.yaml` | 上記 qwen3 + `siglip_image`: `google/siglip-base-patch16-224` | `none` |
-| `bm25_qwen3_vl_8b_rerank_qwen3vl_8b.yaml` | `bm25s` + `faiss_qwen3`(0.6B, 同上) + `qwen3_vl_image`: `Qwen/Qwen3-VL-Embedding-8B`, device=cuda:0(16.3GB), batch_size=8, fp16 | `qwen3_vl`: `Qwen/Qwen3-VL-Reranker-8B`, device=cuda:1(**索引と別GPU必須**), fp16, batch_size=4, use_images=true, max_image_docs=0（0は全件）／pool_k=100 |
 | `bm25_specter2_body_qwen3/qwen3.yaml` | `bm25s` + `faiss_specter2`(index_name=`faiss_specter2_abstract`, chunk_types=`[title_abstract]`, batch_size=128, fp16) + `faiss_qwen3`(index_name=`faiss_qwen3_0p6b`, 0.6B, chunk_types=本文系4種, batch_size=32, max_tokens=8192) | `none` |
 | `bm25_specter2_body_qwen3/attrfilter.yaml` | 同上（索引は完全に同一で使い回す） | `none`／`attribute_filter`: enabled=true, safety=1.5, max_fetch_k=5000, min_results=10 |
 | `bm25_specter2_body_qwen3/rerank_qwen3_0.6b.yaml` | 同上（ただし faiss_qwen3 の max_tokens=1024） | `qwen3`: `Qwen/Qwen3-Reranker-0.6B`, device=cuda:3, fp16, batch_size=16, max_tokens=2048／pool_k=100 |
@@ -875,8 +854,6 @@ reranker が受け付ける params（実装は `src/littraceqa/di_pipeline/retri
   代表テキストに含める本文チャンク数、既定3）, `devices`（"cuda:1,cuda:2,cuda:3" の形で
   **マルチGPU**）, `max_batch_tokens`（件数ではなくパディング後トークン量でバッチを切る）。
   **チャンク単位ではなく論文単位で並べ替える**。詳細は下の節。
-- `qwen3_vl`（`vl_reranker.py`）: `model`(既定 `Qwen/Qwen3-VL-Reranker-8B`), `device`,
-  `fp16`, `batch_size`, `prompt`, `use_images`, `max_image_docs`。
 
 **`device` は実行時に空いているGPUへ書き換える前提の値**。yaml に書いてあるのは
 書いた時点で空いていたGPUなので、埋め込み索引の構築と同居させないこと
@@ -934,9 +911,8 @@ reranker が受け付ける params（実装は `src/littraceqa/di_pipeline/retri
 | `pool_rescore` / `pool_prune_to` | false / null | プール全体を元の質問で1回リランク・剪定 |
 | `adaptive_depth` | なし | スコアの落差で採る件数を決める |
 | `max_steps: 2` | 3 | **反復を1周減らす。全指標で改善し検索が40%減る**（下記） |
-| `title_protect` | なし | 質問が名指しした論文を候補列の上位へ引き上げる | `reading_expand_rrf/protect` |
 
-**`title_protect` は実測で効果ゼロだった（既定オフのまま）。** 質問文の論文識別子から
+**`title_protect` は実測で効果ゼロだったので削除した。** 質問文の論文識別子から
 その論文を `promote_to`（既定10位）へ引き上げる仕組みで、**名前の特定自体は完璧に
 動く**（55件中26件で発火、名指しされた28本が **28/28 = 100% gold**、誤検出0本）。
 それでも指標が1桁も動かないのは、**28本すべてが既に候補1〜4位に居る**から
@@ -947,8 +923,8 @@ reranker が受け付ける params（実装は `src/littraceqa/di_pipeline/retri
 外部チームが「質問に論文名があるのに14位」を救う仕組みを入れているのは、
 向こうの @1 が 0.767 だからで、我々には要らない。
 
-抽出そのもの（`paper_titles.TitleIndex.lookup_text`）は精度100%で使える資産なので、
-「質問が論文を名指ししているか」を別の目的（分岐・診断）で使いたくなったら再利用できる。
+抽出そのものは精度100%だったので、「質問が論文を名指ししているか」を別の目的
+（分岐・診断）で使いたくなったら、上の節の注意点を踏まえて作り直せばよい。
 
 **サブクエリ間の `max` マージは比較可能でない値を突き合わせている。** 同じチャンクが
 複数のサブクエリで当たったときスコアが高いほうを残すが、そのスコアは

@@ -9,7 +9,6 @@ table）は生成しない**——回答生成も提出論文の選定も読解�
 ## ファイル
 
 - `base.py` — `SearchAgent` Protocol（`run(query) -> Prediction`）
-- `simple.py` — `SimpleAgent`: 1回検索して終わり。LLM不使用（最終提出は順位カットオフ）。
   検索そのものの素の実力を測る基準線として `scripts/eval_retrieval.py` が使う
 - `reading.py` — `ReadingAgent`: 検索→読解→不足分の再検索を反復する本命（デフォルト）
 - `task_family.py` — `TaskFamilyClassifier`（single/multi 推定）と `apply_paper_cutoff`
@@ -317,7 +316,7 @@ for indexer in indexers:
 BM25（語彙）と埋め込み（意味）のようにスコールが違う索引を素直に合成できる。
 `fuse_k`（融合後に残す件数）は reranker の有無で変わる（上の図 c）。
 
-## d. reranker（任意, `retrieve/reranker.py` / `vl_reranker.py`）
+## d. reranker（任意, `retrieve/reranker.py`）
 
 `search_style` に reranker を書いた構成だけ発火。RRF 後の候補を `pool_k` 件プールし、
 クエリ×チャンクを cross-encoder 系モデルで採点し直して `top_k` に絞る。

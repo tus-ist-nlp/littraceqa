@@ -98,8 +98,8 @@ def main() -> None:
     )
     agent_cfg = cfg["agent"]
     expander = build_paper_expander(agent_cfg)
-    if expander is None and not (agent_cfg.get("params") or {}).get("title_protect"):
-        raise SystemExit(f"{args.agent} に expansion も title_protect もない")
+    if expander is None:
+        raise SystemExit(f"{args.agent} に expansion ブロックがない")
 
     # rerank 経路（combine を使わない位置挿入）のときだけ reranker を建てる。
     # RRF 統合はランキングB を reranker に晒さないのが眼目なので GPU を触らない。
@@ -134,7 +134,7 @@ def main() -> None:
         trace = [
             t
             for t in trace
-            if not ({"paper_expansion", "paper_fusion", "title_protect"} & set(t))
+            if not ({"paper_expansion", "paper_fusion"} & set(t))
         ]
         query = Query(
             query_id=record["query_id"],
@@ -146,11 +146,6 @@ def main() -> None:
             fused = candidates
         else:
             fused = agent._combine_rrf(candidates, trace)[:CANDIDATE_PAPERS_LIMIT]
-
-        # 名指し保護も候補列の並べ替えだけなのでオフラインで再生できる。
-        # 本走行と同じく展開・統合のあとに効かせる（_build_prediction と同じ順番）。
-        if agent.title_protect is not None and fused:
-            fused = agent._apply_title_protect(fused, agent._named_papers(query), trace)
 
         if fused != candidates:
             changed += 1

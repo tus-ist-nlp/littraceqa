@@ -57,18 +57,12 @@ from littraceqa.di_pipeline import registry
 # 既に export されている環境変数は上書きしない。
 load_dotenv(ROOT / ".env")
 from littraceqa.di_pipeline.agent.reading import ReadingAgent  # noqa: F401
-from littraceqa.di_pipeline.agent.simple import SimpleAgent  # noqa: F401
 from littraceqa.di_pipeline.index.bm25_index import BM25Index  # noqa: F401
 from littraceqa.di_pipeline.index.bm25_paper_index import BM25PaperIndex  # noqa: F401
-from littraceqa.di_pipeline.index.faiss_azure_openai import AzureOpenAIFAISSIndex  # noqa: F401
 from littraceqa.di_pipeline.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: F401
 from littraceqa.di_pipeline.index.faiss_specter2 import Specter2FAISSIndex  # noqa: F401
-from littraceqa.di_pipeline.index.qwen3_vl_image import Qwen3VLImageIndex  # noqa: F401
-from littraceqa.di_pipeline.index.siglip_image import SiglipImageIndex  # noqa: F401
 from littraceqa.di_pipeline.llm.azure_openai import AzureOpenAILLM  # noqa: F401
 from littraceqa.di_pipeline.llm.fake import FakeLLM  # noqa: F401
-from littraceqa.di_pipeline.preprocess.figure_vlm import FigureVLMChunker  # noqa: F401
-from littraceqa.di_pipeline.preprocess.marker_chunker import MarkerChunker  # noqa: F401
 from littraceqa.di_pipeline.preprocess.mineru_chunker import MinerUChunker  # noqa: F401
 from littraceqa.di_pipeline.retrieve.attribute_filter import (
     AttributeExtractor,
@@ -81,24 +75,9 @@ from littraceqa.di_pipeline.retrieve.paper_expander import (  # noqa: F401
     FusedPaperExpander,
     Specter2PaperExpander,
 )
-from littraceqa.di_pipeline.retrieve.relation_graph import (  # noqa: F401
-    MethodCoMentionExpander,
-    TitleMentionExpander,
-)
 from littraceqa.di_pipeline.retrieve.reranker import NoneReranker  # noqa: F401
 from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker  # noqa: F401
 from littraceqa.di_pipeline.retrieve.rrf import RRFFuser  # noqa: F401
-from littraceqa.di_pipeline.retrieve.vl_reranker import Qwen3VLReranker  # noqa: F401
-
-# ColBERT(pylate) は任意依存。pylate が sentence-transformers==5.3.0 を固定するため、
-# Qwen3-VL-Embedding(5.4.0以降が必要)を使う隔離 venv (.venv-vl) には入れられない。
-# そこで import 失敗を握りつぶし、「colbert indexer だけが registry に登録されない」
-# 状態にする。colbert を使う search_style を指定したときだけ registry.build が
-# 「未登録」で落ちるので、他の構成が pylate 不在で巻き添えになることはない。
-try:
-    from littraceqa.di_pipeline.index.colbert_index import ColBERTIndex  # noqa: F401
-except ImportError:  # pragma: no cover - 環境依存
-    pass
 
 
 def load_config(path: str | Path) -> dict:
