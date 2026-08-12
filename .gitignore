@@ -29,6 +29,9 @@ predictions*.jsonl
 report/
 # 実験ログ（各自のローカルな実行記録。チーム共有はしない）
 results/
+# LLM によるデータセット品質監査の結果（生成物。scripts/audit_queries.py と
+# scripts/audit_nongold.py が --resume 付きで再生成できる）
+audits/
 
 # Local pipeline outputs
 archives/
