@@ -28,6 +28,7 @@ di_pipeline = [
     "pylate",
     "openai>=1.109.1",
     "python-dotenv>=1.2.2",
+    "tiktoken>=0.8.0",
 ]
 # 図表前処理（FigureVLMChunker）用。GPUを持つホスト（nlp-01/nlp-03等）でのみ
 # `uv sync --extra di_pipeline --extra figures` でインストールする想定。

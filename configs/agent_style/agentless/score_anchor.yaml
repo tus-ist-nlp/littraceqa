@@ -1,0 +1,52 @@
+# agentless.yaml + `anchor_from: score`。**LLM を1回も呼ばない。**
+#
+# **何を埋めようとしているか。** フル走行との差 -0.067(ecr@5) の片方は
+# `anchor_from: verdict`（ランキングB の起点を「読解 LLM が根拠を確認した論文」に
+# 広げる）で、エージェント抜きでは原理的に使えない。reranker のスコアは
+# 「質問に答えるか」の yes 確率なので、**しきい値を超えた論文を確認済みの代わりに
+# 使う**のがこの版（実装は `agent/reading.py` の `_anchor_papers()`）。
+#
+# ⚠ **予備測定の時点では、エージェント抜きの土台でほぼ効かなかった。**
+# `runs_rawq.jsonl`（生質問1本・**top-20 に切られた土台**）での ecr:
+#
+#     条件                     起点数    @1      @5      @10     @20
+#     候補1位のみ               1.00   0.6369  0.7823  0.8914  0.9288
+#     score min=0.99 max=4     1.35   0.6369  0.7894  0.8914  0.9268
+#     score min=0.995 max=3    1.16   0.6369  0.7869  0.8914  0.9288
+#     verdict（LLM 必要・参考）   1.64   0.6369  0.8162  0.9323  0.9515
+#
+# **効かない理由は起点が増えないこと**（平均 1.05〜1.35 本）。同じしきい値を
+# エージェント側の土台（`runs_notable.jsonl`、4本×3ステップぶんのプール）に
+# 当てると起点が 1.56〜2.29 本になり、**ちゃんと効く**:
+#
+#     条件                     起点数    @5      @10     @20
+#     候補1位のみ               1.00   0.8111  0.8970  0.9379
+#     score ratio=0.999 max=3  1.56   0.8313  0.9051  0.9561
+#     score min=0.995 max=3    1.91   0.8328  0.8990  0.9545
+#     verdict（LLM 必要・参考）   1.65   0.8419  0.9152  0.9606
+#
+# つまり**足りないのは LLM ではなくプールの深さ**の可能性が高い。予備測定の土台は
+# `--top-k 20` で採ったもので、本番（`eval_retrieval.py`）は 200 件要求する。
+# **`runs_rawq_deep.jsonl`（top-k 300）で測り直すまで採否を決めない。**
+#
+# しきい値は reranker のスコア分布が 1.0 付近に飽和していることを踏まえた値
+# （生質問1本のチャンクスコアは中央 0.933 / 1位は中央 0.999）。0.9 程度では
+# ほぼ全件が通るので意味がない。
+name: reading
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 100
+  anchors: 1
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 10
+  related_weight: 1.0
+  related_offset: 0
+  anchor_from: score          # ← agentless.yaml との差分はここから3行
+  anchor_score_min: 0.995
+  anchor_max: 3
+params:
+  paper_score_skip_chunk_types: [table]

@@ -1,0 +1,207 @@
+<title>gold 論文の検索順位（手法別）</title>
+<style>
+.viz-root{
+  color-scheme: light;
+  --bg:#fbfbfa; --surface:#fcfcfb; --card:#fff;
+  --text:#0b0b0b; --muted:#52514e; --line:#e2e1dc;
+  /* 順位のシーケンシャル（青単色ramp）。上位ほど濃く、下位ほど薄い。
+     濃い帯は白文字、薄い帯は黒文字にしてコントラストを確保する。 */
+  --r1:#1c5cab; --i1:#fff;   --r2:#3987e5; --i2:#fff;
+  --r3:#86b6ef; --i3:#0b0b0b; --r4:#cde2fb; --i4:#0b0b0b;
+  --r5:#eef4fd; --i5:#52514e;
+  --oob:rgba(11,11,11,0.04);
+  --up:#1c5cab; --down:#b3401a; --qid:#1c5cab; --qband:rgba(42,120,214,0.09);
+}
+@media (prefers-color-scheme: dark){
+  :root:where(:not([data-theme="light"])) .viz-root{
+    color-scheme: dark;
+    --bg:#131312; --surface:#1a1a19; --card:#201f1e;
+    --text:#fff; --muted:#c3c2b7; --line:#33322e;
+    --r1:#9ec5f4; --i1:#0b0b0b; --r2:#5598e7; --i2:#0b0b0b;
+    --r3:#256abf; --i3:#fff;    --r4:#184f95; --i4:#fff;
+    --r5:#123a6e; --i5:#c3c2b7;
+    --oob:rgba(255,255,255,0.04);
+    --up:#86b6ef; --down:#e8845c; --qid:#86b6ef; --qband:rgba(57,135,229,0.15);
+  }
+}
+:root[data-theme="dark"] .viz-root{
+  color-scheme: dark;
+  --bg:#131312; --surface:#1a1a19; --card:#201f1e;
+  --text:#fff; --muted:#c3c2b7; --line:#33322e;
+  --r1:#9ec5f4; --i1:#0b0b0b; --r2:#5598e7; --i2:#0b0b0b;
+  --r3:#256abf; --i3:#fff;    --r4:#184f95; --i4:#fff;
+  --r5:#123a6e; --i5:#c3c2b7;
+  --oob:rgba(255,255,255,0.04);
+  --up:#86b6ef; --down:#e8845c; --qid:#86b6ef; --qband:rgba(57,135,229,0.15);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg)}
+.viz-root{padding:22px 18px 60px;background:var(--bg);color:var(--text);
+  font:14px/1.6 -apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif}
+.wrap{max-width:1280px;margin:0 auto}
+h1{font-size:20px;margin:0 0 4px}
+.lede{color:var(--muted);margin:0 0 16px;font-size:13.5px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:12px 14px;margin:0 0 12px}
+.ctrls{display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:13px}
+.ctrls label{display:flex;align-items:center;gap:6px}
+select{padding:3px 6px;font:inherit;font-size:13px}
+.scale{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:12px;
+  color:var(--muted);margin-top:9px}
+.key{display:inline-flex;align-items:center;gap:5px}
+.box{width:22px;height:14px;border-radius:3px;border:1px solid var(--line)}
+.tblwrap{overflow:auto;max-height:78vh;border:1px solid var(--line);border-radius:10px}
+table{border-collapse:separate;border-spacing:0;font-size:12.5px;width:100%}
+th,td{padding:3px 7px;white-space:nowrap;font-variant-numeric:tabular-nums}
+thead th{position:sticky;top:0;z-index:3;background:var(--card);color:var(--muted);
+  font-weight:600;text-align:left;border-bottom:1px solid var(--line);font-size:10.5px;
+  vertical-align:bottom;padding:6px 7px;line-height:1.35;
+  white-space:normal;word-break:break-all;min-width:132px;max-width:150px;
+  font-family:ui-monospace,Menlo,monospace}
+thead th .rdate{display:block;font-family:-apple-system,"Hiragino Sans",sans-serif;
+  font-size:11px;color:var(--qid);font-weight:700;margin-bottom:2px}
+thead th.num{min-width:auto;max-width:none;text-align:right;font-family:inherit;font-size:11.5px}
+thead th.lft{text-align:left;left:0;z-index:4}
+tbody th{position:sticky;left:0;background:var(--surface);text-align:left;font-weight:400;
+  border-right:1px solid var(--line);z-index:2;max-width:330px;overflow:hidden;
+  text-overflow:ellipsis}
+td{text-align:right}
+tbody tr:hover th,tbody tr:hover td{filter:brightness(1.06)}
+tr.qhead th,tr.qhead td{background:var(--qband);border-top:2px solid var(--qid)}
+tr.qhead th{color:var(--qid);font-size:14px;font-weight:700;letter-spacing:.03em;
+  font-family:ui-monospace,Menlo,monospace}
+tr.qhead th .tag{font-family:inherit;font-size:10.5px;font-weight:400;color:var(--muted)}
+.qcell{color:var(--qid);font-weight:700;font-family:ui-monospace,Menlo,monospace;
+  font-size:12.5px;margin-right:2px}
+.qsep{color:var(--line);margin:0 4px}
+.pid{font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.tag{display:inline-block;padding:0 6px;border-radius:9px;font-size:10.5px;
+  border:1px solid var(--line);color:var(--muted);margin-left:5px}
+.oobcell{background:var(--oob);color:var(--muted)}
+td.b1{background:var(--r1);color:var(--i1);font-weight:700}
+td.b2{background:var(--r2);color:var(--i2);font-weight:600}
+td.b3{background:var(--r3);color:var(--i3)}
+td.b4{background:var(--r4);color:var(--i4)}
+td.b5{background:var(--r5);color:var(--i5)}
+.delta{font-size:11px;margin-left:4px}
+.up{color:var(--up)} .down{color:var(--down)}
+.sum td{font-weight:700}
+.note{color:var(--muted);font-size:12.5px;margin:10px 2px 0}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}
+</style>
+
+<div class="viz-root"><div class="wrap">
+<h1>gold 論文の検索順位（手法別）</h1>
+<p class="lede">1行 = 1つの gold 論文。数字はその論文が候補列（LLM 絞り込み前）で何位に出たか。
+小さいほど良い。「圏外」は候補列に一度も現れなかったもの。</p>
+
+<div class="panel">
+  <div class="ctrls">
+    <label>relevance <select id="f_g"><option value="">すべて</option>
+      <option value="supporting">supporting（回答の根拠）</option>
+      <option value="other_evidence">その他 evidence 持ち</option>
+      <option value="no_evidence">no_evidence</option></select></label>
+    <label>task_family <select id="f_fam"><option value="">すべて</option></select></label>
+    <label>並び <select id="f_sort">
+      <option value="query">クエリ順</option>
+      <option value="improved">改善が大きい順</option>
+      <option value="worsened">悪化が大きい順</option>
+      <option value="worst">最新が悪い順</option></select></label>
+    <label><input type="checkbox" id="f_chg"> 動いたものだけ</label>
+    <span id="count" style="color:var(--muted)"></span>
+  </div>
+  <div class="scale">
+    <span>順位の濃さ:</span>
+    <span class="key"><span class="box" style="background:var(--r1)"></span>1–5</span>
+    <span class="key"><span class="box" style="background:var(--r2)"></span>6–10</span>
+    <span class="key"><span class="box" style="background:var(--r3)"></span>11–20</span>
+    <span class="key"><span class="box" style="background:var(--r4)"></span>21–50</span>
+    <span class="key"><span class="box" style="background:var(--r5)"></span>51+</span>
+    <span class="key"><span class="box" style="background:var(--oob)"></span>圏外</span>
+    <span style="margin-left:8px">最終列の <span class="up">▲</span>/<span class="down">▼</span> は最初の手法との差</span>
+  </div>
+</div>
+
+<div class="tblwrap"><table id="tbl"></table></div>
+<p class="note">列見出しは <code>report/</code> 直下のレポートファイル名（拡張子なし）。左から古い順。</p>
+</div></div>
+<script>
+/*__DATA__*/</script>
+<script>
+const state={g:'',fam:'',sort:'query',chg:false};
+const N=DATA.experiments.length;
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const GLABEL={supporting:'supporting',other_evidence:'evidence有',no_evidence:'no_evidence'};
+
+function tone(r){
+  if(r==null) return 'oobcell';
+  if(r<=5) return 'b1'; if(r<=10) return 'b2'; if(r<=20) return 'b3';
+  if(r<=50) return 'b4'; return 'b5';
+}
+// 圏外を最下位相当の大きな値として扱う（差分計算用）
+const val=r=>r==null?999:r;
+
+function rows(){
+  let out=DATA.lines.filter(l=>{
+    if(state.g&&l.g!==state.g) return false;
+    if(state.fam&&l.f!==state.fam) return false;
+    if(state.chg&&new Set(l.r.map(String)).size<2) return false;
+    return true;});
+  const delta=l=>val(l.r[0])-val(l.r[N-1]);       // 正 = 改善
+  if(state.sort==='improved') out=[...out].sort((a,b)=>delta(b)-delta(a));
+  else if(state.sort==='worsened') out=[...out].sort((a,b)=>delta(a)-delta(b));
+  else if(state.sort==='worst') out=[...out].sort((a,b)=>val(b.r[N-1])-val(a.r[N-1]));
+  else out=[...out].sort((a,b)=>a.q===b.q?a.p.localeCompare(b.p):a.q.localeCompare(b.q));
+  return out;
+}
+
+function render(){
+  const rs=rows();
+  document.getElementById('count').textContent=`${rs.length} / ${DATA.lines.length} 本`;
+  let h='<thead><tr><th class="lft">gold 論文</th>'
+    +DATA.experiments.map(e=>`<th title="${esc(e.full)}"><span class="rdate">${esc(e.date)}</span>${esc(e.full)}</th>`).join('')
+    +'<th class="num">差</th></tr></thead><tbody>';
+
+  // 手法ごとの集計行（20位以内の本数）
+  const in20=DATA.experiments.map((_,i)=>rs.filter(l=>l.r[i]!=null&&l.r[i]<=20).length);
+  const oob=DATA.experiments.map((_,i)=>rs.filter(l=>l.r[i]==null).length);
+  h+=`<tr class="sum"><th>20位以内の本数</th>`
+    +in20.map(v=>`<td>${v}</td>`).join('')
+    +`<td>${in20[N-1]-in20[0]>=0?'▲':'▼'}${Math.abs(in20[N-1]-in20[0])}</td></tr>`;
+  h+=`<tr class="sum"><th>圏外の本数</th>`
+    +oob.map(v=>`<td>${v}</td>`).join('')
+    +`<td>${oob[N-1]-oob[0]<=0?'▲':'▼'}${Math.abs(oob[N-1]-oob[0])}</td></tr>`;
+
+  let lastQ=null;
+  rs.forEach(l=>{
+    if(state.sort==='query'&&l.q!==lastQ){
+      lastQ=l.q;
+      const n=rs.filter(x=>x.q===l.q).length;
+      h+=`<tr class="qhead"><th>${esc(l.q)} <span class="tag">${esc(l.f)}</span>
+          <span class="tag">gold ${n}本</span></th>`+'<td></td>'.repeat(N+1)+'</tr>';
+    }
+    const d=val(l.r[0])-val(l.r[N-1]);
+    const dtxt = d===0?'—':(d>0?`<span class="up">▲${d>900?'圏外→入':d}</span>`
+                                :`<span class="down">▼${-d>900?'落選':-d}</span>`);
+    h+=`<tr><th title="${esc(l.t)}"><span class="qcell">${esc(l.q)}</span>
+        <span class="qsep">/</span><span class="pid">${esc(l.p)}</span>
+        <span class="tag">${esc(GLABEL[l.g])}</span></th>`
+      +l.r.map(r=>`<td class="${tone(r)}">${r==null?'圏外':r}</td>`).join('')
+      +`<td class="delta">${dtxt}</td></tr>`;
+  });
+  document.getElementById('tbl').innerHTML=h+'</tbody>';
+}
+function init(){
+  [...new Set(DATA.lines.map(l=>l.f))].sort().forEach(f=>
+    document.getElementById('f_fam').insertAdjacentHTML('beforeend',
+      `<option value="${esc(f)}">${esc(f)}</option>`));
+  document.getElementById('f_g').onchange=e=>{state.g=e.target.value;render();};
+  document.getElementById('f_fam').onchange=e=>{state.fam=e.target.value;render();};
+  document.getElementById('f_sort').onchange=e=>{state.sort=e.target.value;render();};
+  document.getElementById('f_chg').onchange=e=>{state.chg=e.target.checked;render();};
+  render();
+}
+init();
+</script>
+
+</body></html>

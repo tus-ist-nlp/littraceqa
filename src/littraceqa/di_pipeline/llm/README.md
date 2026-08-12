@@ -1,6 +1,6 @@
 # src/littraceqa/di_pipeline/llm/
 
-`IterativeAgent` / `VerifyingAgent` / `TaskFamilyClassifier` が使うLLMクライアント。
+`ReadingAgent` / `TaskFamilyClassifier` が使うLLMクライアント。
 `__call__(prompt: str) -> str` の形で統一する。
 
 - `base.py` — `LLMClient` Protocol
@@ -18,9 +18,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 agent_style の yaml で指定する:
 
 ```yaml
-name: verifying
+name: reading
 llm: { name: claude, params: { effort: medium } }
-params: { top_k: 20, max_candidates: 15 }
+params: { top_k: 20, max_candidates: 20 }
 ```
 
 `params` に渡せるもの: `model`（既定 `claude-opus-4-8`）, `max_tokens`, `effort`
