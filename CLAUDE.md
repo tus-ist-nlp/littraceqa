@@ -137,8 +137,14 @@ configs/
 │       │                      pool_k を 200 に絞った版
 │       ├── chunk_attrfilter_k100_blend.yaml : 上記 + `rerank_blend`
 │       │                      （blend 版どうしの幅違い対照が chunk_attrfilter_blend）
-│       └── paper_attrfilter.yaml : chunk_attrfilter を「論文単位rerank
-│                              (qwen3_paper, 3GPU)」にした版。per_index_k/pool_k=1000
+│       ├── paper_attrfilter.yaml : chunk_attrfilter を「論文単位rerank
+│       │                      (qwen3_paper, 3GPU)」にした版。per_index_k/pool_k=1000
+│       │   （以下4つは docs/kumagai_reflect.md の移植。**実測はまだ無い**）
+│       ├── k100_paperbm25.yaml : chunk_attrfilter_k100 + `bm25s_paper` 索引
+│       │                      （融合はチャンク単位のまま。索引を足した効果だけを測る）
+│       ├── k100_paperrrf.yaml : 上記の融合を**論文単位RRF**にした版（下記）
+│       ├── k100_seed.yaml   : chunk_attrfilter_k100 + **Seed Expansion**（下記）
+│       └── k100_paperrrf_seed.yaml : 上記2つを両方入れた版（切り分け後に使う）
 └── agent_style/
     ├── agentless/        : **検索エージェントを使わない構成（最優先）。**
     │   │                   `eval_retrieval.py --agent` に渡す前提で、LLM を1回も呼ばない。
@@ -703,6 +709,100 @@ TCM とピア3本の Jaccard 0.19〜0.24 に対し無作為30本は中央値 0.0
 | `bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter_k100.yaml` | 同上 | 同上だが devices=`cuda:1,cuda:2`／per_index_k=**100**, pool_k=**200** |
 | `bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter_k100_blend.yaml` | 同上（索引・reranker とも k100 版と完全に同一） | 同上 ＋ `rerank_blend`（順位融合。下記） |
 | `bm25_qwen3_8b_rerank_qwen3_8b/paper_attrfilter.yaml` | 同上（索引は共有）。ただし検索時は `devices: cuda:0` の1枚のみ（`_embed_query` は devices[0] しか使わないので残りを reranker に空ける） | `qwen3_paper`: `Qwen/Qwen3-Reranker-8B`, **devices=`cuda:1,cuda:2,cuda:3`**, fp16, max_batch_tokens=2048, chunks_per_paper=3／per_index_k=pool_k=**1000**／`attribute_filter`: max_fetch_k=**3000**（上げると faiss が61倍遅くなる） |
+| `bm25_qwen3_8b_rerank_qwen3_8b/k100_paperbm25.yaml` | chunk_attrfilter_k100 に **`bm25s_paper` を追加**した3索引（索引は全部構築済み・追加構築ゼロ） | `qwen3`: 同上／per_index_k=100, pool_k=200／fuser は `rrf`（チャンク単位のまま） |
+| `bm25_qwen3_8b_rerank_qwen3_8b/k100_paperrrf.yaml` | 同上（索引は同一） | 同上。ただし **fuser=`paper_rrf`**（論文単位RRF、`chunks_per_paper: 3`） |
+| `bm25_qwen3_8b_rerank_qwen3_8b/k100_seed.yaml` | chunk_attrfilter_k100 と完全に同一の2索引 | 同上 ＋ **`seed_expansion`**（`query_chars: 512`。reranker の前に置くので推論回数は不変） |
+| `bm25_qwen3_8b_rerank_qwen3_8b/k100_paperrrf_seed.yaml` | k100_paperrrf と同一の3索引 | `paper_rrf` ＋ `seed_expansion` の両方（切り分け後に使う） |
+
+### 論文単位 RRF（`fuser: paper_rrf`、既定オフ）— 1論文1票
+
+実装は `retrieve/paper_rrf.py`、由来と数字は `docs/kumagai_reflect.md` §2。
+**まだ実測していない。**
+
+既定の `RRFFuser` は**チャンク単位**で融合するので、**同じ論文の複数チャンクが
+それぞれ独立に票を持つ**。長い論文・表が多い論文はチャンク数が多いだけで上位を
+占有しやすく、「論文としてこの質問に近いか」とは別の理由で順位が上がる。
+評価は論文単位（`candidate_recall`）なので、この歪みはそのまま指標に効く。
+
+    s(p) = Σ_i  w_i / (k + paper_rank_i(p))
+    paper_rank_i(p) = run i の中で p が最初に現れた位置（0起点の密順位）
+
+**1つの run の中では、同じ論文に何チャンク当たっても1票。**
+これは `paper_score_skip_chunk_types: [table]`（表チャンクを代表スコアに使わない）と
+**同じ歪みへの別の対処**で、あちらが「代表の選び方」を直すのに対し、こちらは
+「融合の単位」を直す。**両方入れると効果が重なる可能性がある**ので、
+足すのではなく比べること。
+
+外部チームの寄与分析ではこれが最大の改善（Recall@1 +9.34pt / @5 +8.43pt /
+@10 +1.52pt / @20 +1.11pt）。我々の純 BM25 ablation でも **`bm25_paper` 単体が
+`bm25` 単体より強い**（ecr@20 0.825 vs 0.797）ので向きは一致している。
+
+```yaml
+fuser:
+  name: paper_rrf
+  params:
+    k: 60
+    chunks_per_paper: 3   # 1論文が pool に出せるチャンク数の上限
+    weights: { bm25s: 1.0, bm25s_paper: 1.0, faiss_qwen3: 1.0 }
+```
+
+実装で外せない3点:
+
+- **出力はチャンクの列のまま。** reranker も読解も evidence も chunk_id で動く。
+  論文の順位を主キー、論文内のチャンク順位を副キーにして並べる。
+- **論文内の順序も `score` に載せる。** 下流（`agent/reading.py` の貯め込み・
+  `_candidate_papers`・`to_gold_papers`）はすべて score で並べ直すので、返り値の
+  並び順だけに順序を持たせると捨てられる。論文内オフセットは `1e-9`
+  ——論文間のスコア差（k=60・r=200 でも 1.5e-5）より十分小さくする。
+- **`chunks_per_paper` で1論文の占有を止める。** 制限しないとチャンクを100本持つ
+  論文1本が `pool_k` を食い潰し、reranker が1論文しか見なくなる。
+  ⚠ **`pool_k` の意味が変わる**（200チャンク → 最低67論文）。推論回数は不変。
+- **`bm25s_paper` の擬似チャンク（`{paper_id}#paper`）は代表に選ばない**
+  （`PAPER_LEVEL_SOURCES`）。順位付けには使うが、chunk_id が実在しないので
+  evidence にも読解にも渡せない。ただし**実チャンクが無い論文では擬似チャンクを
+  使う**（候補から消してはいけない）。
+
+### Seed Expansion（`seed_expansion`、既定オフ）— 上位論文から語彙を借りる
+
+実装は `retrieve/hybrid.py` の `_seed_expand()`。**LLM を1回も呼ばない。**
+**まだ実測していない。**
+
+    expanded = 元の質問 + 1位論文の title+abstract の先頭 query_chars 文字
+
+その結果を初回の順位と融合してから reranker に渡す。
+
+```yaml
+seed_expansion:
+  enabled: true
+  query_chars: 512
+```
+
+**質問文は「その論文が自分をどう呼ぶか」を知らない。** q_022 の gold（AlphaPO）は
+自分を一度も `reference-free` と呼ばず `Direct Alignment Algorithm` / `reward shape`
+と名乗る——質問文に無い語なので、質問だけを投げ続ける限り当たらない。
+**上位論文からコーパス内の語彙を借りる**のがこの機構の役目。
+
+`agent/rewrite.py`（LLM に書き換えさせる版）との違いは、LLM を呼ばないことと
+**元の質問を必ず残す**こと。rewrite は LLM が候補論文のタイトルをそのままクエリに
+してしまい、既に持っている論文を引き直すだけになっていた（候補列のタイトル語を
+8割以上含むサブクエリが 1% -> 16%）。機械的に連結すればその失敗モードは起きない。
+
+実装で外せない3点:
+
+- **`reranker` の前に置く。** 後ろに置くと reranker の推論が2倍になる。
+  増えるのは索引の検索1回ぶんだけ（BM25 と faiss をもう一度引く）。
+  **reranker は元の質問で1回だけ**走らせる。
+- **融合は `self.fuser` にそのまま任せる。** `fuser: rrf` ならチャンク単位、
+  `fuser: paper_rrf` なら論文単位で混ざる。つまり上の節の打ち手と独立に足せて、
+  両方書けば「初回と拡張の論文単位RRF」（外部チームの推奨構成）になる。
+- **anchor 本文は `ChunkStore` から `title_abstract` チャンクを引く**
+  （`{paper_id}#c0000`）。`"[venue year] title\n" + abstract` の形なので先頭から
+  切るだけでよい。ChunkStore が無い構成ではヒットしたチャンク本文で代用する。
+
+外部チームの実測: Recall@5 **-2.88** / @10 +1.92 / @20 +2.93 / All-Gold@20 +3.64、
+**multi の Recall@20 は約 +13.4pt**。**@5 が下がって @20 が上がる**形なので、
+読み方に注意する（我々は @5 を弱点として扱ってきたが、読解チームが top-50 を
+平らに使っているなら深い順位のほうが価値が高い）。
 
 ### chunk BM25 と paper BM25 を併用する（`bm25s` + `bm25s_paper`）
 
@@ -1276,6 +1376,70 @@ q_021 step1 の `SimLingo trained on Bench2Drive Base split` /
 **この変更は既定の挙動を変える**（`subquery_count` を書かなくても4本で切られる）。
 2026-08-05 より前の `results/experiments.jsonl` の行は上限なしで走っているので、
 本数まわりを比べるときは実行日を見る。
+
+### 3.0 「実験を回す」＝本番データで候補列を作ること（2026-08-13 以降の既定）
+
+**これ以降「実験を回す」と言ったら、入力は `data/test_inputs.jsonl`(71件)、
+成果物は `data/test_inputs_with_candidates.jsonl` を指す。** 検証55件での走行は
+「打ち手を選ぶための測定」であって、納品物を作る実験ではない。
+
+```
+# 1) 検索 -> 予測（tmux の中で。下の 3.1 の作法はそのまま適用される）
+uv run python scripts/run_search.py \
+  --paths configs/paths/default.yaml \
+  --process configs/process_style/mineru.yaml \
+  --search configs/search_style/{検索構成}.yaml \
+  --agent configs/agent_style/{エージェント}.yaml \
+  --queries data/test_inputs.jsonl \
+  --output predictions_test_{識別子}.jsonl
+
+# 2) 予測 -> 受け渡しファイル（gold が無いので --no-gold は必須）
+uv run python scripts/build_candidate_handoff.py \
+  --predictions predictions_test_{識別子}.jsonl \
+  --inputs data/test_inputs.jsonl --no-gold \
+  --output data/test_inputs_with_candidates.jsonl
+```
+
+`data/test_inputs.jsonl` は HF の `LitTraceQA/LitTraceQA`（`config=inputs`,
+`split=test`）を datasets-server API で落としたもの。同じ config に
+`test_extra`(4,901件) もあるが本番の採点対象ではない。
+
+**⚠ 本番データには gold が無い。採点してはいけない。**
+`run_search.py` は最後に必ず `evaluate.py --gold data/validation.jsonl` を呼ぶが、
+query_id が `ltqa_*` 形式で検証の `q_*` と1件も重ならないため、**全指標 0.0 の
+JSON が正常に返ってくる**（例外では落ちない）。その結果:
+
+- `results/experiments.jsonl` に **全部 0 の行**が追記される
+- `report/*.md` が1枚書かれ、LLM コメントが「全指標が壊滅的に悪化した」と書く
+- 監査HTMLの実験セレクタにもその行が並ぶ
+
+`--skip-eval` のようなフラグは無い。**本番走行のあとは `results/experiments.jsonl`
+の末尾行と `report/` の該当ファイルを消すこと**（消し忘れると以後の
+`generate_comment()` がその 0 行を「前回」として読む）。手法の良し悪しは従来どおり
+`data/validation_inputs.jsonl` の55件で測る。
+
+**本番入力のフィールドは4つではなく6つある**（CLAUDE.md の他の節にある
+「本番は query_id / question / answer_types / table_schema の4つだけ」は
+検証データから推定した記述で、実データはこう）:
+
+| フィールド | 71件中 |
+|---|---|
+| `query_id`（`ltqa_033b9d024c4f0dee` 形式） | 71 |
+| `benchmark` | 71 |
+| `question` | 71 |
+| `answer_types` | multiple_choice 50 / table 21（**freeform は0件**） |
+| `multiple_choice_options` | 50 |
+| `table_schema` | 21 |
+
+`task_family` / `primary_evidence_type` は無いので **`--production-input` は
+付けても付けなくても結果が同じ**（落とすフィールドが最初から無い）。
+
+**`multiple_choice_options` は受け渡しファイルに載らない。**
+`build_candidate_handoff.py` の `PRODUCTION_FIELDS` が4フィールド固定のため。
+検証データでは選択肢が gold 側（`answer.multiple_choice.options`）にしか無く
+oracle 専用だったのでこれが正しかったが、**本番では入力そのものに入っているので
+gold ではない**。71件中50件が multiple_choice なので、読解チームに渡すなら
+通すべき——通すと決めたら `PRODUCTION_FIELDS` に足す。
 
 ### 3.1 評価の作法
 
