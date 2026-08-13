@@ -96,13 +96,15 @@ def main() -> None:
         load_config(args.process),
         load_config(args.search),
     )
-    # agent はここでは使わないが build_pipeline() の戻り値に必要なのでダミーで組む
-    # （llm を渡さないので Azure 等の資格情報は不要）。
+    # agent はここでは使わないが build_pipeline() の戻り値に必要なのでダミーで組む。
+    # **`simple` は削除済みなので使えない**（b112505）。`reading` は `llm` を必須引数に
+    # 取るので `fake` を渡す——組み立てて捨てるだけで、この agent は1度も呼ばない
+    # （実際に使う ReadingAgent は下で llm=None のまま建て直す）。Azure 等の資格情報は不要。
     cfg = compose_config(
         paths=paths,
         process=process,
         search=search,
-        agent={"name": "simple", "params": {}},
+        agent={"name": "reading", "llm": {"name": "fake"}, "params": {}},
     )
     _, retriever, _ = build_pipeline(cfg)
 
