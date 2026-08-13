@@ -1,0 +1,66 @@
+# k100_paperbm25 の融合を **論文単位 RRF（1論文1票）** にした版
+# （差分は `fuser` ブロックだけ）。docs/kumagai_reflect.md §2 の本命。
+#
+# 既定の `rrf` はチャンク単位で融合するので、**同じ論文の複数チャンクが
+# それぞれ独立に票を持つ**。長い論文・表が多い論文はチャンク数が多いだけで上位を
+# 占有しやすく、「論文としてこの質問に近いか」とは別の理由で順位が上がる。
+# 評価は論文単位（candidate_recall）なので、この歪みはそのまま指標に効く。
+#
+#     s(p) = Σ_i  w_i / (60 + paper_rank_i(p))
+#     paper_rank_i(p) = run i の中で p が最初に現れた位置
+#
+# `chunks_per_paper` は1論文が pool に出せるチャンク数の上限。制限しないと
+# チャンクを100本持つ論文1本が pool_k を食い潰し、reranker が1論文しか見なくなる。
+# 読解エージェントは1論文あたり2チャンク見せる（`chunks_per_paper: 2`）ので、
+# それをわずかに上回る3本にしてある。
+#
+# ⚠ **pool_k の意味が変わる。** チャンク単位融合では pool_k=200 は「200チャンク
+# （論文数はもっと少ない）」だが、こちらは最大でも1論文3チャンクなので
+# 「最低でも67論文」になる。reranker の推論回数は変わらない。
+#
+# `bm25s_paper` の擬似チャンク（`{paper_id}#paper`）は**代表チャンクに選ばない**
+# （retrieve/paper_rrf.py の PAPER_LEVEL_SOURCES）。論文の順位付けには使うが、
+# chunk_id が実在しないので evidence にも読解にも渡せないため。
+per_index_k: 100
+pool_k: 200
+
+attribute_filter:
+  enabled: true
+  safety: 1.5
+  max_fetch_k: 3000
+  min_results: 10
+
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: bm25s_paper
+    params: {}
+
+  - name: faiss_qwen3
+    index_name: faiss_qwen3_8b
+    params:
+      model: Qwen/Qwen3-Embedding-8B
+      devices: "cuda:0"
+      fp16: true
+      max_tokens: 8192
+      doc_prefix: "passage: "
+      query_prefix: "query: "
+      batch_size: 8
+
+fuser:
+  name: paper_rrf
+  params:
+    k: 60
+    chunks_per_paper: 3
+    weights: { bm25s: 1.0, bm25s_paper: 1.0, faiss_qwen3: 1.0 }
+
+reranker:
+  name: qwen3
+  params:
+    model: Qwen/Qwen3-Reranker-8B
+    devices: "cuda:1,cuda:2"
+    fp16: true
+    max_batch_tokens: 2048
+    batch_size: 4
+    max_tokens: 2048

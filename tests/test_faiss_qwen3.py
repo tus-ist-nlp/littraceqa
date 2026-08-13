@@ -57,3 +57,70 @@ def test_shard_boundaries_cover_every_row_exactly_once():
 
 def test_faiss_add_is_sliced_to_avoid_touching_42gb_at_once():
     assert _ADD_ROWS <= 200_000
+
+
+# ---- 再開（resume）まわり -------------------------------------------------
+# 30時間級のビルドが途中で落ちたときに全部やり直しにならないための仕組み。
+
+import numpy as np  # noqa: E402
+
+from littraceqa.di_pipeline.index.faiss_qwen3 import (  # noqa: E402
+    _DONE_FILENAME,
+    _EMBEDDINGS_FILENAME,
+)
+
+
+def _index(tmp_path, **kwargs) -> Qwen3FAISSIndex:
+    return Qwen3FAISSIndex(index_dir=str(tmp_path), device="cpu", **kwargs)
+
+
+def test_first_build_creates_both_intermediate_files(tmp_path):
+    index = _index(tmp_path)
+    memmap_path = tmp_path / _EMBEDDINGS_FILENAME
+    done_path = tmp_path / _DONE_FILENAME
+
+    assert index._prepare_memmap(memmap_path, done_path, n=10, dim=4) is False
+    assert memmap_path.stat().st_size == 10 * 4 * 4
+    assert done_path.stat().st_size == 10
+    assert np.memmap(done_path, dtype="uint8", mode="r", shape=(10,)).sum() == 0
+
+
+def test_resume_keeps_the_previous_progress(tmp_path):
+    """件数・次元が一致すれば前回の途中経過を引き継ぐこと。"""
+    index = _index(tmp_path)
+    memmap_path = tmp_path / _EMBEDDINGS_FILENAME
+    done_path = tmp_path / _DONE_FILENAME
+    index._prepare_memmap(memmap_path, done_path, n=10, dim=4)
+
+    done = np.memmap(done_path, dtype="uint8", mode="r+", shape=(10,))
+    done[:6] = 1
+    done.flush()
+    del done
+
+    assert index._prepare_memmap(memmap_path, done_path, n=10, dim=4) is True
+    assert np.memmap(done_path, dtype="uint8", mode="r", shape=(10,)).sum() == 6
+
+
+def test_mismatched_size_starts_over(tmp_path):
+    """チャンク件数が変わっていたら作り直すこと（古い中身を混ぜない）。"""
+    index = _index(tmp_path)
+    memmap_path = tmp_path / _EMBEDDINGS_FILENAME
+    done_path = tmp_path / _DONE_FILENAME
+    index._prepare_memmap(memmap_path, done_path, n=10, dim=4)
+    done = np.memmap(done_path, dtype="uint8", mode="r+", shape=(10,))
+    done[:] = 1
+    done.flush()
+    del done
+
+    # 件数が 10 -> 12 に変わった
+    assert index._prepare_memmap(memmap_path, done_path, n=12, dim=4) is False
+    assert np.memmap(done_path, dtype="uint8", mode="r", shape=(12,)).sum() == 0
+
+
+def test_resume_can_be_disabled(tmp_path):
+    index = _index(tmp_path, resume=False)
+    memmap_path = tmp_path / _EMBEDDINGS_FILENAME
+    done_path = tmp_path / _DONE_FILENAME
+    index._prepare_memmap(memmap_path, done_path, n=10, dim=4)
+
+    assert index._prepare_memmap(memmap_path, done_path, n=10, dim=4) is False
