@@ -169,7 +169,16 @@ def load_chunks(path: Path) -> list[Chunk]:
 
 # 本番の入力に実際に入っているフィールドはこの4つだけ（確定仕様）。
 # multiple_choice の options は**本番では与えられない**ので、ここには入れない。
-_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema")
+# `multiple_choice_options` は本番入力に実在する（`data/test_inputs.jsonl` 71件中50件）。
+# ただし `Query.from_dict` が読むのは `options`（validation の gold から結合する oracle 用）
+# なので、残しても Query には載らない——本番入力の定義を正しく保つためだけに並べてある。
+_PRODUCTION_FIELDS = (
+    "query_id",
+    "question",
+    "answer_types",
+    "multiple_choice_options",
+    "table_schema",
+)
 
 
 def load_queries(path: Path, production_input: bool = False) -> list[Query]:

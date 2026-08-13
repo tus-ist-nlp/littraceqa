@@ -6,12 +6,13 @@
 `candidate_papers` に分かれている。両方を突き合わせる手間を毎回かけないよう、
 1行1クエリの JSONL に合成する。
 
-出力の形（本番入力の4フィールド + 候補 + メタ + gold）:
+出力の形（本番入力の5フィールド + 候補 + メタ + gold）:
 
     {
       "query_id": "q_001",
       "question": "...",
       "answer_types": ["freeform", "multiple_choice"],
+      "multiple_choice_options": null,   # 本番入力では埋まる。検証データでは常に null
       "table_schema": null,
       "candidate_papers": [
         {"rank": 1, "paper_id": "acl2025_00005", "title": "...", "venue": "ACL", "year": 2025},
@@ -24,9 +25,11 @@
 
 **gold を `_gold` の下に隔離してあるのは事故防止のため。** 同じ階層に並べると、
 `gold_papers[].title`（どの論文かの答えそのもの）、`answer.multiple_choice.options`
-（f53e1da で oracle 実験専用と決めた項目）、`task_family` / `primary_evidence_type`
-（本番入力に存在しない項目）を、悪意なく読んでしまう。トップレベルの4フィールドだけが
-本番と同じ入力で、`_gold` は採点のときだけ触ってよい。
+（**検証データでのみ** oracle 実験専用と決めた項目。本番入力は選択肢を
+`multiple_choice_options` としてトップレベルで与えるので、そちらは gold ではない）、
+`task_family` / `primary_evidence_type`（本番入力に存在しない項目）を、悪意なく
+読んでしまう。トップレベルの5フィールドだけが本番と同じ入力で、`_gold` は採点のときだけ
+触ってよい。
 
 候補に title/venue/year を付けてあるのは gold ではないので安全（本文を引く前に
 候補一覧を眺められるようにするため）。本文と図表画像が要るときは paper_id を
@@ -55,8 +58,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 Record = dict[str, Any]
 
-# 本番入力に実在するフィールド（f53e1da）。ここを増やすと評価が本番と乖離する。
-PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema")
+# 本番入力に実在するフィールド。ここを増やすと評価が本番と乖離する。
+#
+# **`multiple_choice_options` は本番入力に入っている**（2026-08-13 に HF から取得した
+# `data/test_inputs.jsonl` 71件のうち50件が持っている）。検証データでは選択肢が gold 側
+# （`answer.multiple_choice.options`）にしか無く oracle 専用だったので長らく除いていたが、
+# 本番では入力そのものが与えるので gold ではない。71件中50件が multiple_choice なので、
+# 落とすと読解チームはこのファイルだけでは答えられない。
+#
+# ⚠ **検証データから作ったときは常に None になる**（`validation_inputs.jsonl` に
+# このフィールドが無いため）。「選択肢が無い問題」ではなく「選択肢は `_gold` の下にある」
+# と読むこと。
+PRODUCTION_FIELDS = (
+    "query_id",
+    "question",
+    "answer_types",
+    "multiple_choice_options",
+    "table_schema",
+)
 
 # 採点にしか使ってはいけないフィールド。トップレベルから _gold へ移す。
 GOLD_FIELDS = (
