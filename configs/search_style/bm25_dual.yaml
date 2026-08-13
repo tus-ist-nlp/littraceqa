@@ -1,0 +1,28 @@
+# chunk BM25 + paper BM25 の2索引だけ（ablation、GPU 不要）。
+#
+# bm25.yaml（chunk のみ）/ bm25_paper.yaml（論文のみ）と比べて、
+# **2つを RRF で融合すると効くのか**だけを切り分けて測るための構成。
+# 埋め込みも reranker も入れないので、差はまるごと BM25 の使い方の差になる。
+#
+# 索引は両方とも構築済みなので追加構築はゼロ（bm25s 5.1G / bm25s_paper 2.9G）。
+#
+#   uv run python scripts/eval_retrieval.py \
+#     --paths configs/paths/default.yaml --process configs/process_style/mineru.yaml \
+#     --search configs/search_style/bm25_dual.yaml --ks 5,10,20,50
+
+per_index_k: 100
+
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: bm25s_paper
+    params: {}
+
+fuser:
+  name: rrf
+  params: { k: 60, weights: { bm25s: 1.0, bm25s_paper: 1.0 } }
+
+reranker:
+  name: none
+  params: {}

@@ -1,0 +1,39 @@
+per_index_k: 100
+pool_k: 100
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: faiss_specter2
+    index_name: faiss_specter2_abstract
+    params:
+      model: allenai/specter2_base
+      chunk_types: [title_abstract]
+      batch_size: 128
+      fp16: true
+
+  - name: faiss_qwen3
+    index_name: faiss_qwen3_0p6b
+    params:
+      model: Qwen/Qwen3-Embedding-0.6B
+      chunk_types: [text_span, table, figure, equation_algorithm]
+      devices: "cuda:0,cuda:1,cuda:2,cuda:3"
+      batch_size: 32
+      fp16: true
+      max_tokens: 1024
+      doc_prefix: "passage: "
+      query_prefix: "query: "
+
+fuser:
+  name: rrf
+  params:
+    k: 60
+    weights: { bm25s: 1.0, faiss_specter2: 1.0, faiss_qwen3: 1.0 }
+reranker:
+  name: qwen3
+  params:
+    model: Qwen/Qwen3-Reranker-0.6B
+    device: cuda:3
+    fp16: true
+    batch_size: 16
+    max_tokens: 2048

@@ -150,8 +150,9 @@ def test_recall_curve_is_monotonic_in_k() -> None:
     curve = [metrics[f"candidate_recall_at{k}_multi_macro"] for k in CANDIDATE_RECALL_KS]
 
     assert curve == sorted(curve), f"kについて単調でない: {curve}"
-    # k=(1,5,10,20,50) でそれぞれ 1,2,3,4,5 本拾える -> 0.2,0.4,0.6,0.8,1.0
-    assert curve == [0.2, 0.4, 0.6, 0.8, 1.0]
+    # k=(1,5,10,20,50,70) でそれぞれ 1,2,3,4,5,5 本拾える
+    # （k=70 は論文→論文展開ぶんの観測用。この予測は候補が少ないので50と同値）
+    assert curve == [0.2, 0.4, 0.6, 0.8, 1.0, 1.0]
 
 
 def test_curve_distinguishes_rank1_from_rank20() -> None:
@@ -172,3 +173,127 @@ def test_curve_distinguishes_rank1_from_rank20() -> None:
     # recall@1 で差が出る
     assert m_top["candidate_recall_at1_single_macro"] == 1.0
     assert m_bottom["candidate_recall_at1_single_macro"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# evidence_candidate_recall: 分母を「evidence が紐づいた gold」に絞った版。
+#
+# multi_paper の gold には、gold_papers に名前だけあって evidence が1件も無い論文が
+# 混ざる（質問文が名指ししていない同トピックのピア論文）。質問文をどう検索しても
+# 近傍に来ないので、gold 全体を分母にすると天井が張り付いて索引や reranker の
+# 改善が読めなくなる。そこを分けて測るための指標。
+# ---------------------------------------------------------------------------
+
+
+def _gold_with_evidence(
+    query_id: str, task_family: str, paper_ids: list[str], backed: list[str]
+) -> dict:
+    record = _gold(query_id, task_family, paper_ids)
+    record["evidence"] = [
+        {"paper_id": pid, "source_type": "text_span", "locator": {"page": 1}}
+        for pid in backed
+    ]
+    return record
+
+
+def test_evidence_recall_excludes_gold_without_evidence() -> None:
+    """根拠の無い gold を分母から外すと recall が上がる。"""
+    # gold 4本のうち根拠付きは p1 のみ。候補は p1 しか当てていない。
+    gold = [_gold_with_evidence("q1", MULTI, ["p1", "p2", "p3", "p4"], ["p1"])]
+    metrics = evaluate(gold, [_pred("q1", ["p1"])])["metrics"]
+
+    assert metrics["candidate_recall_at20_multi_macro"] == 0.25  # 4本中1本
+    assert metrics["evidence_candidate_recall_at20_multi_macro"] == 1.0  # 1本中1本
+
+
+def test_evidence_recall_matches_plain_recall_when_all_gold_backed() -> None:
+    """全 gold に根拠が付いていれば、両指標は一致する。"""
+    gold = [_gold_with_evidence("q1", MULTI, ["p1", "p2"], ["p1", "p2"])]
+    metrics = evaluate(gold, [_pred("q1", ["p1", "noise"])])["metrics"]
+
+    assert metrics["candidate_recall_at20_multi_macro"] == 0.5
+    assert metrics["evidence_candidate_recall_at20_multi_macro"] == 0.5
+
+
+def test_evidence_recall_ignores_evidence_for_non_gold_papers() -> None:
+    """gold に無い論文の evidence は分母を膨らませない（積は gold との共通部分）。"""
+    gold = [_gold_with_evidence("q1", MULTI, ["p1", "p2"], ["p1", "outsider"])]
+    metrics = evaluate(gold, [_pred("q1", ["p1"])])["metrics"]
+
+    # 分母は {p1} の1本であって {p1, outsider} の2本ではない
+    assert metrics["evidence_candidate_recall_at20_multi_macro"] == 1.0
+
+
+def test_query_without_any_evidence_is_dropped_not_scored_as_one() -> None:
+    """根拠付き gold が1本も無いクエリは集計から外す。
+
+    recall_at_k() は gold が空だと 1.0 を返す（prf との整合）ため、そのまま
+    足し込むと満点が水増しされる。件数も details に出して差分を追えるようにする。
+    """
+    gold = [
+        _gold_with_evidence("q1", MULTI, ["p1", "p2"], []),   # 根拠ゼロ -> 除外
+        _gold_with_evidence("q2", MULTI, ["p3", "p4"], ["p3"]),  # 1/1 -> 1.0
+    ]
+    result = evaluate(gold, [_pred("q1", ["px"]), _pred("q2", ["p3"])])
+
+    assert result["metrics"]["evidence_candidate_recall_at20_multi_macro"] == 1.0
+    assert result["details"]["candidate_recall_counts"]["multi"] == 2
+    assert result["details"]["evidence_candidate_recall_counts"]["multi"] == 1
+
+
+def test_evidence_recall_is_none_when_no_query_qualifies() -> None:
+    """対象クエリが皆無なら 0.0 ではなく None（測っていないことを示す）。"""
+    gold = [_gold_with_evidence("q1", MULTI, ["p1"], [])]
+    metrics = evaluate(gold, [_pred("q1", ["p1"])])["metrics"]
+
+    assert metrics["evidence_candidate_recall_at20_multi_macro"] is None
+    assert metrics["candidate_recall_at20_multi_macro"] == 1.0
+
+
+def test_evidence_recall_curve_is_emitted_for_every_k_and_scenario() -> None:
+    gold = [_gold_with_evidence("q1", SINGLE, ["p1"], ["p1"])]
+    metrics = evaluate(gold, [_pred("q1", ["p1"])])["metrics"]
+
+    for scenario in ("single", "multi", "total"):
+        for k in CANDIDATE_RECALL_KS:
+            assert f"evidence_candidate_recall_at{k}_{scenario}_macro" in metrics
+
+
+SUBMISSION_METRIC_KEYS = (
+    "paper_precision_macro",
+    "paper_recall_macro",
+    "paper_f1_macro",
+    "evidence_precision_macro",
+    "evidence_recall_macro",
+    "evidence_f1_macro",
+    "multiple_choice_accuracy",
+    "freeform_exact_match",
+    "table_row_f1_macro",
+    "table_cell_accuracy_macro",
+    "table_cell_accuracy_micro",
+)
+
+
+def test_submission_metrics_are_omitted_by_default():
+    """既定では提出物側の指標を出さない（我々が上げるのは candidate_recall）。
+
+    提出論文の選定も回答生成も読解チーム側の担当なので、並べておくと
+    動かさない数字の上下をノイズとして読んでしまう。
+    """
+    gold = [_gold("q1", SINGLE, ["p1"])]
+    pred = [_pred("q1", ["p1", "p2"])]
+
+    metrics = evaluate(gold, pred)["metrics"]
+    assert not [key for key in SUBMISSION_METRIC_KEYS if key in metrics]
+    # 検索側は従来どおり出る
+    assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_total_macro"] == 1.0
+
+
+def test_include_submission_restores_the_old_metric_set():
+    """`--metrics all`（include_submission=True）で提出物側も足せる。"""
+    gold = [_gold("q1", SINGLE, ["p1"])]
+    pred = [_pred("q1", ["p1", "p2"])]
+
+    metrics = evaluate(gold, pred, include_submission=True)["metrics"]
+    assert all(key in metrics for key in SUBMISSION_METRIC_KEYS)
+    assert metrics[f"candidate_recall_at{CANDIDATE_RECALL_K}_total_macro"] == 1.0
