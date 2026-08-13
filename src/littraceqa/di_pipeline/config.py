@@ -50,6 +50,7 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from littraceqa.chunk_store import ChunkStore
 from littraceqa.common import ROOT
 from littraceqa.di_pipeline import registry
 
@@ -75,6 +76,7 @@ from littraceqa.di_pipeline.retrieve.paper_expander import (  # noqa: F401
     FusedPaperExpander,
     Specter2PaperExpander,
 )
+from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser  # noqa: F401
 from littraceqa.di_pipeline.retrieve.reranker import NoneReranker  # noqa: F401
 from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker  # noqa: F401
 from littraceqa.di_pipeline.retrieve.rrf import RRFFuser  # noqa: F401
@@ -202,6 +204,9 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
             # reranker の順位を融合前の順位と RRF で混ぜる設定。省略すると
             # 従来どおり reranker が順位を完全に置き換える。
             "rerank_blend": search.get("rerank_blend"),
+            # 1位論文の語彙を質問に足して引き直す設定（pseudo relevance feedback）。
+            # 省略 / enabled: false なら検索は従来どおり1回だけ。
+            "seed_expansion": search.get("seed_expansion"),
         },
         "agent": agent_cfg,
     }
@@ -312,6 +317,17 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
             "min_filtered_results": attribute_cfg.get("min_results", 10),
         }
 
+    # Seed Expansion（1位論文の語彙を質問に足して引き直す）。書かなければ無効で、
+    # anchor の本文を引く ChunkStore も作らない（起動のたびに 3.8GB の索引を
+    # 触らせないため）。
+    seed_kwargs: dict[str, Any] = {}
+    seed_cfg = cfg["retriever"].get("seed_expansion") or {}
+    if seed_cfg.get("enabled"):
+        seed_kwargs = {
+            "seed_expansion": seed_cfg,
+            "anchor_store": ChunkStore(cfg["paths"]["chunks"]),
+        }
+
     retriever = HybridRetriever(
         indexers=indexers,
         fuser=fuser,
@@ -319,6 +335,7 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
         per_index_k=cfg["retriever"]["per_index_k"],
         pool_k=cfg["retriever"].get("pool_k"),
         rerank_blend=cfg["retriever"].get("rerank_blend"),
+        **seed_kwargs,
         **attribute_kwargs,
     )
 

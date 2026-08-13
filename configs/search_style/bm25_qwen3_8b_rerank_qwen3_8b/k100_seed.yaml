@@ -1,0 +1,65 @@
+# chunk_attrfilter_k100 に **Seed Expansion（pseudo relevance feedback）** を
+# 足しただけの版（差分は `seed_expansion` ブロックだけ、索引も reranker も同一）。
+# docs/kumagai_reflect.md §3 Tier 1 の(3)。
+#
+#     expanded = 元の質問 + 1位論文の title+abstract の先頭 query_chars 文字
+#
+# その結果を初回の順位と融合してから reranker に渡す。**LLM を1回も呼ばない。**
+#
+# 動機: 質問文は「その論文が自分をどう呼ぶか」を知らない。q_022 の gold（AlphaPO）は
+# 自分を一度も `reference-free` と呼ばず `Direct Alignment Algorithm` / `reward shape`
+# と名乗る——質問文に無い語なので、質問だけを投げ続ける限り当たらない。
+# **上位論文からコーパス内の語彙を借りる**のがこの機構の役目。
+#
+# `agent/rewrite.py`（LLM に書き換えさせる版）との違いは、LLM を呼ばないことと
+# 元の質問を必ず残すこと。rewrite は LLM が候補論文のタイトルをそのまま
+# クエリにしてしまい、既に持っている論文を引き直すだけになっていた。
+#
+# **reranker の前に置くので推論回数は1回のまま。** 増えるのは索引の検索1回ぶん
+# （BM25 と faiss をもう一度引く）。
+#
+# 外部チームの実測: Recall@5 -2.88 / @10 +1.92 / @20 +2.93 / All-Gold@20 +3.64、
+# **multi の Recall@20 は約 +13.4pt**。浅い順位は少し不安定になるが、
+# 複数 gold を深い順位まで集める用途に効く——**読解チームが top-50 を平らに
+# 使っている以上、いま欲しいのはまさにこの形**。
+per_index_k: 100
+pool_k: 200
+
+attribute_filter:
+  enabled: true
+  safety: 1.5
+  max_fetch_k: 3000
+  min_results: 10
+
+seed_expansion:
+  enabled: true
+  query_chars: 512
+
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: faiss_qwen3
+    index_name: faiss_qwen3_8b
+    params:
+      model: Qwen/Qwen3-Embedding-8B
+      devices: "cuda:0"
+      fp16: true
+      max_tokens: 8192
+      doc_prefix: "passage: "
+      query_prefix: "query: "
+      batch_size: 8
+
+fuser:
+  name: rrf
+  params: { k: 60, weights: { bm25s: 1.0, faiss_qwen3: 1.0 } }
+
+reranker:
+  name: qwen3
+  params:
+    model: Qwen/Qwen3-Reranker-8B
+    devices: "cuda:1,cuda:2"
+    fp16: true
+    max_batch_tokens: 2048
+    batch_size: 4
+    max_tokens: 2048

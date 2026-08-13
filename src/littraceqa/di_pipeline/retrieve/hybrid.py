@@ -35,6 +35,8 @@ class HybridRetriever:
         max_fetch_k: int = 5000,
         min_filtered_results: int = 10,
         rerank_blend: dict | None = None,
+        seed_expansion: dict | None = None,
+        anchor_store: object | None = None,
     ):
         self.indexers = indexers
         self.fuser = fuser
@@ -45,6 +47,11 @@ class HybridRetriever:
         # None（既定）なら reranker の結果でそのまま置き換える（従来どおり）。
         # dict を渡すと融合前の順位と RRF で混ぜる（_blend_rerank 参照）。
         self.rerank_blend = rerank_blend
+        # None（既定）なら Seed Expansion は走らない（従来どおり検索1回）。
+        # dict を渡すと1位論文の語彙を質問に足して引き直す（_seed_expand 参照）。
+        self.seed_expansion = seed_expansion
+        # anchor の title+abstract を引くための ChunkStore（Seed Expansion 専用）。
+        self.anchor_store = anchor_store
         # None なら属性フィルタは完全に無効（従来どおりのコードパスを通る）。
         self.attribute_extractor = attribute_extractor
         self.fetch_safety = fetch_safety
@@ -76,6 +83,10 @@ class HybridRetriever:
         else:
             fuse_k = top_k
         fused = self.fuser.fuse(runs, top_k=fuse_k)
+        # Seed Expansion は **reranker の前**に置く。reranker を2回走らせると
+        # 推論コストが倍になるが、索引を2回引くだけなら安い（reranker は元の質問で
+        # 1回だけ走らせる）。
+        fused = self._seed_expand(query, fused, attribute_filter, fuse_k)
 
         if self.reranker is None:
             return fused[:top_k]
@@ -136,6 +147,75 @@ class HybridRetriever:
         by_id.update({result.chunk_id: result for result in reranked})
         ordered = sorted(by_id.values(), key=lambda r: -scores[r.chunk_id])
         return [replace(r, score=scores[r.chunk_id]) for r in ordered]
+
+    def _seed_expand(
+        self,
+        query: str,
+        fused: list[RetrievalResult],
+        attribute_filter: AttributeFilter | None,
+        fuse_k: int,
+    ) -> list[RetrievalResult]:
+        """1位論文の語彙を質問に足して引き直し、初回の順位と融合する。
+
+        **LLM によるクエリ分解ではなく pseudo relevance feedback。**
+
+            expanded = 元の質問 + 1位論文の title+abstract の先頭 query_chars 文字
+
+        質問文は「その論文が自分をどう呼ぶか」を知らない。q_022 の gold（AlphaPO）は
+        自分を一度も `reference-free` と呼ばず `Direct Alignment Algorithm` /
+        `reward shape` と名乗る——質問文に無い語なので、質問だけを投げ続ける限り
+        当たらない。**上位論文からコーパス内の語彙を借りる**のがこの機構の役目。
+
+        `agent/rewrite.py`（LLM に書き換えさせる版）との違いは、**LLM を1回も
+        呼ばない**ことと、元の質問を必ず残すこと。rewrite は LLM が候補論文の
+        タイトルをそのままクエリにしてしまい、既に持っている論文を引き直すだけに
+        なっていた（候補列のタイトル語を8割以上含むサブクエリが 1% -> 16%）。
+        機械的に連結すればその失敗モードは起きない。
+
+        **融合は `self.fuser` にそのまま任せる。** `fuser: rrf` ならチャンク単位、
+        `fuser: paper_rrf` なら論文単位で混ざる。つまり Seed Expansion と
+        論文単位RRF は独立に足せて、両方書けば「初回と拡張の論文単位RRF」になる。
+
+        **`reranker` の前に置く**ので、reranker の推論回数は1回のまま増えない。
+        増えるのは索引の検索1回ぶんだけ。
+        """
+        if not self.seed_expansion or not fused:
+            return fused
+        anchor_text = self._anchor_text(fused[0])
+        if not anchor_text:
+            return fused
+        query_chars = self.seed_expansion.get("query_chars", 512)
+        expanded = f"{query}\n{anchor_text[:query_chars]}"
+        runs = self._run_indexers(expanded, attribute_filter)
+        expanded_fused = self.fuser.fuse(runs, top_k=fuse_k)
+        if not expanded_fused:
+            return fused
+        # 初回と拡張を2つの run として融合する。順位しか見ないので、
+        # 初回の RRF スコアと拡張の RRF スコアのスケール差は問題にならない。
+        return self.fuser.fuse([fused, expanded_fused], top_k=fuse_k)
+
+    def _anchor_text(self, anchor: RetrievalResult) -> str:
+        """anchor 論文の title+abstract。無ければヒットしたチャンク本文で代用する。
+
+        `title_abstract` チャンク（`{paper_id}#c0000`）は
+        `"[venue year] title\\n" + abstract` の形なので、先頭から切るだけで
+        「タイトル + 概要」になる（`preprocess/mineru_chunker.py`）。
+        """
+        store = self.anchor_store
+        if store is not None:
+            try:
+                for chunk in store.load_paper(anchor.paper_id):
+                    if chunk.get("chunk_type") == "title_abstract":
+                        return str(chunk.get("text") or "")
+            except Exception:  # noqa: BLE001 - 本文が引けなくても検索は続ける
+                pass
+        # ChunkStore が無い構成（テストなど）や論文が見つからない場合。
+        # 論文単位索引の擬似チャンクは text が論文全文なので、そのまま先頭を切れば
+        # やはり title+abstract になる。
+        title = str((anchor.metadata or {}).get("title") or "")
+        if title and not anchor.text.startswith("["):
+            return f"{title}\n{anchor.text}"
+        return anchor.text
 
     def _run_indexers(
         self, query: str, attribute_filter: AttributeFilter | None
