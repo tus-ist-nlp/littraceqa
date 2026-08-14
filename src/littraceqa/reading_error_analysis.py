@@ -238,11 +238,18 @@ def analyze_query(
             malformed_judgment_count += 1
             continue
         judged_ids.add(paper_id)
-        if _as_bool(judgment.get("relevant")):
+        if _as_bool(
+            judgment.get(
+                "is_relevant_to_answer", judgment.get("relevant")
+            )
+        ):
             relevant_ids.add(paper_id)
         if _as_bool(
             judgment.get(
-                "answerable", judgment.get("answerable_from_this_paper")
+                "has_usable_answer_evidence",
+                judgment.get(
+                    "answerable", judgment.get("answerable_from_this_paper")
+                ),
             )
         ):
             answerable_ids.add(paper_id)

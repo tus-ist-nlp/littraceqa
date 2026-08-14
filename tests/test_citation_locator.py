@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from littraceqa.citation_locator import infer_citation_locator_overrides
+from littraceqa.citation_locator import (
+    infer_citation_locator_overrides,
+    requested_ordinal_bibliography_entries,
+    requested_reference_ordinal,
+)
 from littraceqa.di_pipeline.contracts import Query
 
 
@@ -52,6 +56,43 @@ def _derivation(fact: dict[str, Any]) -> dict[str, Any]:
         ],
         "final_semantic_answer": str(fact["value"]),
     }
+
+
+def test_q027_shaped_ordinal_means_bibliography_label_not_body_occurrence():
+    question = (
+        "Who is the first author of the third reference cited in a CVPR 2025 "
+        "paper on compositional human motion generation?"
+    )
+    body = _record(
+        "p1#body",
+        "The introduction first cites [4], then models [24, 54, 57].",
+        page=1,
+        section="Introduction",
+    )
+    references = _record(
+        "p1#refs",
+        "[CVPR 2025] Synthetic\n"
+        "[1] First Author. First work, 2021.\n"
+        "[2] Second Author. Second work, 2022.\n"
+        "[3] Nikos Athanasiou. SINC, 2023.\n"
+        "[4] Fourth Author. Fourth work, 2024.",
+        page=9,
+    )
+    wrong_reference = _record(
+        "p1#refs-late",
+        "[54] Robin Rombach. Latent diffusion models, 2022.",
+        page=10,
+    )
+
+    assert requested_reference_ordinal(question) == 3
+    entries = requested_ordinal_bibliography_entries(
+        question, [body, references, wrong_reference]
+    )
+    assert [(entry.chunk_id, entry.citation_id) for entry in entries] == [
+        ("p1#refs", 3)
+    ]
+    assert "Nikos Athanasiou" in entries[0].text
+    assert "Robin Rombach" not in entries[0].text
 
 
 def test_numeric_nth_reference_recovers_explicit_id_only_from_matching_entry():

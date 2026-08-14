@@ -1,4 +1,4 @@
-# PR #7 の固定候補を1論文ずつAOAIで読解判定し、採択根拠だけで回答する。
+# PR #7 の固定候補を1論文ずつAOAIでA/B/根拠ID判定し、検証済みhandoffだけで回答する。
 # 検索、rerank、DI、再検索は行わない。認証値はリポジトリ直下の .env から読む。
 name: aoai_pairwise_reader
 # MinerU chunk metadata contains absolute paths from the student's machine.
@@ -26,9 +26,8 @@ llm:
     # while the remaining pool continues overshooting the same quota.
     max_retries: 0
 params:
-  # Stage 1 responses are compact JSON (observed max: 653 tokens across the
-  # validation checkpoints). Azure reserves prompt + requested output against
-  # TPM, so keeping the shared 12k answer allowance here causes avoidable 429s.
+  # Stage 1 returns exactly two booleans and evidence_chunk_ids. Keep repair
+  # headroom without reserving Stage 2's 12k answer allowance on every pair.
   judgment_max_completion_tokens: 1024
   answer_max_completion_tokens: 12000
   # 1つのquery-paper pairの正常な一次判定は1回だけ。長い論文も分割せず、
@@ -40,13 +39,13 @@ params:
   # 1回の判定に添付する論文画像の上限。AOAI側の1リクエスト上限と同じ。
   max_paper_images: 10
   answer_context_chars: 220000
-  # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
+  # Stage 2へはA=trueかつB=trueで、ID検証を通過した原文chunkだけを渡す。
+  # ただし画像の同一ページ兄弟と提出可能locator救済はPythonが別枠で追加し、traceで区別する。
   answer_neighbor_chunks: 0
   max_answer_images: 10
-  # Stage 1 may over-accept candidates; Stage 2 must see at least one direct
-  # chunk from every accepted paper so it can apply all constraints itself.
-  # This is separate from the final submitted evidence-chunk limit below.
-  max_answer_papers: 50
+  # This caps the validated A && B handoff pool, not the broader A=true paper
+  # set submitted for paper scoring. It is separate from the final evidence cap.
+  max_answer_papers: 64
   # 回答部品へ直接対応する最小根拠だけを提出する。関連論文集合は別管理する。
   max_evidence: 32
   max_evidence_per_paper: 4

@@ -149,14 +149,20 @@ def test_json_preview_uses_official_projection_and_provided_context(tmp_path):
     judgment, answer = preview["prompts"]
     assert "REAL_PAPER_TEXT" in judgment["text"]
     assert "REAL_ANSWER_EVIDENCE" in answer["text"]
-    assert '"label":"<one of: A, B, E>"' in answer["text"]
+    assert '"label":"\\u003cone of: A, B, E\\u003e"' in answer["text"]
     assert "UNSAFE_STAGE1_PROSE_SENTINEL" in answer["text"]
     assert "UNSAFE_STAGE1_MISSING_SENTINEL" in answer["text"]
     assert "UNSAFE_STAGE1_BLOCKING_SENTINEL" in answer["text"]
     assert "UNSAFE_STAGE1_VALUE_SENTINEL" in answer["text"]
     assert "UNSAFE_STAGE1_REASON_SENTINEL" not in answer["text"]
     assert "UNSAFE_STAGE1_QUOTE_SENTINEL" not in answer["text"]
-    assert "source-linked hypotheses, not evidence" in answer["text"]
+    assert "Stage-1 handoff metadata (routing information, not evidence)" in answer[
+        "text"
+    ]
+    assert preview["judgment_question_type"] == "visual"
+    assert preview["judgment_question_type_version"] == (
+        "question-only-four-way-v2-test-wording"
+    )
     assert '"chunk_id":"p2#fig4"' in answer["text"]
     assert '"figure_id":"Figure 4"' in answer["text"]
     for prompt in preview["prompts"]:

@@ -17,14 +17,15 @@ llm:
     # Keep 429 recovery visible to the shared global scheduler.
     max_retries: 0
 params:
-  # Stage 1 uses compact JSON; Stage 2 retains the adapter's larger default.
+  # Stage 1 uses exact three-field JSON; Stage 2 retains the larger allowance.
   judgment_max_completion_tokens: 1024
   answer_max_completion_tokens: 12000
   max_paper_context_chars: 220000
   max_judgment_prompt_chars: 240000
   max_paper_images: 10
   answer_context_chars: 220000
-  # Stage 2へはStage 1が明示採択した原文chunkだけを渡す。
+  # Stage 2へはA=trueかつB=trueで、ID検証を通過した原文chunkだけを渡す。
+  # 画像兄弟・locator救済のPython補助chunkはtraceで別管理する。
   answer_neighbor_chunks: 0
   max_answer_images: 10
   max_answer_papers: 50

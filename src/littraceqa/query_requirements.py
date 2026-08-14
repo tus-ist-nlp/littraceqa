@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from littraceqa.di_pipeline.contracts import Query
 
 
-QUERY_REQUIREMENTS_VERSION = "explicit-table-row-inventory-v1"
+QUERY_REQUIREMENTS_VERSION = "gold-free-table-output-contract-v2"
 
 
 _TRAILING_QUALIFIERS = (
@@ -75,12 +75,70 @@ def explicit_table_row_items(query: Query) -> tuple[str, ...]:
         if not matches:
             continue
         raw = matches[-1].group(1).strip()
+        # A purpose phrase such as ``for producing the next state from the
+        # previous state and the current input`` describes an operation and its
+        # arguments; it does not enumerate table rows.
+        if re.match(r"(?i)^produc(?:e|es|ed|ing)\b", raw):
+            continue
         for qualifier in _TRAILING_QUALIFIERS:
             raw = qualifier.sub("", raw).strip()
         items = _split_coordinated_items(raw)
         if _confident_inventory(items):
             return tuple(items)
     return ()
+
+
+def table_output_contract(query: Query) -> dict[str, object] | None:
+    """Return the gold-free output contract for a table query.
+
+    The contract is derived only from ``question`` and ``table_schema``.  It
+    deliberately contains neither ``query_id`` nor any candidate- or
+    answer-derived aliases, so the same rules apply to validation and test.
+    """
+
+    if "table" not in query.answer_types:
+        return None
+
+    schema_columns: list[dict[str, object]] = []
+    for column in query.table_schema or []:
+        if not isinstance(column, dict):
+            continue
+        name = str(column.get("name") or "").strip()
+        if not name:
+            continue
+        column_type = str(column.get("type") or "").strip()
+        is_row_key = column.get("is_row_key") is True
+        if is_row_key and name.casefold() == "paper title":
+            output_policy = "metadata_title_exact"
+        elif is_row_key:
+            output_policy = "query_facing_shortest_explicit_label"
+        elif column_type.casefold() == "string":
+            output_policy = "source_exact"
+        elif column_type.casefold() == "number":
+            output_policy = "native_json_number"
+        elif column_type.casefold() == "boolean":
+            output_policy = "native_json_boolean"
+        else:
+            output_policy = "native_json_value_matching_schema_type"
+        schema_columns.append(
+            {
+                "name": name,
+                "type": column_type,
+                "is_row_key": is_row_key,
+                "output_policy": output_policy,
+            }
+        )
+
+    return {
+        "derived_from": ["question", "table_schema"],
+        "row_key_policy": {
+            "paper_title": "metadata_title_exact",
+            "other": "query_facing_shortest_explicit_label",
+        },
+        "non_row_key_string_policy": "source_exact",
+        "schema_columns": schema_columns,
+        "explicit_row_inventory": list(explicit_table_row_items(query)),
+    }
 
 
 def table_row_key_texts(query: Query, rows: Iterable[dict]) -> tuple[str, ...]:

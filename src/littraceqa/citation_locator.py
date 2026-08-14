@@ -30,7 +30,7 @@ from littraceqa.di_pipeline.contracts import Query
 from littraceqa.mineru_record import record_source_type
 
 CitationLocatorOverrides = dict[str, tuple[str, ...]]
-CITATION_LOCATOR_VERSION = "mineru-bibliography-v1"
+CITATION_LOCATOR_VERSION = "mineru-bibliography-v2-ordinal-label"
 
 _NUMBERED_ENTRY_RE = re.compile(
     r"(?m)^\s*\[\s*(?P<number>\d{1,6})\s*\]\s*"
@@ -91,11 +91,91 @@ _WORD_ORDINAL_RE = re.compile(
 
 
 @dataclass(frozen=True)
-class _BibliographyEntry:
+class BibliographyEntry:
+    """One explicitly delimited bibliography entry from an original chunk."""
+
     citation_id: int
     chunk_id: str
     paper_id: str
     text: str
+
+
+def requested_reference_ordinal(question: str) -> int | None:
+    """Return the one bibliography label requested by an ordinal phrase.
+
+    In LitTraceQA, ``the third reference`` denotes bibliography entry ``[3]``.
+    It never means the third citation marker encountered while scanning the
+    body.  Numeric ordinals (``24th``) and English ordinals through
+    ``twentieth`` are supported.  Ambiguous questions naming two different
+    ordinals fail closed with ``None``.
+    """
+
+    values = [
+        int(match.group("number"))
+        for match in _NUMERIC_ORDINAL_RE.finditer(question)
+    ]
+    values.extend(
+        _ORDINAL_WORDS[match.group("word").casefold()]
+        for match in _WORD_ORDINAL_RE.finditer(question)
+    )
+    unique = set(values)
+    if len(unique) != 1:
+        return None
+    value = next(iter(unique))
+    return value if value > 0 else None
+
+
+def numbered_bibliography_entries(record: Record) -> tuple[BibliographyEntry, ...]:
+    """Parse explicit ``[N]`` entries from one bibliography chunk.
+
+    Entry boundaries must begin a physical line.  This deliberately excludes
+    in-text citation occurrences such as ``models [24, 54, 57]`` even when a
+    body chunk is accidentally passed to the helper.
+    """
+
+    return tuple(_numbered_entries_in_record(record))
+
+
+def requested_ordinal_bibliography_entries(
+    question: str,
+    records: Iterable[Record],
+) -> tuple[BibliographyEntry, ...]:
+    """Return exact bibliography-entry spans for the requested label.
+
+    Only records classified as citation context are eligible.  The result may
+    contain one entry per paper when a question intentionally spans several
+    selected papers.  Conflicting duplicate records fail closed.
+    """
+
+    ordinal = requested_reference_ordinal(question)
+    unique_records = _unique_records_or_none(records)
+    if ordinal is None or unique_records is None:
+        return ()
+    return tuple(
+        entry
+        for record in unique_records
+        if record_source_type(record) == "citation_context"
+        for entry in _numbered_entries_in_record(record)
+        if entry.citation_id == ordinal
+    )
+
+
+def bibliography_entry_supports_value(
+    entry: BibliographyEntry,
+    value: Any,
+) -> bool:
+    """Return whether every scalar leaf of a fact is visible in one entry.
+
+    This is intentionally lexical.  It is a deterministic guard against
+    attaching the answer from a different bibliography entry that happens to
+    share the same MinerU chunk; semantic paraphrases remain an LLM task and do
+    not pass this citation-identity check.
+    """
+
+    leaves = _scalar_leaves(value)
+    return bool(leaves) and all(
+        _text_contains_value(entry.text, leaf) for leaf in leaves
+    )
 
 
 def infer_citation_locator_overrides(
@@ -140,7 +220,7 @@ def infer_citation_locator_overrides(
     if not support_by_id:
         return {}
 
-    ordinal = _requested_reference_ordinal(query.question)
+    ordinal = requested_reference_ordinal(query.question)
     if ordinal is not None:
         return _infer_explicit_ordinal(
             ordinal=ordinal,
@@ -225,7 +305,7 @@ def _infer_last_reference_index(
     reference_records = _contiguous_reference_records(paper)
     if not reference_records:
         return {}
-    numbered: list[_BibliographyEntry] = []
+    numbered: list[BibliographyEntry] = []
     for record in reference_records:
         numbered.extend(_numbered_entries_in_record(record))
     numbers = [entry.citation_id for entry in numbered]
@@ -322,7 +402,7 @@ def _infer_author_filtered_count(
     required_author = citation_author_filter(query)
     if not required_author:
         return {}
-    matches: list[_BibliographyEntry] = []
+    matches: list[BibliographyEntry] = []
     for key in item_keys:
         _, author, year = key.split(":", maxsplit=2)
         matching_entries = [
@@ -355,8 +435,8 @@ def _infer_author_filtered_count(
     }
 
 
-def _bibliography_entries(records: list[Record]) -> list[_BibliographyEntry]:
-    numbered: list[_BibliographyEntry] = []
+def _bibliography_entries(records: list[Record]) -> list[BibliographyEntry]:
+    numbered: list[BibliographyEntry] = []
     for record in records:
         numbered.extend(_numbered_entries_in_record(record))
     if numbered:
@@ -367,7 +447,7 @@ def _bibliography_entries(records: list[Record]) -> list[_BibliographyEntry]:
     return _unnumbered_entries(records)
 
 
-def _unnumbered_entries(records: list[Record]) -> list[_BibliographyEntry]:
+def _unnumbered_entries(records: list[Record]) -> list[BibliographyEntry]:
     lines: list[tuple[str, str, str]] = []
     for record in records:
         chunk_id = str(record.get("chunk_id") or "")
@@ -379,7 +459,7 @@ def _unnumbered_entries(records: list[Record]) -> list[_BibliographyEntry]:
     if not lines or not _ENTRY_START_RE.match(lines[0][0]):
         return []
 
-    entries: list[_BibliographyEntry] = []
+    entries: list[BibliographyEntry] = []
     entry_lines: list[str] = []
     entry_chunk_id = ""
     entry_paper_id = ""
@@ -387,7 +467,7 @@ def _unnumbered_entries(records: list[Record]) -> list[_BibliographyEntry]:
         if _ENTRY_START_RE.match(line):
             if entry_lines:
                 entries.append(
-                    _BibliographyEntry(
+                    BibliographyEntry(
                         citation_id=len(entries) + 1,
                         chunk_id=entry_chunk_id,
                         paper_id=entry_paper_id,
@@ -403,7 +483,7 @@ def _unnumbered_entries(records: list[Record]) -> list[_BibliographyEntry]:
             return []
     if entry_lines:
         entries.append(
-            _BibliographyEntry(
+            BibliographyEntry(
                 citation_id=len(entries) + 1,
                 chunk_id=entry_chunk_id,
                 paper_id=entry_paper_id,
@@ -413,14 +493,14 @@ def _unnumbered_entries(records: list[Record]) -> list[_BibliographyEntry]:
     return entries
 
 
-def _numbered_entries_in_record(record: Record) -> list[_BibliographyEntry]:
+def _numbered_entries_in_record(record: Record) -> list[BibliographyEntry]:
     text = str(record.get("text") or "")
     matches = list(_NUMBERED_ENTRY_RE.finditer(text))
-    entries: list[_BibliographyEntry] = []
+    entries: list[BibliographyEntry] = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         entries.append(
-            _BibliographyEntry(
+            BibliographyEntry(
                 citation_id=int(match.group("number")),
                 chunk_id=str(record.get("chunk_id") or ""),
                 paper_id=str(record.get("paper_id") or ""),
@@ -474,19 +554,6 @@ def _contains_author(text: str, author: str) -> bool:
     return bool(normalized_author and f" {normalized_author} " in normalized_text)
 
 
-def _requested_reference_ordinal(question: str) -> int | None:
-    values = [int(match.group("number")) for match in _NUMERIC_ORDINAL_RE.finditer(question)]
-    values.extend(
-        _ORDINAL_WORDS[match.group("word").casefold()]
-        for match in _WORD_ORDINAL_RE.finditer(question)
-    )
-    unique = set(values)
-    if len(unique) != 1:
-        return None
-    value = next(iter(unique))
-    return value if value > 0 else None
-
-
 def _facts(derivation: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         dict(fact)
@@ -501,6 +568,19 @@ def _scalar_value(value: Any) -> str | int | float | None:
     if isinstance(value, str) and not value.strip():
         return None
     return value.strip() if isinstance(value, str) else value
+
+
+def _scalar_leaves(value: Any) -> list[str | int | float]:
+    if isinstance(value, Mapping):
+        return [
+            leaf
+            for nested in value.values()
+            for leaf in _scalar_leaves(nested)
+        ]
+    if isinstance(value, list):
+        return [leaf for nested in value for leaf in _scalar_leaves(nested)]
+    scalar = _scalar_value(value)
+    return [scalar] if scalar is not None else []
 
 
 def _positive_integer(value: Any) -> int | None:

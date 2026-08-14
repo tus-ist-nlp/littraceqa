@@ -42,13 +42,36 @@ _VISUAL_IMAGE_REQUIRED_PATTERNS = tuple(
     for pattern in (
         r"\bfig(?:ure)?\.?\s*(?:\d+[a-z]?|[ivx]+)(?:\s*\([a-z0-9]+\))?\b",
         r"\b(?:panel|subplot)s?(?:\s*\([a-z0-9]+\)|\s+[a-z0-9]+)?\b",
-        r"\b(?:chart|plot)s?\b",
+        r"\b(?:chart|plot)s?\b(?!-)",
         r"\b(?:according to|shown in|visible in|depicted in|displayed in|"
         r"read from|inspect|from)\s+(?:an?\s+|the\s+|this\s+|that\s+)?"
         r"(?:image|figure|graph|diagram)\b",
         r"\b(?:image|figure|graph|diagram)\s+"
         r"(?:shows|depicts|displays|illustrates|contains)\b",
         r"\b(?:plotted|graphed)\s+(?:value|ratio|curve|point|result)s?\b",
+        # Unnumbered figures still require their pixels when the question asks
+        # about what the figure itself contrasts, illustrates, or encodes.
+        # Keep a possessive/demonstrative or framework qualifier so ordinary
+        # prose such as "reported figures" is not treated as visual evidence.
+        r"\b(?:the|this|that|its|their|whose)\s+"
+        r"(?:(?:primary|main|proposed|framework)\s+)?figure\s+"
+        r"(?:contrasts?|contrasting|aligns?|detects?|distinguishes?|"
+        r"illustrates?|depicts?|displays?|shows?|contains?|uses?)\b",
+        r"\b(?:the|this|that|its|their|whose)\s+framework['’]s\s+figure\b|"
+        r"\bframework['’]s\s+figure\b",
+        r"\b(?:in|from)\s+(?:the|this|that|its|their)\s+illustration\s+of\b|"
+        r"\bthe\s+illustration\s+of\b",
+        # Some released questions name a framework/pipeline rather than the
+        # word Figure, but explicitly ask for the number of depicted visual
+        # stages or parts.  Both the depicted-object wording and a count noun
+        # are required to avoid attaching images for generic pipeline prose.
+        r"\b(?:framework|overview|pipeline)\s+depicts?\b[^?]{0,160}"
+        r"\b(?:how\s+many|number\s+of|stages?|modules?|parts?)\b|"
+        r"\bhow\s+many\b[^?]{0,120}\b(?:framework|overview|pipeline)\s+depicts?\b",
+        r"\b(?:horizontal|vertical|x|y)[- ]axis\b[^?]{0,120}"
+        r"\b(?:value|maximum|minimum|highest|lowest|roughly|approximately)\b|"
+        r"\b(?:value|maximum|minimum|highest|lowest)\b[^?]{0,120}"
+        r"\b(?:horizontal|vertical|x|y)[- ]axis\b",
         # Explicit ownership/location wording without a numbered Figure, e.g.
         # q_020: "in their primary method/framework figure". Requiring a
         # demonstrative/possessive avoids matching topical phrases such as

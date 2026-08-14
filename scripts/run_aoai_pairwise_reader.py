@@ -32,8 +32,11 @@ import yaml
 from dotenv import load_dotenv
 
 from littraceqa.aoai_pairwise_reader import (
+    FIXED_SELECTED_PAPER_POLICY,
     JudgmentResponseExhaustedError,
     NAMED_OWNER_RESOLVER_VERSION,
+    PAIRWISE_CANDIDATE_POLICY,
+    PAPER_SET_POLICIES,
     PairwiseAOAIReader,
     resolve_named_owner,
 )
@@ -538,9 +541,18 @@ def build_manifest(
     chunks_stat = chunks.stat()
     llm_config = config.get("llm") or {}
     llm_params = llm_config.get("params") or {}
+    paper_set_policy = str(
+        (config.get("params") or {}).get(
+            "paper_set_policy", PAIRWISE_CANDIDATE_POLICY
+        )
+    )
     return {
-        "schema_version": 2,
-        "workflow": "fixed_candidates_pairwise_reading_only",
+        "schema_version": 3,
+        "workflow": (
+            "fixed_selected_paper_evidence_reading"
+            if paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            else "fixed_candidates_pairwise_reading_only"
+        ),
         "provider_attempt_ledger": PROVIDER_ATTEMPT_LEDGER_VERSION,
         "inputs": {
             "queries": _file_fingerprint(args.queries),
@@ -576,6 +588,7 @@ def build_manifest(
             ),
         },
         "reader": {
+            "paper_set_policy": paper_set_policy,
             "max_candidates": args.max_candidates,
             "evidence_policy": args.evidence_policy,
             "require_evidence": args.evidence_policy == "required",
@@ -588,6 +601,14 @@ def build_manifest(
             ),
             "params": config.get("params") or {},
             "named_owner_resolution": (
+                {
+                    "version": NAMED_OWNER_RESOLVER_VERSION,
+                    "scope": "disabled_for_fixed_selected_papers",
+                    "deterministic_owner_rejections": 0,
+                    "queries": [],
+                }
+                if paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+                else
                 _named_owner_audit(handoffs)
                 if handoffs is not None
                 else {
@@ -676,6 +697,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--answer-type",
+        choices=("freeform", "multiple_choice", "table"),
+        default=None,
+        help=(
+            "Run only queries requesting this released answer type. For example, "
+            "--answer-type table isolates the table branch without hard-coding "
+            "query IDs. Repeated --query-id values may further narrow the set."
+        ),
+    )
+    parser.add_argument(
         "--paper-id",
         default=None,
         help="Rejudge one paper (requires one --query-id and --stage judge)",
@@ -721,8 +752,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Confirm an unfiltered all-query AOAI run after its exact minimum "
             "query/pair/call summary is printed. This does not mean test_extra is "
             "required: the main challenge test has 71 questions and test_extra's "
-            "4,901 questions are optional. Runs with explicit --query-id values "
-            "do not require this flag."
+            "4,901 questions are optional. Runs filtered by explicit --query-id "
+            "values or --answer-type do not require this flag."
         ),
     )
     parser.add_argument(
@@ -738,7 +769,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Recompute selected query/paper; requires --query-id.",
+        help=(
+            "Recompute the selected query/paper or answer-type branch; requires "
+            "--query-id or --answer-type."
+        ),
     )
     return parser
 
@@ -803,6 +837,7 @@ def _planned_aoai_calls(
     *,
     stage: str,
     paper_id: str | None,
+    paper_set_policy: str = PAIRWISE_CANDIDATE_POLICY,
 ) -> tuple[int, int, int, int]:
     """Return query/pair/rejection counts and exact fresh minimum AOAI calls.
 
@@ -820,7 +855,9 @@ def _planned_aoai_calls(
     )
     owner_audit = _named_owner_audit(handoffs, paper_id=paper_id)
     deterministic_rejections = (
-        int(owner_audit["deterministic_owner_rejections"])
+        0
+        if paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+        else int(owner_audit["deterministic_owner_rejections"])
         if stage in {"all", "judge"}
         else 0
     )
@@ -853,12 +890,16 @@ def _print_and_confirm_run_plan(
         selected_handoffs,
         stage=args.stage,
         paper_id=args.paper_id,
+        paper_set_policy=getattr(
+            args, "paper_set_policy", PAIRWISE_CANDIDATE_POLICY
+        ),
     )
     print(
         "AOAI run plan: "
         f"queries={query_count}, candidate_pairs={candidate_pairs}, "
         f"deterministic_owner_rejections={deterministic_rejections}, "
         f"minimum_calls_without_cache={minimum_calls}, stage={args.stage}, "
+        f"paper_set_policy={getattr(args, 'paper_set_policy', PAIRWISE_CANDIDATE_POLICY)}, "
         f"aoai_workers={getattr(args, 'workers', 1)}"
     )
     if query_count > 71:
@@ -874,7 +915,11 @@ def _print_and_confirm_run_plan(
                 "--confirm-optional-test-extra; the 4,901-question test_extra "
                 "split is optional and has a separate AOAI budget"
             )
-    if not args.query_id and not args.confirm_full_run:
+    if (
+        not args.query_id
+        and getattr(args, "answer_type", None) is None
+        and not args.confirm_full_run
+    ):
         raise SystemExit(
             "refusing an unfiltered all-query AOAI run without "
             "--confirm-full-run; review the run plan above, then pass the flag"
@@ -1785,6 +1830,10 @@ def run_answers_globally(
                 cached_answer,
                 state.paths.submission,
                 require_evidence=require_evidence,
+                authoritative_paper_ids=(
+                    candidate.paper_id
+                    for candidate in state.handoff.candidate_papers
+                ),
             )
             print(f"[{query.query_id}] answer cached")
             continue
@@ -2109,10 +2158,12 @@ def run_answers_globally(
 
 
 def _select_handoffs(
-    all_handoffs: list[CandidateHandoff], query_ids: list[str]
+    all_handoffs: list[CandidateHandoff],
+    query_ids: list[str],
+    answer_type: str | None = None,
 ) -> list[CandidateHandoff]:
-    if not query_ids:
-        return all_handoffs
+    """Select an ordered subset by explicit ID and/or released answer type."""
+
     duplicates = sorted(
         query_id for query_id in set(query_ids) if query_ids.count(query_id) > 1
     )
@@ -2123,7 +2174,23 @@ def _select_handoffs(
     if missing:
         raise ValueError(f"unknown --query-id values: {missing}")
     requested = set(query_ids)
-    return [handoff for handoff in all_handoffs if handoff.query.query_id in requested]
+    selected = [
+        handoff
+        for handoff in all_handoffs
+        if (not requested or handoff.query.query_id in requested)
+        and (
+            answer_type is None
+            or answer_type in set(handoff.query.answer_types)
+        )
+    ]
+    if not selected:
+        filters: list[str] = []
+        if query_ids:
+            filters.append(f"query_ids={query_ids!r}")
+        if answer_type is not None:
+            filters.append(f"answer_type={answer_type!r}")
+        raise ValueError("query filters selected no inputs: " + ", ".join(filters))
+    return selected
 
 
 def execute_locked_run(
@@ -2269,8 +2336,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.max_candidates is not None and args.max_candidates < 1:
         raise SystemExit("--max-candidates must be positive")
-    if args.force and not args.query_id:
-        raise SystemExit("--force requires at least one --query-id")
+    if args.force and not (args.query_id or args.answer_type):
+        raise SystemExit("--force requires --query-id or --answer-type")
     if args.paper_id and (
         len(args.query_id) != 1 or args.stage != "judge"
     ):
@@ -2285,6 +2352,25 @@ def main() -> None:
             raise SystemExit(f"unsafe query id: {query_id!r}")
 
     config = load_config(args.reader)
+    params = config.get("params") or {}
+    if not isinstance(params, dict):
+        raise SystemExit("reader params must be an object")
+    args.paper_set_policy = str(
+        params.get("paper_set_policy", PAIRWISE_CANDIDATE_POLICY)
+    )
+    if args.paper_set_policy not in PAPER_SET_POLICIES:
+        raise SystemExit(
+            f"unknown paper_set_policy {args.paper_set_policy!r}; expected one of "
+            f"{sorted(PAPER_SET_POLICIES)}"
+        )
+    if (
+        args.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+        and args.max_candidates is not None
+    ):
+        raise SystemExit(
+            "--max-candidates is forbidden in fixed-selected mode because it "
+            "would alter the externally supplied submitted paper set"
+        )
     require_evidence = require_evidence_for_policy(args.evidence_policy)
     print(
         "submission evidence: "
@@ -2309,7 +2395,11 @@ def main() -> None:
         )
         for handoff in all_handoffs
     ]
-    selected_handoffs = _select_handoffs(all_handoffs, args.query_id)
+    selected_handoffs = _select_handoffs(
+        all_handoffs,
+        args.query_id,
+        args.answer_type,
+    )
     _print_and_confirm_run_plan(args, selected_handoffs)
 
     try:
@@ -2348,9 +2438,18 @@ def main() -> None:
         allow_missing_figure_images=args.allow_missing_figure_images,
         image_workers=min(args.workers, 64),
     )
-    preflight["named_owner_resolution"] = _named_owner_audit(
-        selected_handoffs,
-        paper_id=args.paper_id,
+    preflight["named_owner_resolution"] = (
+        {
+            "version": NAMED_OWNER_RESOLVER_VERSION,
+            "scope": "disabled_for_fixed_selected_papers",
+            "deterministic_owner_rejections": 0,
+            "queries": [],
+        }
+        if args.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+        else _named_owner_audit(
+            selected_handoffs,
+            paper_id=args.paper_id,
+        )
     )
     print(
         "preflight: "

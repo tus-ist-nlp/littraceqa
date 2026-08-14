@@ -503,6 +503,19 @@ def test_visual_image_requirement_is_conservative():
             "Which NAACL 2025 papers explicitly mention or reference MCTS "
             "(Monte Carlo Tree Search) in their primary method/framework figure?"
         ),
+        (
+            "Its figure contrasting prior datasets with the proposed textbook "
+            "uses how many keyframes?"
+        ),
+        (
+            "The framework figure detects object-level differences; how many "
+            "edit-operation categories does it distinguish?"
+        ),
+        "In the illustration of convergence acceleration, how many epochs are shown?",
+        (
+            "The watermarking framework depicts its pipeline with how many "
+            "stages or modules?"
+        ),
     ]
     not_required = [
         "What speedup is reported for 2K image generation?",
@@ -511,6 +524,7 @@ def test_visual_image_requirement_is_conservative():
         "Across these graph-focused works, how many categories are reported?",
         "What value does the paper report?",
         "Which method improves performance in figure generation?",
+        "The framework depicts a pipeline for training and reports its accuracy.",
     ]
 
     assert all(requires_visual_image(question) for question in required)

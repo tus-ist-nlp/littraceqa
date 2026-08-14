@@ -4,8 +4,10 @@ import pytest
 
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.query_requirements import (
+    QUERY_REQUIREMENTS_VERSION,
     explicit_table_row_items,
     missing_explicit_table_items,
+    table_output_contract,
     unaccounted_explicit_table_items,
 )
 
@@ -67,6 +69,10 @@ def test_extracts_confident_explicit_inventory(
             "Among methods for text-to-image generation evaluated on GenEval, "
             "what base model does each method build on?"
         ),
+        (
+            "What recurrence does each method define for producing the next "
+            "state from the previous state and the current input?"
+        ),
     ],
 )
 def test_open_ended_or_non_list_question_has_no_inventory(question: str) -> None:
@@ -77,6 +83,71 @@ def test_non_table_question_has_no_inventory() -> None:
     assert explicit_table_row_items(
         _query("What are the values for A, B, and C?", table=False)
     ) == ()
+
+
+def test_table_output_contract_is_schema_and_question_derived() -> None:
+    query = _query("What are the scores for Cedar, Flint, and Larch?")
+
+    contract = table_output_contract(query)
+
+    assert QUERY_REQUIREMENTS_VERSION == "gold-free-table-output-contract-v2"
+    assert contract == {
+        "derived_from": ["question", "table_schema"],
+        "row_key_policy": {
+            "paper_title": "metadata_title_exact",
+            "other": "query_facing_shortest_explicit_label",
+        },
+        "non_row_key_string_policy": "source_exact",
+        "schema_columns": [
+            {
+                "name": "Method",
+                "type": "string",
+                "is_row_key": True,
+                "output_policy": "query_facing_shortest_explicit_label",
+            },
+            {
+                "name": "Value",
+                "type": "string",
+                "is_row_key": False,
+                "output_policy": "source_exact",
+            },
+        ],
+        "explicit_row_inventory": ["Cedar", "Flint", "Larch"],
+    }
+    assert "query_id" not in contract
+
+
+def test_table_output_contract_assigns_metadata_and_native_type_policies() -> None:
+    query = Query(
+        query_id="synthetic",
+        question="Which papers satisfy the stated condition?",
+        answer_types=["table"],
+        table_schema=[
+            {"name": "Paper Title", "type": "string", "is_row_key": True},
+            {"name": "Description", "type": "string", "is_row_key": False},
+            {"name": "Score", "type": "number", "is_row_key": False},
+            {"name": "Passed", "type": "boolean", "is_row_key": False},
+        ],
+    )
+
+    contract = table_output_contract(query)
+
+    assert contract is not None
+    assert [
+        column["output_policy"] for column in contract["schema_columns"]
+    ] == [
+        "metadata_title_exact",
+        "source_exact",
+        "native_json_number",
+        "native_json_boolean",
+    ]
+    assert contract["explicit_row_inventory"] == []
+
+
+def test_non_table_question_has_no_table_output_contract() -> None:
+    assert (
+        table_output_contract(_query("What is the value?", table=False)) is None
+    )
 
 
 def test_missing_items_accepts_safe_surface_aliases() -> None:

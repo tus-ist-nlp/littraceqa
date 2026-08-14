@@ -5,11 +5,10 @@ searches, reranks, decomposes a query for retrieval, or reads development-only
 labels.  It performs exactly two semantic stages:
 
 1. Pair one observable query with one candidate paper hydrated from the MinerU
-   corpus and ask an LLM whether that paper is useful, citing exact chunk IDs.
-2. Give the accepted original chunks back to the LLM and construct the answer.
-   A named target owner that Stage 1 conservatively marked unreadable or
-   irrelevant may be rechecked only when identity is established, no hard
-   mismatch exists, and direct original evidence was cited.
+   corpus and ask an LLM whether the paper is answer-relevant and whether the
+   supplied context contains usable answer evidence, citing exact chunk IDs.
+2. Keep every answer-relevant paper for paper scoring, but give Stage 2 only the
+   original chunks whose paper passed both judgments and whose IDs validated.
 
 Stage 1 first applies a narrow, candidate-set-unique canonical-owner gate for
 paper-local objects. A decisive wrong owner is checkpointed without AOAI; every
@@ -31,7 +30,7 @@ import re
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Required, TypedDict, cast
@@ -41,7 +40,11 @@ from littraceqa.answer_derivation import (
     DerivationValidationError,
     citation_author_filter,
     citation_identity_key,
+    explicit_singleton_eligibility_clause,
+    has_explicit_singleton_eligibility_filter,
     is_aggregate_citation_count_query,
+    is_axis_extent_lookup_query,
+    requires_extremum_operation,
     validate_answer_semantics,
     validate_citation_count_items,
 )
@@ -49,11 +52,14 @@ from littraceqa.candidate_handoff import (
     CandidatePaper,
     require_production_query,
 )
+from littraceqa.chunk_store import ChunkStore, Record
 from littraceqa.citation_locator import (
     CITATION_LOCATOR_VERSION,
+    bibliography_entry_supports_value,
     infer_citation_locator_overrides,
+    requested_ordinal_bibliography_entries,
+    requested_reference_ordinal,
 )
-from littraceqa.chunk_store import ChunkStore, Record
 from littraceqa.corpus_preflight import requires_visual_image
 from littraceqa.di_pipeline.agent.evidence import evidence_from_result
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
@@ -61,28 +67,65 @@ from littraceqa.di_pipeline.contracts import Answer, Prediction, Query, Retrieva
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.mineru_record import (
     MAX_AOAI_IMAGES_PER_REQUEST,
+    QUERY_AWARE_OBJECT_LOCATOR_VERSION,
+    SPLIT_CAPTION_TABLE_LOCATOR_VERSION,
     coarse_locator,
+    query_aware_prediction_locator,
     readable_image_path,
     record_source_type,
+    recover_split_caption_table_records,
     submission_evidence_eligible,
 )
 from littraceqa.pairwise_prompts import (
     ANSWER_PROMPT_VERSION,
+    FIXED_SELECTED_ANSWER_PROMPT_VERSION,
     JUDGMENT_PROMPT_VERSION,
+    JUDGMENT_QUESTION_TYPE_VERSION,
+    SELECTED_EVIDENCE_PROMPT_VERSION,
     answer_response_shape,
     example_manifest,
+    judgment_question_type,
     render_answer_prompt,
     render_judgment_prompt,
+    render_selected_evidence_prompt,
+    requires_coordinated_metric_table_context,
+    requires_explicit_visual_mention,
+    requires_scaling_eligibility_output,
+    selected_evidence_example_manifest,
 )
 from littraceqa.query_requirements import (
     QUERY_REQUIREMENTS_VERSION,
+    explicit_table_row_items,
+    table_row_key_texts,
     unaccounted_explicit_table_items,
 )
 
-PAPER_CONTEXT_SELECTOR_VERSION = "query-lexical-v3-exact-object-multipanel"
+PAPER_CONTEXT_SELECTOR_VERSION = "query-lexical-v5-scoped-metric-tables"
 NAMED_OWNER_RESOLVER_VERSION = "named-owner-v2-grammatical-local-object-only"
-ANSWER_IMAGE_HANDOFF_VERSION = "answer-purpose-image-first-v1"
+ANSWER_IMAGE_HANDOFF_VERSION = "answer-purpose-image-first-v2-mixed-visual-text"
+SUBMISSION_PAPER_SELECTION_VERSION = "answer-support-only-v1"
 MAX_ANSWER_REPAIR_ATTEMPTS = 5
+PAIRWISE_CANDIDATE_POLICY = "pairwise_candidates"
+FIXED_SELECTED_PAPER_POLICY = "fixed_selected"
+PAPER_SET_POLICIES = frozenset(
+    {PAIRWISE_CANDIDATE_POLICY, FIXED_SELECTED_PAPER_POLICY}
+)
+FIXED_SELECTED_CHECKPOINT_KIND = "fixed_selected_evidence"
+FIXED_SELECTED_ANSWER_FALLBACK_VERSION = (
+    "query-ranked-eligible-v2-multi-paper-table-supplements"
+)
+FIXED_SELECTED_TABLE_SUPPLEMENTS_PER_PAPER = 2
+MIXED_VISUAL_TEXT_SUPPLEMENTS_PER_PAPER = 4
+_SELECTED_EVIDENCE_PURPOSES = frozenset(
+    {
+        "answer_value",
+        "comparison_operand",
+        "eligibility_condition",
+        "table_row",
+        "visual_fact",
+        "citation_fact",
+    }
+)
 
 JUDGMENT_LABELS = (
     "direct_answer",
@@ -110,6 +153,13 @@ _LOCAL_ORDINAL_REFERENCE_RE = re.compile(
 _LOCAL_REFERENCE_INVENTORY_RE = re.compile(
     r"(?i)\b(?:how\s+many\s+references|how\s+many\s+papers\s+"
     r"(?:were\s+)?cited)\b"
+)
+_DIRECT_REPORTED_OPTIMUM_QUERY_RE = re.compile(
+    r"\bwhat\s+(?:(?:is|was)\s+)?(?:the\s+)?(?:reported\s+)?"
+    r"(?:optimal|best)\b[^?\n]{0,100}?\b"
+    r"(?:factor|coefficient|hyperparameter|parameter|setting|threshold|"
+    r"temperature|rate|ratio|weight|gamma|lambda|alpha|beta|rho)\b",
+    re.IGNORECASE,
 )
 _EXPLICIT_MULTI_SOURCE_RE = re.compile(
     r"(?i)(?:"
@@ -184,6 +234,37 @@ def _normalize_owner_text(value: str) -> str:
     return " ".join(_OWNER_TOKEN_RE.findall(decoded.lower()))
 
 
+def _normalized_source_text(value: str) -> str:
+    """Normalize harmless PDF/OCR typography while preserving source content."""
+
+    normalized = unicodedata.normalize("NFKC", html.unescape(str(value or "")))
+    normalized = (
+        normalized.replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2212", "-")
+    )
+    return " ".join(normalized.split())
+
+
+def _source_excerpt_is_visible(excerpt: str, record: Record) -> bool:
+    """Return whether a copied excerpt occurs in the cited original chunk."""
+
+    needle = _normalized_source_text(excerpt)
+    haystack = _normalized_source_text(str(record.get("text") or ""))
+    return bool(needle and needle in haystack)
+
+
+def _record_with_prompt_visible_text(record: Record, rendered: str) -> Record:
+    """Copy a record with text restricted to what the model actually received."""
+
+    _, separator, visible_text = rendered.partition("\n")
+    visible_record = dict(record)
+    visible_record["text"] = visible_text if separator else ""
+    return visible_record  # type: ignore[return-value]
+
+
 def _candidate_title_aliases(title: str) -> tuple[str, ...]:
     """Return only literal, distinctive aliases supplied by canonical metadata."""
 
@@ -210,6 +291,69 @@ def _candidate_title_aliases(title: str) -> tuple[str, ...]:
                 continue
         aliases.append(alias)
     return tuple(sorted(aliases, key=lambda value: (-len(value), value)))
+
+
+_COMPOUND_NAME_JOINERS = frozenset("-‐‑‒–—−")
+
+
+def _candidate_is_only_a_compound_name_component(
+    question: str,
+    candidate: CandidatePaper,
+    records: Iterable[Record],
+) -> bool:
+    """Reject a base-method title matched only inside a longer method name.
+
+    For example, ``D-FINE`` in ``DEIM-D-FINE-X`` is not a standalone request
+    for the D-FINE paper.  The guard is intentionally fail-open: it does not
+    apply when the alias also occurs standalone or when the selected evidence
+    itself contains the complete compound name from the question.
+    """
+
+    raw_question = html.unescape(unicodedata.normalize("NFKC", question))
+    compound_names: list[str] = []
+    found_alias = False
+    found_standalone_alias = False
+    for alias in _candidate_title_aliases(candidate.title):
+        for match in re.finditer(
+            _literal_alias_pattern(alias), raw_question, re.IGNORECASE
+        ):
+            found_alias = True
+            left_attached = (
+                match.start() >= 2
+                and raw_question[match.start() - 1] in _COMPOUND_NAME_JOINERS
+                and raw_question[match.start() - 2].isalnum()
+            )
+            right_attached = (
+                match.end() + 1 < len(raw_question)
+                and raw_question[match.end()] in _COMPOUND_NAME_JOINERS
+                and raw_question[match.end() + 1].isalnum()
+            )
+            if not (left_attached or right_attached):
+                found_standalone_alias = True
+                continue
+            start = match.start()
+            end = match.end()
+            while start > 0 and (
+                raw_question[start - 1].isalnum()
+                or raw_question[start - 1] in _COMPOUND_NAME_JOINERS
+            ):
+                start -= 1
+            while end < len(raw_question) and (
+                raw_question[end].isalnum()
+                or raw_question[end] in _COMPOUND_NAME_JOINERS
+            ):
+                end += 1
+            compound_names.append(raw_question[start:end])
+    if not found_alias or found_standalone_alias or not compound_names:
+        return False
+
+    normalized_context = " ".join(
+        _normalize_owner_text(str(record.get("text") or "")) for record in records
+    )
+    return not any(
+        _normalize_owner_text(compound_name) in normalized_context
+        for compound_name in compound_names
+    )
 
 
 def _literal_alias_pattern(alias: str) -> str:
@@ -455,11 +599,14 @@ class PaperContext(TypedDict):
 
 
 class AnswerContext(TypedDict):
-    """Accepted evidence rendered for the final answer model call."""
+    """Validated handoff plus separately tracked deterministic supplements."""
 
     text: str
     records_by_id: dict[str, Record]
     image_paths: list[str]
+    stage1_handoff_chunk_ids: list[str]
+    python_supplemental_chunk_ids: list[str]
+    fixed_selected_table_supplement_chunk_ids: list[str]
     answer_evidence_image_chunk_ids: list[str]
     attached_answer_evidence_image_chunk_ids: list[str]
 
@@ -829,6 +976,83 @@ def _validate_stage2_citation_count_support(
             )
 
 
+def _validate_ordinal_reference_support(
+    *,
+    query: Query,
+    derivation: dict[str, Any],
+    context_records: dict[str, Record],
+) -> None:
+    """Ground final facts in bibliography label ``[N]``, never body order.
+
+    An ordinal phrase such as ``third reference`` is a bibliography lookup.
+    In-text citation order is neither stable nor an official evidence locator,
+    so a fact used by the final answer must be visible inside the exact ``[N]``
+    entry of one of its own cited chunks.
+    """
+
+    ordinal = requested_reference_ordinal(query.question)
+    if ordinal is None:
+        return
+    target_entries = requested_ordinal_bibliography_entries(
+        query.question, context_records.values()
+    )
+    if not target_entries:
+        raise ReadingResponseError(
+            f"ordinal bibliography lookup requests label [{ordinal}], but no "
+            "explicit matching bibliography entry is available in answer context"
+        )
+
+    facts_by_id = {
+        str(fact["id"]): fact
+        for fact in derivation.get("facts") or []
+        if isinstance(fact, dict) and fact.get("id")
+    }
+    operations_by_id = {
+        str(operation["id"]): operation
+        for operation in derivation.get("operations") or []
+        if isinstance(operation, dict) and operation.get("id")
+    }
+    bound_fact_ids: set[str] = set()
+    for binding in derivation.get("answer_bindings") or []:
+        if not isinstance(binding, dict):
+            continue
+        source_id = str(binding.get("source_id") or "")
+        if binding.get("source_type") == "fact":
+            bound_fact_ids.add(source_id)
+            continue
+        if binding.get("source_type") != "operation":
+            continue
+        operation = operations_by_id.get(source_id)
+        if operation is not None:
+            bound_fact_ids.update(
+                str(fact_id) for fact_id in operation.get("fact_ids") or []
+            )
+
+    unsupported: list[str] = []
+    for fact_id in sorted(bound_fact_ids):
+        fact = facts_by_id.get(fact_id)
+        if fact is None:
+            continue
+        paper_id = str(fact.get("paper_id") or "")
+        chunk_ids = {str(value) for value in fact.get("chunk_ids") or []}
+        matching_entries = [
+            entry
+            for entry in target_entries
+            if entry.paper_id == paper_id and entry.chunk_id in chunk_ids
+        ]
+        if not any(
+            bibliography_entry_supports_value(entry, fact.get("value"))
+            for entry in matching_entries
+        ):
+            unsupported.append(fact_id)
+    if unsupported:
+        raise ReadingResponseError(
+            f"ordinal bibliography lookup means bibliography label [{ordinal}], "
+            "not the ordinal in-text citation occurrence; final answer fact(s) "
+            f"are not supported inside entry [{ordinal}]: {unsupported}"
+        )
+
+
 _VISUAL_SUBFIGURE_COUNT_RE = re.compile(
     r"(?i)\bhow\s+many\s+(?:subfigures?|subplots?)\b"
 )
@@ -919,14 +1143,11 @@ def _validate_stage1_visual_subfigure_count(
 def _answer_review_pool(
     judgments: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return recall-oriented Stage-2 inputs without rescuing true mismatches.
+    """Return the validated Stage-2 handoff pool in candidate-rank order.
 
-    Stage 1 is deliberately conservative.  A correctly identified target owner
-    can still be labelled ``unreadable`` (for example when MinerU split a
-    multi-panel figure) or even ``irrelevant`` after a faulty option match.  The
-    final reader is allowed to recheck that owner, but only when Stage 1 cited
-    original evidence and recorded neither an identity conflict nor a blocking
-    scientific mismatch.
+    The current three-field schema requires A, B, ``send_to_answer_agent``, and
+    non-empty validated IDs. The narrow target-owner rescue below applies only
+    to legacy multi-field judgments kept for checkpoint compatibility.
     """
 
     ordered = sorted(judgments, key=lambda value: int(value.get("rank") or 0))
@@ -934,17 +1155,27 @@ def _answer_review_pool(
     seen_papers: set[str] = set()
     for item in ordered:
         paper_id = str(item.get("paper_id") or "")
-        accepted = (
-            item.get("relevant") is True
-            and item.get("label") in RELEVANT_LABELS
-        )
-        owner_recheck = (
-            not accepted
-            and item.get("paper_role") == "target_owner"
-            and item.get("identity_conflict") is not True
-            and not (item.get("blocking_mismatches") or [])
-            and bool(item.get("evidence") or [])
-        )
+        simple_schema = "send_to_answer_agent" in item
+        if simple_schema:
+            accepted = bool(
+                item.get("is_relevant_to_answer") is True
+                and item.get("has_usable_answer_evidence") is True
+                and item.get("send_to_answer_agent") is True
+                and (item.get("evidence_chunk_ids") or [])
+            )
+            owner_recheck = False
+        else:
+            accepted = (
+                item.get("relevant") is True
+                and item.get("label") in RELEVANT_LABELS
+            )
+            owner_recheck = (
+                not accepted
+                and item.get("paper_role") == "target_owner"
+                and item.get("identity_conflict") is not True
+                and not (item.get("blocking_mismatches") or [])
+                and bool(item.get("evidence") or [])
+            )
         if not paper_id or paper_id in seen_papers or not (accepted or owner_recheck):
             continue
         seen_papers.add(paper_id)
@@ -1057,7 +1288,7 @@ def _judgment_call_record(
 
 
 class PairwiseAOAIReader:
-    """Judge fixed candidate papers one by one, then answer from accepted chunks."""
+    """Judge fixed candidates, then answer from validated Stage-1 handoff chunks."""
 
     supports_named_owner_resolution = True
     supports_provider_attempt_ledger = True
@@ -1077,7 +1308,12 @@ class PairwiseAOAIReader:
         max_evidence_per_paper: int | None = None,
         judgment_max_completion_tokens: int | None = None,
         answer_max_completion_tokens: int | None = None,
+        paper_set_policy: str = PAIRWISE_CANDIDATE_POLICY,
     ) -> None:
+        if paper_set_policy not in PAPER_SET_POLICIES:
+            raise ValueError(
+                f"paper_set_policy must be one of {sorted(PAPER_SET_POLICIES)}"
+            )
         if max_paper_context_chars < 8_000:
             raise ValueError("max_paper_context_chars must be at least 8000")
         if max_judgment_prompt_chars < max_paper_context_chars + 8_000:
@@ -1131,6 +1367,33 @@ class PairwiseAOAIReader:
         self.max_evidence_per_paper = resolved_per_paper
         self.judgment_max_completion_tokens = judgment_max_completion_tokens
         self.answer_max_completion_tokens = answer_max_completion_tokens
+        self.paper_set_policy = paper_set_policy
+        # In fixed-selected mode every supplied paper is authoritative. A
+        # named-owner heuristic may guide extraction but must never remove one.
+        self.supports_named_owner_resolution = (
+            paper_set_policy != FIXED_SELECTED_PAPER_POLICY
+        )
+
+    @property
+    def judgment_prompt_version(self) -> str:
+        return (
+            SELECTED_EVIDENCE_PROMPT_VERSION
+            if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            else JUDGMENT_PROMPT_VERSION
+        )
+
+    @property
+    def answer_prompt_version(self) -> str:
+        return (
+            FIXED_SELECTED_ANSWER_PROMPT_VERSION
+            if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            else ANSWER_PROMPT_VERSION
+        )
+
+    def judgment_example_ids(self, query: Query) -> list[str]:
+        if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY:
+            return selected_evidence_example_manifest(query)
+        return example_manifest(query)["judgment"]
 
     # ---- Stage 1: one query x one candidate paper -------------------------
 
@@ -1144,14 +1407,17 @@ class PairwiseAOAIReader:
     ) -> str:
         require_production_query(query)
         payload = {
-            "prompt_version": JUDGMENT_PROMPT_VERSION,
+            "prompt_version": self.judgment_prompt_version,
+            "paper_set_policy": self.paper_set_policy,
+            "question_type_version": JUDGMENT_QUESTION_TYPE_VERSION,
+            "question_type": judgment_question_type(query),
             "named_owner_resolution": owner_resolution
             or {
                 "version": NAMED_OWNER_RESOLVER_VERSION,
                 "status": "not_computed",
                 "hard_gate": False,
             },
-            "few_shot_examples": example_manifest(query)["judgment"],
+            "few_shot_examples": self.judgment_example_ids(query),
             "query": _production_query_payload(query),
             "candidate": _candidate_payload(candidate),
             "paper_content_sha256": _records_sha256(records),
@@ -1402,6 +1668,7 @@ class PairwiseAOAIReader:
             context = fallback_context
             prompt = fallback_prompt
         calls: list[dict[str, Any]] = []
+        validated_completion = completion
         try:
             parsed = self._parse_judgment(
                 query=query,
@@ -1412,6 +1679,7 @@ class PairwiseAOAIReader:
                     completion, context["image_paths"]
                 ),
                 resolved_target_owner=resolved_target_owner,
+                allow_legacy_schema=False,
             )
         except ReadingResponseError as exc:
             _finalize_provider_response_attempt(
@@ -1461,7 +1729,9 @@ class PairwiseAOAIReader:
                         repair_completion, context["image_paths"]
                     ),
                     resolved_target_owner=resolved_target_owner,
+                    allow_legacy_schema=False,
                 )
+                validated_completion = repair_completion
             except ReadingResponseError as repair_exc:
                 _finalize_provider_response_attempt(
                     repair_completion,
@@ -1523,16 +1793,36 @@ class PairwiseAOAIReader:
                 )
             )
 
-        parsed["relevant"] = parsed["label"] in RELEVANT_LABELS
+        parsed["relevant"] = bool(
+            parsed.get("is_relevant_to_answer")
+            if "is_relevant_to_answer" in parsed
+            else parsed["label"] in RELEVANT_LABELS
+        )
         parsed["identity_conflict"] = parsed["paper_role"] == "distractor"
         parsed["visual_conflict"] = False
+
+        actual_judgment_image_paths = _completion_attached_paths(
+            validated_completion, context["image_paths"]
+        )
+        actual_judgment_image_path_set = set(actual_judgment_image_paths)
+        actual_judgment_image_chunk_ids = [
+            chunk_id
+            for chunk_id in context["selected_image_chunk_ids"]
+            if (
+                (record := context["records_by_id"].get(chunk_id)) is not None
+                and readable_image_path(record) in actual_judgment_image_path_set
+            )
+        ]
 
         result = {
             "query_id": query.query_id,
             **_candidate_payload(candidate),
             "status": "complete",
-            "prompt_version": JUDGMENT_PROMPT_VERSION,
-            "few_shot_example_ids": example_manifest(query)["judgment"],
+            "prompt_version": self.judgment_prompt_version,
+            "paper_set_policy": self.paper_set_policy,
+            "question_type_version": JUDGMENT_QUESTION_TYPE_VERSION,
+            "question_type": judgment_question_type(query),
+            "few_shot_example_ids": self.judgment_example_ids(query),
             "cache_key": self.judgment_cache_key(
                 query,
                 candidate,
@@ -1556,8 +1846,10 @@ class PairwiseAOAIReader:
                 context["total_readable_image_count"] > len(context["image_paths"])
             ),
             "paper_readable_image_count": context["total_readable_image_count"],
-            "attached_image_count": len(context["image_paths"]),
-            "attached_image_chunk_ids": context["selected_image_chunk_ids"],
+            "requested_image_count": len(context["image_paths"]),
+            "requested_image_chunk_ids": context["selected_image_chunk_ids"],
+            "attached_image_count": len(actual_judgment_image_paths),
+            "attached_image_chunk_ids": actual_judgment_image_chunk_ids,
             "omitted_image_chunk_ids": context["omitted_image_chunk_ids"],
             "paper_context_selection": context["selection"],
             "base_judgment_call_count": 1,
@@ -1590,6 +1882,12 @@ class PairwiseAOAIReader:
             f"resolved owner {resolved_title!r}"
         )
         parsed = {
+            "is_relevant_to_answer": False,
+            "has_usable_answer_evidence": False,
+            "send_to_answer_agent": False,
+            "model_is_relevant_to_answer": False,
+            "model_has_usable_answer_evidence": False,
+            "model_evidence_chunk_ids": [],
             "paper_role": "distractor",
             "label": "irrelevant",
             "answerable_from_this_paper": False,
@@ -1623,6 +1921,8 @@ class PairwiseAOAIReader:
             **_candidate_payload(candidate),
             "status": "complete",
             "prompt_version": JUDGMENT_PROMPT_VERSION,
+            "question_type_version": JUDGMENT_QUESTION_TYPE_VERSION,
+            "question_type": judgment_question_type(query),
             "few_shot_example_ids": example_manifest(query)["judgment"],
             "cache_key": self.judgment_cache_key(
                 query,
@@ -1714,15 +2014,102 @@ class PairwiseAOAIReader:
             for index, record in enumerate(records)
             if index == 0 or record_source_type(record) == "title_abstract"
         ]
+        scoped_figure_mention = requires_explicit_visual_mention(query.question)
+        scoped_metric_tables = (
+            requires_coordinated_metric_table_context(query.question)
+            and any(record_source_type(record) == "table" for record in records)
+        )
+        scoped_image_source_type = (
+            "figure" if scoped_figure_mention else "table" if scoped_metric_tables else None
+        )
         image_indices = _ranked_image_record_indices(
             records,
             scores=scores,
             reasons=reasons,
             limit=self.max_paper_images,
             question=query.question,
+            scoped_source_type=scoped_image_source_type,
         )
-
-        if len(full_text) <= context_char_limit:
+        if scoped_figure_mention:
+            # The query explicitly scopes a literal term to a primary/main
+            # Figure. Keep the judgment evidence boundary equally scoped:
+            # candidate metadata already carries the title, while full body and
+            # table text can leak the term from the wrong location.
+            selected_indices = [
+                index
+                for index, record in enumerate(records)
+                if record_source_type(record) == "figure"
+            ]
+            if not selected_indices:
+                selected_indices = title_indices
+            rendered_by_index = {
+                index: self._format_record(
+                    records[index],
+                    text=_without_corpus_title_prefix(
+                        str(records[index].get("text") or "")
+                    ),
+                )
+                for index in selected_indices
+            }
+            compacted = len(selected_indices) != len(records)
+        elif scoped_metric_tables:
+            # Coordinated benchmark-value questions are especially vulnerable
+            # to long-paper dilution and near-name values in prose. Candidate
+            # metadata already establishes identity, so expose the complete
+            # MinerU table set and its table images. If a paper has no tables,
+            # this branch is not taken and the normal full-text path remains.
+            selected_indices = [
+                index
+                for index, record in enumerate(records)
+                if record_source_type(record) == "table"
+            ]
+            rendered_by_index = {
+                index: self._format_record(
+                    records[index],
+                    text=_without_corpus_title_prefix(
+                        str(records[index].get("text") or "")
+                    ),
+                )
+                for index in selected_indices
+            }
+            scoped_text_length = sum(
+                len(rendered_by_index[index]) for index in selected_indices
+            ) + max(0, len(selected_indices) - 1) * 2
+            if scoped_text_length > context_char_limit:
+                priority = sorted(
+                    selected_indices, key=lambda index: (-scores[index], index)
+                )
+                kept: dict[int, str] = {}
+                used_chars = 0
+                for index in priority:
+                    separator_chars = 2 if kept else 0
+                    available = context_char_limit - used_chars - separator_chars
+                    if available <= 512:
+                        break
+                    rendered = rendered_by_index[index]
+                    if len(rendered) > available:
+                        rendered = _bounded_formatted_record(
+                            self,
+                            records[index],
+                            focus=focus,
+                            max_chars=available,
+                            source_text=_without_corpus_title_prefix(
+                                str(records[index].get("text") or "")
+                            ),
+                        )
+                    if len(rendered) > available:
+                        continue
+                    kept[index] = rendered
+                    used_chars += separator_chars + len(rendered)
+                if not kept:
+                    raise ValueError(
+                        f"{query.query_id}/{candidate.paper_id}: table context "
+                        "selection could not fit any chunk"
+                    )
+                selected_indices = sorted(kept)
+                rendered_by_index = kept
+            compacted = len(selected_indices) != len(records)
+        elif len(full_text) <= context_char_limit:
             selected_indices = list(range(len(records)))
             rendered_by_index = dict(enumerate(full_parts))
             compacted = False
@@ -1827,7 +2214,10 @@ class PairwiseAOAIReader:
         ]
 
         records_by_id = {
-            chunk_ids[index]: records[index] for index in selected_indices
+            chunk_ids[index]: _record_with_prompt_visible_text(
+                records[index], rendered_by_index[index]
+            )
+            for index in selected_indices
         }
         omitted_ids = [
             chunk_id
@@ -1925,7 +2315,10 @@ class PairwiseAOAIReader:
             )
         selected_set = set(selected_indices)
         records_by_id = {
-            chunk_ids[index]: records[index] for index in selected_indices
+            chunk_ids[index]: _record_with_prompt_visible_text(
+                records[index], rendered_by_index[index]
+            )
+            for index in selected_indices
         }
         omitted_ids = [
             chunk_id
@@ -1988,7 +2381,12 @@ class PairwiseAOAIReader:
             "total_chunk_count": context["total_chunk_count"],
             "omitted_chunk_count": omitted_chunk_count,
         }
-        return render_judgment_prompt(
+        renderer = (
+            render_selected_evidence_prompt
+            if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            else render_judgment_prompt
+        )
+        return renderer(
             query=query,
             query_payload=_production_query_payload(query),
             candidate_payload=_candidate_payload(candidate),
@@ -1996,6 +2394,456 @@ class PairwiseAOAIReader:
             paper_text=context["text"],
             image_legend=image_legend,
         )
+
+    def _parse_selected_evidence(
+        self,
+        *,
+        query: Query,
+        candidate: CandidatePaper,
+        payload: dict[str, Any],
+        allowed_records: dict[str, Record],
+        attached_image_paths: Iterable[str] | None,
+    ) -> dict[str, Any]:
+        """Validate atomic source facts for one externally selected paper."""
+
+        if set(payload) != {"evidence_facts"}:
+            raise ReadingResponseError(
+                f"{query.query_id}/{candidate.paper_id}: fixed-selected extraction "
+                "must return exactly the evidence_facts field"
+            )
+        raw_facts = payload["evidence_facts"]
+        if not isinstance(raw_facts, list):
+            raise ReadingResponseError("evidence_facts must be a list")
+        if len(raw_facts) > 64:
+            raise ReadingResponseError("evidence_facts must contain at most 64 items")
+
+        attached_images = {
+            str(Path(path).resolve()) for path in (attached_image_paths or [])
+        }
+        extracted_facts: list[dict[str, str]] = []
+        dropped_evidence_facts: list[dict[str, Any]] = []
+        seen_facts: set[tuple[str, str, str, str]] = set()
+        evidence_chunk_ids: list[str] = []
+        has_attached_visual_fact = False
+        for index, raw_fact in enumerate(raw_facts):
+            if not isinstance(raw_fact, dict) or set(raw_fact) != {
+                "chunk_id",
+                "purpose",
+                "fact",
+                "source_excerpt",
+            }:
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] must contain exactly chunk_id, "
+                    "purpose, fact, and source_excerpt"
+                )
+            chunk_id = str(raw_fact.get("chunk_id") or "").strip()
+            purpose = str(raw_fact.get("purpose") or "").strip()
+            fact = str(raw_fact.get("fact") or "").strip()
+            source_excerpt = str(raw_fact.get("source_excerpt") or "").strip()
+            if not chunk_id or not fact:
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] requires non-empty chunk_id and fact"
+                )
+            if purpose not in _SELECTED_EVIDENCE_PURPOSES:
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] has invalid purpose {purpose!r}"
+                )
+            if len(fact) > 1_000 or len(source_excerpt) > 2_000:
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] exceeds the fact/excerpt length limit"
+                )
+            record = allowed_records.get(chunk_id)
+            if record is None:
+                raise JudgmentEvidenceChunkError(
+                    f"{query.query_id}/{candidate.paper_id}: model invented or "
+                    f"cross-cited chunk_id {chunk_id!r}"
+                )
+            if str(record.get("paper_id") or "") != candidate.paper_id:
+                raise JudgmentEvidenceChunkError(
+                    f"{query.query_id}: chunk {chunk_id!r} belongs to another paper"
+                )
+            image_path = readable_image_path(record)
+            actually_attached_image = bool(
+                image_path
+                and str(Path(image_path).resolve()) in attached_images
+            )
+            if source_excerpt:
+                if not _source_excerpt_is_visible(source_excerpt, record):
+                    # Fail closed at item granularity. Table OCR is especially
+                    # prone to harmless spacing/markup paraphrases even after a
+                    # repair call. An unverified excerpt must never reach Stage
+                    # 2, but one bad item must not abort the other selected
+                    # papers or the whole 55-query run. If every item is
+                    # dropped, fixed-selected answer fallback re-reads original
+                    # query-ranked chunks from this same paper.
+                    dropped_evidence_facts.append(
+                        {
+                            "index": index,
+                            "chunk_id": chunk_id,
+                            "reason": "source_excerpt_not_visible_verbatim",
+                        }
+                    )
+                    continue
+            elif not actually_attached_image:
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] may omit source_excerpt only for "
+                    "an actually attached image"
+                )
+            if purpose == "visual_fact" and not actually_attached_image:
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] visual_fact requires an actually "
+                    "attached source image"
+                )
+            if purpose == "visual_fact" and actually_attached_image:
+                has_attached_visual_fact = True
+            normalized = {
+                "chunk_id": chunk_id,
+                "purpose": purpose,
+                "fact": fact,
+                "source_excerpt": source_excerpt,
+            }
+            fingerprint = (chunk_id, purpose, fact, source_excerpt)
+            if fingerprint in seen_facts:
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] duplicates an earlier atomic fact"
+                )
+            seen_facts.add(fingerprint)
+            extracted_facts.append(normalized)
+            if chunk_id not in evidence_chunk_ids:
+                evidence_chunk_ids.append(chunk_id)
+
+        evidence_contains_figure = any(
+            record_source_type(allowed_records[chunk_id]) == "figure"
+            for chunk_id in evidence_chunk_ids
+        )
+        if (
+            requires_visual_image(query.question)
+            and evidence_contains_figure
+            and not has_attached_visual_fact
+        ):
+            raise ReadingResponseError(
+                "an explicit visual query requires at least one visual_fact from "
+                "an actually attached image"
+            )
+
+        has_evidence = bool(evidence_chunk_ids)
+        evidence = []
+        for chunk_id in evidence_chunk_ids:
+            chunk_facts = [
+                item for item in extracted_facts if item["chunk_id"] == chunk_id
+            ]
+            record = allowed_records[chunk_id]
+            copied_excerpts = _ordered_unique(
+                item["source_excerpt"]
+                for item in chunk_facts
+                if item["source_excerpt"]
+            )
+            evidence.append(
+                {
+                    "chunk_id": chunk_id,
+                    "source_type": record_source_type(record),
+                    "locator": coarse_locator(record),
+                    "purpose": "answer",
+                    # A free-form model fact is a routing hypothesis, not source
+                    # evidence. Use only excerpts whose exact occurrence in the
+                    # cited chunk was validated. Image-only facts have no OCR
+                    # excerpt, so their concise fact remains a focus hint while
+                    # the actually attached pixels stay authoritative.
+                    "quote_or_value": " | ".join(copied_excerpts)
+                    or " | ".join(item["fact"] for item in chunk_facts),
+                }
+            )
+        # A compound query can pair a visual Figure/axis lookup from one paper
+        # with an ordinary reported Table cell from another. Do not turn the
+        # table paper into a visual source merely because the query has one
+        # visual clause. The final query-level validator still requires at
+        # least one visual fact, and an extracted visual_fact remains
+        # paper-specific here.
+        visual_required = has_attached_visual_fact
+        return {
+            "checkpoint_kind": FIXED_SELECTED_CHECKPOINT_KIND,
+            "is_relevant_to_answer": True,
+            "has_usable_answer_evidence": has_evidence,
+            "send_to_answer_agent": has_evidence,
+            "model_is_relevant_to_answer": None,
+            "model_has_usable_answer_evidence": has_evidence,
+            "model_evidence_chunk_ids": list(evidence_chunk_ids),
+            "routing_adjustments": [
+                "paper relevance is fixed by the external selected-paper input",
+                *(
+                    [
+                        f"dropped {len(dropped_evidence_facts)} evidence fact(s) "
+                        "whose source_excerpt was not visible verbatim"
+                    ]
+                    if dropped_evidence_facts
+                    else []
+                ),
+            ],
+            "question_type": judgment_question_type(query),
+            "question_type_version": JUDGMENT_QUESTION_TYPE_VERSION,
+            "paper_role": "answer_source" if has_evidence else "constraint_source",
+            "label": "partial_answer" if has_evidence else "supporting_only",
+            "answerable_from_this_paper": has_evidence,
+            "satisfied_constraints": [],
+            "missing_constraints": [],
+            "blocking_mismatches": [],
+            "visual": {
+                "required": visual_required,
+                "status": (
+                    "inspected"
+                    if visual_required and has_attached_visual_fact
+                    else "missing" if visual_required else "not_needed"
+                ),
+            },
+            "evidence": evidence,
+            "evidence_chunk_ids": evidence_chunk_ids,
+            "extracted_facts": extracted_facts,
+            "dropped_evidence_facts": dropped_evidence_facts,
+            "candidate_answer": {"units": [], "rows": []},
+            "confidence": 0.0,
+            "reason": (
+                "Atomic facts were extracted from an externally selected paper."
+                if has_evidence
+                else "No requested source fact was found in the supplied stored context."
+            ),
+        }
+
+    def _parse_simple_judgment(
+        self,
+        *,
+        query: Query,
+        candidate: CandidatePaper,
+        payload: dict[str, Any],
+        allowed_records: dict[str, Record],
+        attached_image_paths: Iterable[str] | None,
+        resolved_target_owner: bool,
+    ) -> dict[str, Any]:
+        """Validate the three-field Stage-1 contract and derive safe routing."""
+
+        required_keys = {
+            "is_relevant_to_answer",
+            "has_usable_answer_evidence",
+            "evidence_chunk_ids",
+        }
+        if set(payload) != required_keys:
+            missing = sorted(required_keys - set(payload))
+            extra = sorted(set(payload) - required_keys)
+            raise ReadingResponseError(
+                f"{query.query_id}/{candidate.paper_id}: Stage-1 response must "
+                f"contain exactly {sorted(required_keys)}; missing={missing}, "
+                f"extra={extra}"
+            )
+
+        raw_relevant = payload["is_relevant_to_answer"]
+        raw_usable = payload["has_usable_answer_evidence"]
+        if not isinstance(raw_relevant, bool):
+            raise ReadingResponseError("is_relevant_to_answer must be boolean")
+        if not isinstance(raw_usable, bool):
+            raise ReadingResponseError(
+                "has_usable_answer_evidence must be boolean"
+            )
+        effective_relevant = bool(raw_relevant or resolved_target_owner)
+        compound_component_only = bool(
+            raw_relevant
+            and not raw_usable
+            and not resolved_target_owner
+            and _candidate_is_only_a_compound_name_component(
+                query.question, candidate, allowed_records.values()
+            )
+        )
+        if compound_component_only:
+            effective_relevant = False
+        open_ended_paper_list = bool(
+            not resolved_target_owner
+            and re.match(r"(?i)^\s*which\b.+\bpapers?\b", query.question)
+        )
+        if open_ended_paper_list and not raw_usable:
+            effective_relevant = False
+        raw_chunk_ids = payload["evidence_chunk_ids"]
+        if not isinstance(raw_chunk_ids, list) or any(
+            not isinstance(chunk_id, str) or not chunk_id.strip()
+            for chunk_id in raw_chunk_ids
+        ):
+            raise ReadingResponseError(
+                "evidence_chunk_ids must be a list of non-empty strings"
+            )
+        if len(raw_chunk_ids) != len(set(raw_chunk_ids)):
+            raise ReadingResponseError("evidence_chunk_ids must not contain duplicates")
+        if effective_relevant and raw_usable and not raw_chunk_ids:
+            raise ReadingResponseError(
+                "has_usable_answer_evidence=true requires at least one exact "
+                "visible evidence chunk ID"
+            )
+
+        validated_ids: list[str] = []
+        if raw_usable:
+            for chunk_id in raw_chunk_ids:
+                record = allowed_records.get(chunk_id)
+                if record is None:
+                    raise JudgmentEvidenceChunkError(
+                        f"{query.query_id}/{candidate.paper_id}: model invented or "
+                        f"cross-cited chunk_id {chunk_id!r}"
+                    )
+                if str(record.get("paper_id") or "") != candidate.paper_id:
+                    raise JudgmentEvidenceChunkError(
+                        f"{query.query_id}: chunk {chunk_id!r} belongs to another paper"
+                    )
+                validated_ids.append(chunk_id)
+
+        attached_images = {
+            str(Path(path).resolve()) for path in (attached_image_paths or [])
+        }
+        question_type = judgment_question_type(query)
+        explicit_figure_keys = {
+            key
+            for key in _explicit_object_keys(query.question)
+            if key[0] == "figure"
+        }
+        attached_exact_visual_ids = [
+            chunk_id
+            for chunk_id, record in allowed_records.items()
+            if (
+                resolved_target_owner
+                and question_type == "visual"
+                and record_source_type(record) == "figure"
+                and explicit_figure_keys.intersection(
+                    _metadata_figure_object_keys(record)
+                )
+                and (path := readable_image_path(record))
+                and str(Path(path).resolve()) in attached_images
+            )
+        ]
+        deterministic_visual_handoff = bool(attached_exact_visual_ids)
+        if (
+            deterministic_visual_handoff
+            and raw_usable
+            and not set(validated_ids).intersection(attached_exact_visual_ids)
+        ):
+            raise ReadingResponseError(
+                "visual has_usable_answer_evidence=true for a resolved owning "
+                "paper requires the actually attached exact requested Figure "
+                "chunk ID"
+            )
+        candidate_visual_evidence = any(
+            record_source_type(allowed_records[chunk_id]) == "figure"
+            for chunk_id in validated_ids
+        )
+        if (
+            effective_relevant
+            and raw_usable
+            and question_type == "visual"
+            and candidate_visual_evidence
+        ):
+            cited_attached_image = any(
+                (path := readable_image_path(allowed_records[chunk_id]))
+                and str(Path(path).resolve()) in attached_images
+                for chunk_id in validated_ids
+            )
+            if not cited_attached_image:
+                raise ReadingResponseError(
+                    "visual has_usable_answer_evidence=true requires a cited chunk "
+                    "mapped to an actually attached image"
+                )
+
+        if deterministic_visual_handoff and not raw_usable:
+            validated_ids = attached_exact_visual_ids
+        send_to_answer_agent = bool(
+            effective_relevant
+            and (raw_usable or deterministic_visual_handoff)
+            and validated_ids
+        )
+        effective_ids = validated_ids if send_to_answer_agent else []
+        evidence = [
+            {
+                "chunk_id": chunk_id,
+                "source_type": record_source_type(allowed_records[chunk_id]),
+                "locator": coarse_locator(allowed_records[chunk_id]),
+                "purpose": "answer",
+                "quote_or_value": "",
+            }
+            for chunk_id in effective_ids
+        ]
+        routing_adjustments: list[str] = []
+        if open_ended_paper_list and raw_relevant and not raw_usable:
+            routing_adjustments.append(
+                "relevance was set false because an open-ended paper list "
+                "requires usable evidence that this candidate satisfies every "
+                "inclusion condition"
+            )
+        if compound_component_only:
+            routing_adjustments.append(
+                "relevance was set false because the candidate title occurred "
+                "only as a base/component inside a longer requested compound "
+                "method name, and the supplied context did not report that full name"
+            )
+        if resolved_target_owner and not raw_relevant:
+            routing_adjustments.append(
+                "relevance was set true because canonical metadata resolved this "
+                "paper as the requested owner"
+            )
+        if raw_usable and not effective_relevant:
+            routing_adjustments.append(
+                "usable evidence was suppressed because the paper was not relevant"
+            )
+        if not raw_usable and raw_chunk_ids:
+            routing_adjustments.append(
+                "evidence IDs were cleared because usable evidence was false"
+            )
+        if deterministic_visual_handoff and not raw_usable:
+            routing_adjustments.append(
+                "usable visual evidence was set true because the uniquely "
+                "resolved owner supplied an actually attached image mapped to "
+                "the exact numbered object requested by the query"
+            )
+
+        if effective_relevant:
+            paper_role = (
+                "target_owner"
+                if resolved_target_owner
+                else "answer_source" if send_to_answer_agent else "constraint_source"
+            )
+            label = "partial_answer" if send_to_answer_agent else "supporting_only"
+        else:
+            paper_role = "topic_only"
+            label = "irrelevant"
+        # Preserve the v30 Stage-1 checkpoint contract. Candidate-local visual
+        # enforcement is derived at the answer boundary from the cited source
+        # type, where a compound query's ordinary Table paper can be separated
+        # safely from its Figure-reading paper without invalidating completed
+        # pairwise judgments.
+        visual_required = bool(
+            effective_relevant
+            and send_to_answer_agent
+            and question_type == "visual"
+        )
+        visual_status = (
+            "inspected"
+            if visual_required and send_to_answer_agent
+            else "missing" if visual_required else "not_needed"
+        )
+        return {
+            "is_relevant_to_answer": effective_relevant,
+            "has_usable_answer_evidence": send_to_answer_agent,
+            "send_to_answer_agent": send_to_answer_agent,
+            "model_is_relevant_to_answer": raw_relevant,
+            "model_has_usable_answer_evidence": raw_usable,
+            "model_evidence_chunk_ids": list(raw_chunk_ids),
+            "routing_adjustments": routing_adjustments,
+            "question_type": question_type,
+            "question_type_version": JUDGMENT_QUESTION_TYPE_VERSION,
+            "paper_role": paper_role,
+            "label": label,
+            "answerable_from_this_paper": send_to_answer_agent,
+            "satisfied_constraints": [],
+            "missing_constraints": [],
+            "blocking_mismatches": [],
+            "visual": {"required": visual_required, "status": visual_status},
+            "evidence": evidence,
+            "evidence_chunk_ids": effective_ids,
+            "candidate_answer": {"units": [], "rows": []},
+            "confidence": 0.0,
+            "reason": "Stage-1 routing was derived from the validated three-field response.",
+        }
 
     def _parse_judgment(
         self,
@@ -2006,12 +2854,41 @@ class PairwiseAOAIReader:
         allowed_records: dict[str, Record],
         attached_image_paths: Iterable[str] | None = None,
         resolved_target_owner: bool = False,
+        allow_legacy_schema: bool = True,
     ) -> dict[str, Any]:
         payload = parse_json_object(payload_text)
         if not isinstance(payload, dict):
             raise ReadingResponseError(
                 f"{query.query_id}/{candidate.paper_id}: "
                 "judgment response is not a JSON object"
+            )
+        if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY:
+            return self._parse_selected_evidence(
+                query=query,
+                candidate=candidate,
+                payload=payload,
+                allowed_records=allowed_records,
+                attached_image_paths=attached_image_paths,
+            )
+        simple_keys = {
+            "is_relevant_to_answer",
+            "has_usable_answer_evidence",
+            "evidence_chunk_ids",
+        }
+        if simple_keys.intersection(payload):
+            return self._parse_simple_judgment(
+                query=query,
+                candidate=candidate,
+                payload=payload,
+                allowed_records=allowed_records,
+                attached_image_paths=attached_image_paths,
+                resolved_target_owner=resolved_target_owner,
+            )
+        if not allow_legacy_schema:
+            raise ReadingResponseError(
+                f"{query.query_id}/{candidate.paper_id}: current Stage-1 response "
+                "must use exactly is_relevant_to_answer, "
+                "has_usable_answer_evidence, and evidence_chunk_ids"
             )
         label = str(payload.get("label") or "")
         if label not in JUDGMENT_LABELS:
@@ -2329,70 +3206,45 @@ class PairwiseAOAIReader:
         allowed_chunk_ids: list[str],
         eligible_chunk_ids: list[str],
     ) -> str:
+        if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY:
+            return (
+                original_prompt
+                + "\n\nREPAIR\n\nYour previous fixed-selected evidence "
+                "extraction was rejected by the deterministic validator. "
+                "Correct it once. Return exactly one JSON object whose only "
+                "field is evidence_facts. Every item must contain exactly "
+                "chunk_id, purpose, fact, and source_excerpt. Copy chunk IDs "
+                "from the allowed list. Copy source_excerpt from the cited "
+                "chunk text; use an empty excerpt only for an actually attached "
+                "image. Do not decide paper relevance and do not answer the "
+                "whole query. If no requested fact is visible, return "
+                '{"evidence_facts": []}.\n'
+                f"Validation error: {error}\n"
+                f"Allowed selected-context chunk_ids: "
+                f"{_json_dumps(allowed_chunk_ids)}\n"
+                f"Submission-eligible chunk_ids: "
+                f"{_json_dumps(eligible_chunk_ids)}\n"
+                "<rejected_response>\n"
+                + html.escape(rejected_response, quote=False)
+                + "\n</rejected_response>\nReturn only the corrected one-field JSON."
+            )
         return (
             original_prompt
-            + "\n\nYour previous stage-1 JSON response was rejected by the deterministic "
-            "validator. Correct the JSON once. Preserve the semantic judgment only when "
-            "it is consistent with the validation error and allowed evidence. Every "
-            "evidence chunk_id must be "
-            "copied exactly from the allowed list below; never invent or approximate an ID. "
-            "A direct_answer or partial_answer must cite at least one answer-purpose "
-            "chunk from the submission-eligible list. Prefer an eligible attached "
-            "figure over an uncaptioned OCR table from the same owner. Emit each "
-            "chunk_id exactly once: if one chunk supports both a constraint and "
-            "the answer, keep only one entry with purpose=answer and the short "
-            "answer-bearing quote. For multiple choice, direct_answer requires "
-            "candidate_answer units whose matched_option_labels identify exactly "
-            "one released option label. Do not erase valid direct evidence merely "
-            "because a compound option cannot yet be identified: when this is the "
-            "correct owning/answer-source paper and it directly supplies at least "
-            "one requested component, downgrade to partial_answer, set "
-            "answerable_from_this_paper=true, retain answer-purpose evidence and "
-            "non-empty candidate_answer units, and use matched_option_labels=[] "
-            "when the supplied components do not identify exactly one complete "
-            "option. In a multi-paper or multi-operand query, one directly reported "
-            "requested operand is partial_answer even if another paper's operand is "
-            "missing; mention_only is only for a name/topic mention with no requested "
-            "operand. Keep an authoritative wrong-owner candidate irrelevant rather "
-            "than applying this partial-answer fallback. Parse coordinated clauses "
-            "independently: a dataset modifier inside the first clause does not "
-            "automatically constrain the next clause, and an unqualified best FID "
-            "uses the minimum across all otherwise eligible visible rows. "
-            "For an aggregate citation count, return exactly one candidate_answer "
-            "unit with an integer value and counted_items. Each counted item must be "
-            "a distinct, answer-chunk-supported '[N]', 'FirstAuthor et al. (YYYY)', "
-            "or single-author 'FirstAuthor (YYYY)' identity; never count a method acronym, "
-            "the current paper/method name, section name, concept, bare year, DOI, "
-            "or URL. Set value=len(counted_items), and a matched bare-numeric option "
-            "must equal that value. If the query filters by author, verify that "
-            "author inside every counted bibliography entry, even when its compact "
-            "identity uses another first-author surname. Do not apply counted_items to a last-reference "
-            "index lookup. "
-            "For an explicit visual subfigure/subplot count, discard the previous "
-            "count and enumerate every independently bounded coordinate-axes region "
-            "in counted_items. Give each one a distinct spatial identifier such as "
-            "'top-row col-1 axes' or '(a)-left axes'; a row, model family, group "
-            "heading, or bare '(a)' label is not itself a subfigure. Set the unit "
-            "value to len(counted_items), and match only a bare-numeric option with "
-            "that same value. Re-read the actually attached image before repairing. "
-            "Preserve the visual invariant exactly: required=false means "
-            "status=not_needed; required=true means status is inspected, missing, "
-            "or unreadable and can never be not_needed. status=inspected must cite "
-            "an actually attached image chunk as evidence. If required visual "
-            "evidence is missing or unreadable, do not return direct_answer or "
-            "partial_answer. visual.required is candidate-local, not query-level: "
-            "a figure mentioned in the query does not require visual inspection of "
-            "an authoritative wrong-owner distractor. For distractor/irrelevant "
-            "with an owner blocking mismatch and empty evidence, return "
-            "required=false and status=not_needed. "
-            "If no allowed chunk supports a relevant label, return the appropriate "
-            "non-relevant label with empty evidence instead.\n"
+            + "\n\nREPAIR\n\nYour previous Stage-1 response was rejected by "
+            "the deterministic validator. Correct it once. Return exactly one JSON "
+            "object with exactly these fields: is_relevant_to_answer (boolean), "
+            "has_usable_answer_evidence (boolean), and evidence_chunk_ids (array "
+            "of exact strings). Do not add an explanation or any other field. "
+            "When usable evidence is true, copy the smallest sufficient set of "
+            "chunk IDs exactly from the allowed list. When usable evidence is "
+            "false, return an empty array. For a visual question, usable evidence "
+            "must cite a chunk mapped to an actually attached image.\n"
             f"Validation error: {error}\n"
             f"Allowed selected-context chunk_ids: {_json_dumps(allowed_chunk_ids)}\n"
             f"Submission-eligible chunk_ids: {_json_dumps(eligible_chunk_ids)}\n"
             "<rejected_response>\n"
-            + rejected_response
-            + "\n</rejected_response>\nReturn one corrected JSON object only."
+            + html.escape(rejected_response, quote=False)
+            + "\n</rejected_response>\nReturn only the corrected three-field JSON."
         )
 
     # ---- Stage 2: accepted evidence -> answer -----------------------------
@@ -2405,9 +3257,17 @@ class PairwiseAOAIReader:
             {
                 key: judgment.get(key)
                 for key in (
+                    "checkpoint_kind",
                     "paper_id",
                     "rank",
                     "cache_key",
+                    "question_type",
+                    "question_type_version",
+                    "is_relevant_to_answer",
+                    "has_usable_answer_evidence",
+                    "send_to_answer_agent",
+                    "evidence_chunk_ids",
+                    "extracted_facts",
                     "label",
                     "relevant",
                     "satisfied_constraints",
@@ -2427,9 +3287,22 @@ class PairwiseAOAIReader:
         ]
         return _json_sha256(
             {
-                "prompt_version": ANSWER_PROMPT_VERSION,
+                "prompt_version": self.answer_prompt_version,
+                "paper_set_policy": self.paper_set_policy,
+                "fixed_selected_answer_fallback_version": (
+                    FIXED_SELECTED_ANSWER_FALLBACK_VERSION
+                    if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+                    else None
+                ),
                 "answer_derivation_version": ANSWER_DERIVATION_VERSION,
+                "citation_locator_version": CITATION_LOCATOR_VERSION,
+                "split_caption_table_locator_version": (
+                    SPLIT_CAPTION_TABLE_LOCATOR_VERSION
+                ),
                 "image_handoff_version": ANSWER_IMAGE_HANDOFF_VERSION,
+                "submission_paper_selection_version": (
+                    SUBMISSION_PAPER_SELECTION_VERSION
+                ),
                 "query_requirements_version": QUERY_REQUIREMENTS_VERSION,
                 "few_shot_examples": example_manifest(query)["answer"],
                 "query": _production_query_payload(query),
@@ -2448,6 +3321,134 @@ class PairwiseAOAIReader:
             }
         )
 
+    def _fixed_selected_answer_pool(
+        self,
+        query: Query,
+        candidates: list[CandidatePaper],
+        judgments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Keep every fixed paper readable even when extraction returned empty.
+
+        The model's empty extraction is preserved in the checkpoint. For the
+        answer call only, Python supplies up to three query-ranked original
+        chunks from that same externally selected paper. This cannot change the
+        submitted paper set and does not assert that a fallback chunk is answer
+        evidence; Stage 2 must still ground every submitted fact and locator.
+        """
+
+        by_paper: dict[str, dict[str, Any]] = {}
+        for judgment in judgments:
+            paper_id = str(judgment.get("paper_id") or "")
+            if not paper_id or paper_id in by_paper:
+                raise ValueError(
+                    f"{query.query_id}: fixed-selected judgments must contain "
+                    "each selected paper exactly once"
+                )
+            by_paper[paper_id] = judgment
+        candidate_ids = [candidate.paper_id for candidate in candidates]
+        if set(by_paper) != set(candidate_ids) or len(by_paper) != len(candidate_ids):
+            raise ValueError(
+                f"{query.query_id}: fixed-selected judgments do not exactly match "
+                "the externally selected paper set"
+            )
+
+        output: list[dict[str, Any]] = []
+        for candidate in candidates:
+            judgment = by_paper[candidate.paper_id]
+            if (
+                judgment.get("is_relevant_to_answer") is True
+                and judgment.get("has_usable_answer_evidence") is True
+                and judgment.get("send_to_answer_agent") is True
+                and judgment.get("evidence_chunk_ids")
+            ):
+                output.append(judgment)
+                continue
+
+            records = recover_split_caption_table_records(
+                self.chunk_store.load_paper(candidate.paper_id)
+            )
+            if not records:
+                raise FileNotFoundError(
+                    f"{query.query_id}: selected paper is absent from MinerU "
+                    f"corpus: {candidate.paper_id}"
+                )
+            scores, reasons = _paper_record_scores(
+                records,
+                _query_selection_focus(query),
+                source_question=query.question,
+            )
+            image_indices = _ranked_image_record_indices(
+                records,
+                scores=scores,
+                reasons=reasons,
+                limit=min(3, self.max_answer_images),
+                question=query.question,
+            )
+            explicit_indices = [
+                index
+                for index, item_reasons in enumerate(reasons)
+                if "explicit_object_reference" in item_reasons
+            ]
+            eligible_indices = sorted(
+                (
+                    index
+                    for index, record in enumerate(records)
+                    if submission_evidence_eligible(record)
+                ),
+                key=lambda index: (-scores[index], index),
+            )
+            ranked_indices = sorted(
+                range(len(records)), key=lambda index: (-scores[index], index)
+            )
+            selected_indices = _ordered_unique_ints(
+                [
+                    *image_indices,
+                    *explicit_indices,
+                    *eligible_indices,
+                    *ranked_indices,
+                ]
+            )[:3]
+            if not selected_indices:
+                raise ReadingResponseError(
+                    f"{query.query_id}/{candidate.paper_id}: no deterministic "
+                    "fallback chunk is available"
+                )
+            evidence = [
+                {
+                    "chunk_id": str(records[index]["chunk_id"]),
+                    "source_type": record_source_type(records[index]),
+                    "locator": coarse_locator(records[index]),
+                    "purpose": "answer",
+                    "quote_or_value": "",
+                }
+                for index in selected_indices
+            ]
+            fallback = dict(judgment)
+            fallback.update(
+                {
+                    "has_usable_answer_evidence": True,
+                    "send_to_answer_agent": True,
+                    "evidence_chunk_ids": [
+                        item["chunk_id"] for item in evidence
+                    ],
+                    "evidence": evidence,
+                    "paper_role": "answer_source",
+                    "label": "partial_answer",
+                    "answerable_from_this_paper": True,
+                    "fixed_selected_answer_fallback_version": (
+                        FIXED_SELECTED_ANSWER_FALLBACK_VERSION
+                    ),
+                    "fixed_selected_extraction_was_empty": True,
+                    "routing_adjustments": [
+                        *list(judgment.get("routing_adjustments") or []),
+                        "deterministic query-ranked original context supplied "
+                        "to Stage 2 after an empty extraction",
+                    ],
+                }
+            )
+            output.append(fallback)
+        return output
+
     def answer_from_judgments(
         self,
         query: Query,
@@ -2457,15 +3458,51 @@ class PairwiseAOAIReader:
         attempt_callback: Callable[[dict[str, Any]], None] | None = None,
         provider_attempt_callback: ProviderAttemptCallback | None = None,
     ) -> tuple[Prediction, dict[str, Any]]:
-        """Answer one query from stage-1 accepted original chunks only."""
+        """Answer one query from validated Stage-1 handoff chunks only."""
 
         require_production_query(query)
-        candidate_by_id = {item.paper_id: item for item in candidates}
-        relevant = _answer_review_pool(judgments)
+        candidate_list = list(candidates)
+        candidate_by_id = {item.paper_id: item for item in candidate_list}
+        fixed_selected = self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+        relevant = (
+            self._fixed_selected_answer_pool(query, candidate_list, judgments)
+            if fixed_selected
+            else _answer_review_pool(judgments)
+        )
+        uses_simple_stage1 = any(
+            "is_relevant_to_answer" in item for item in judgments
+        )
+        stage1_relevant_paper_ids = (
+            _ordered_unique(
+                str(item.get("paper_id") or "")
+                for item in sorted(
+                    judgments, key=lambda value: int(value.get("rank") or 0)
+                )
+                if item.get("is_relevant_to_answer") is True
+                and str(item.get("paper_id") or "")
+            )
+            if uses_simple_stage1 and not fixed_selected
+            else None
+        )
+        submission_paper_ids = (
+            [item.paper_id for item in candidate_list]
+            if fixed_selected
+            else None
+        )
+        if stage1_relevant_paper_ids is not None:
+            unknown_relevant_ids = [
+                paper_id
+                for paper_id in stage1_relevant_paper_ids
+                if paper_id not in candidate_by_id
+            ]
+            if unknown_relevant_ids:
+                raise ValueError(
+                    f"{query.query_id}: Stage-1 relevance references non-candidate "
+                    f"papers: {unknown_relevant_ids}"
+                )
         if not relevant:
             raise NoRelevantCandidatesError(
-                f"{query.query_id}: stage 1 accepted no candidate paper and "
-                "identified no safe target-owner recheck"
+                f"{query.query_id}: Stage 1 produced no validated answer handoff"
             )
         if any(str(item.get("paper_id") or "") not in candidate_by_id for item in relevant):
             raise ValueError(f"{query.query_id}: judgment references a non-candidate paper")
@@ -2478,7 +3515,18 @@ class PairwiseAOAIReader:
             for item in relevant
             if isinstance(item.get("visual"), dict)
             and item["visual"].get("required") is True
+            and any(
+                str(evidence.get("source_type") or "") == "figure"
+                for evidence in item.get("evidence") or []
+                if isinstance(evidence, dict)
+            )
         }
+        required_singleton_eligibility_chunk_ids = (
+            _required_singleton_eligibility_chunk_ids(query, relevant)
+            if fixed_selected
+            and has_explicit_singleton_eligibility_filter(query.question)
+            else set()
+        )
         completion = self._complete(
             prompt,
             context["image_paths"],
@@ -2495,6 +3543,12 @@ class PairwiseAOAIReader:
                     payload_text=completion["text"],
                     relevant_paper_ids=relevant_paper_ids,
                     context_records=context["records_by_id"],
+                    canonical_paper_titles={
+                        item.paper_id: item.title for item in candidate_list
+                    },
+                    required_singleton_eligibility_chunk_ids=(
+                        required_singleton_eligibility_chunk_ids
+                    ),
                     attached_image_paths=_completion_attached_paths(
                         completion, context["image_paths"]
                     ),
@@ -2526,6 +3580,7 @@ class PairwiseAOAIReader:
                 if repair_attempt >= MAX_ANSWER_REPAIR_ATTEMPTS:
                     raise
                 repair_prompt = self._answer_locator_repair_prompt(
+                    query=query,
                     original_prompt=prompt,
                     rejected_response=completion["text"],
                     error=exc,
@@ -2570,29 +3625,60 @@ class PairwiseAOAIReader:
             break
         if payload is None:
             raise AssertionError("validated answer payload was not produced")
+        actual_answer_image_paths = _completion_attached_paths(
+            completion, context["image_paths"]
+        )
+        actual_answer_image_path_set = set(actual_answer_image_paths)
+        actual_answer_evidence_image_chunk_ids = [
+            chunk_id
+            for chunk_id in context["answer_evidence_image_chunk_ids"]
+            if (
+                (record := context["records_by_id"].get(chunk_id)) is not None
+                and readable_image_path(record) in actual_answer_image_path_set
+            )
+        ]
         prediction = self._build_prediction(
             query=query,
             payload=payload,
             context_records=context["records_by_id"],
-            candidate_ids=[item.paper_id for item in candidates],
+            candidate_ids=[item.paper_id for item in candidate_list],
             relevant=relevant,
-            image_count=len(_completion_attached_paths(completion, context["image_paths"])),
+            stage1_relevant_paper_ids=stage1_relevant_paper_ids,
+            submission_paper_ids=submission_paper_ids,
+            image_count=len(actual_answer_image_paths),
         )
+        effective_submission_paper_ids = [
+            str(item["paper_id"]) for item in prediction.gold_papers
+        ]
         answer_record = {
             "query_id": query.query_id,
             "status": "complete",
-            "prompt_version": ANSWER_PROMPT_VERSION,
+            "prompt_version": self.answer_prompt_version,
+            "paper_set_policy": self.paper_set_policy,
+            "answer_derivation_version": ANSWER_DERIVATION_VERSION,
             "few_shot_example_ids": example_manifest(query)["answer"],
             "cache_key": self.answer_cache_key(query, judgments),
             "accepted_paper_ids": [str(item["paper_id"]) for item in relevant],
+            "stage1_relevant_paper_ids": stage1_relevant_paper_ids,
+            "submission_paper_ids": effective_submission_paper_ids,
             "context_chunk_ids": list(context["records_by_id"]),
-            "image_paths": list(context["image_paths"]),
+            "stage1_handoff_chunk_ids": list(
+                context["stage1_handoff_chunk_ids"]
+            ),
+            "python_supplemental_chunk_ids": list(
+                context["python_supplemental_chunk_ids"]
+            ),
+            "fixed_selected_table_supplement_chunk_ids": list(
+                context["fixed_selected_table_supplement_chunk_ids"]
+            ),
+            "requested_image_paths": list(context["image_paths"]),
+            "image_paths": actual_answer_image_paths,
             "image_handoff_version": ANSWER_IMAGE_HANDOFF_VERSION,
             "answer_evidence_image_chunk_ids": list(
                 context["answer_evidence_image_chunk_ids"]
             ),
-            "attached_answer_evidence_image_chunk_ids": list(
-                context["attached_answer_evidence_image_chunk_ids"]
+            "attached_answer_evidence_image_chunk_ids": (
+                actual_answer_evidence_image_chunk_ids
             ),
             "parsed_response": payload,
             "semantic_multiple_choice": payload.get("answer", {}).get(
@@ -2627,6 +3713,46 @@ class PairwiseAOAIReader:
         seen_neighbours: set[str] = set()
         evidence_quotes: dict[str, list[str]] = {}
         answer_image_records_by_paper: dict[str, list[Record]] = {}
+        requested_handoff_chunk_ids: list[str] = []
+        fixed_table_supplements_by_paper: dict[str, list[Record]] = {}
+        fixed_multi_paper_table = (
+            self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            and "table" in query.answer_types
+            and len(relevant) > 1
+        )
+        option_text = " ".join(str(value) for value in (query.options or {}).values())
+        compound_answer = bool(
+            (
+                "multiple_choice" in query.answer_types
+                and re.search(r"(?i)\b(?:and|respectively)\b|[;,/]", option_text)
+                and re.search(
+                    r"(?i)\b(?:and|respectively|across|both|two|three)\b|;",
+                    query.question,
+                )
+            )
+            or (
+                "table" in query.answer_types
+                and sum(
+                    column.get("is_row_key") is not True
+                    for column in query.table_schema or []
+                    if isinstance(column, dict)
+                )
+                >= 2
+            )
+            or (
+                "freeform" in query.answer_types
+                and re.search(
+                    r"(?i)\b(?:respectively|both)\b|"
+                    r"\b(?:and|versus|vs\.?)\b[^?]{0,120}"
+                    r"\b(?:what|how|which)\b",
+                    query.question,
+                )
+            )
+        )
+        mixed_visual_text_supplement = (
+            requires_visual_image(query.question) and compound_answer
+        )
+        mixed_visual_text_focus = _query_selection_focus(query)
 
         def add_neighbour(record: Record) -> None:
             chunk_id = str(record.get("chunk_id") or "")
@@ -2640,12 +3766,53 @@ class PairwiseAOAIReader:
 
         for judgment in relevant:
             paper_id = str(judgment["paper_id"])
-            records = self.chunk_store.load_paper(paper_id)
+            records = recover_split_caption_table_records(
+                self.chunk_store.load_paper(paper_id)
+            )
             by_id = {str(item.get("chunk_id") or ""): item for item in records}
             positions = {str(item.get("chunk_id") or ""): i for i, item in enumerate(records)}
             cited_records: list[Record] = []
-            for evidence in judgment.get("evidence") or []:
+
+            # An ordinal reference request is deterministic bibliography
+            # addressing: "third reference" means the entry labeled [3], not
+            # the third citation marker in body-reading order.  Make the exact
+            # [N] entry available even when Stage 1 followed body citation order
+            # and handed off a different reference chunk.  This supplement is
+            # separately audited and does not mutate the durable Stage-1 result.
+            for entry in requested_ordinal_bibliography_entries(
+                query.question, records
+            ):
+                record = by_id.get(entry.chunk_id)
+                if record is None:
+                    continue
+                evidence_quotes.setdefault(entry.chunk_id, []).append(entry.text)
+                if entry.chunk_id not in seen_primary:
+                    seen_primary.add(entry.chunk_id)
+                    primary.append((record, entry.text))
+
+            if judgment.get("checkpoint_kind") == FIXED_SELECTED_CHECKPOINT_KIND:
+                # Preserve the extractor's atomic fact hints and exact copied
+                # excerpts. Original chunks remain authoritative in Stage 2.
+                handoff_evidence = list(judgment.get("evidence") or [])
+            elif "send_to_answer_agent" in judgment:
+                # For the current schema, the validated IDs are the sole handoff
+                # authority. Rebuild the internal evidence objects so a stale or
+                # hand-edited compatibility ``evidence`` array cannot change the
+                # chunks Stage 2 receives.
+                handoff_evidence = [
+                    {
+                        "chunk_id": chunk_id,
+                        "purpose": "answer",
+                        "quote_or_value": "",
+                    }
+                    for chunk_id in judgment.get("evidence_chunk_ids") or []
+                ]
+            else:
+                handoff_evidence = list(judgment.get("evidence") or [])
+            for evidence in handoff_evidence:
                 chunk_id = str(evidence.get("chunk_id") or "")
+                if chunk_id and chunk_id not in requested_handoff_chunk_ids:
+                    requested_handoff_chunk_ids.append(chunk_id)
                 record = by_id.get(chunk_id)
                 if record is None:
                     raise ValueError(
@@ -2697,6 +3864,37 @@ class PairwiseAOAIReader:
                         ):
                             add_neighbour(sibling)
 
+            # A compound visual question can name a Figure as the identity
+            # anchor while asking for a definition or categorical value that
+            # is stated only in prose.  Keep the validated visual handoff and
+            # add a small, deterministic same-paper reading companion selected
+            # solely from the released query and options.  These records remain
+            # ordinary context: Stage 2 must still cite and bind a companion if
+            # it uses one, and none is promoted to evidence automatically.
+            if mixed_visual_text_supplement and any(
+                readable_image_path(record)
+                and record_source_type(record) in {"figure", "table"}
+                for record in cited_records
+            ):
+                scores, _ = _paper_record_scores(
+                    records,
+                    mixed_visual_text_focus,
+                    source_question=query.question,
+                )
+                ranked_text_indices = sorted(
+                    (
+                        index
+                        for index, record in enumerate(records)
+                        if str(record.get("chunk_type") or "") == "text_span"
+                        and record_source_type(record) == "text_span"
+                    ),
+                    key=lambda index: (-scores[index], index),
+                )
+                for index in ranked_text_indices[
+                    :MIXED_VISUAL_TEXT_SUPPLEMENTS_PER_PAPER
+                ]:
+                    add_neighbour(records[index])
+
             # Stage 1 can correctly read an uncaptioned OCR table while that
             # chunk is unusable in the official submission.  Preserve the read
             # context, but also expose a small deterministic set of eligible
@@ -2744,6 +3942,56 @@ class PairwiseAOAIReader:
                 )
                 for index in rescue_indices:
                     add_neighbour(records[index])
+
+            # A fixed multi-paper table treats every selected paper as a
+            # required source.  Extraction can still return only a citation or
+            # prose constraint and miss the paper's answer-bearing table (for
+            # example when OCR makes the table harder to summarize).  Supply a
+            # small, deterministic, query-ranked set of eligible table chunks
+            # from that same paper.  These are reading context, not automatic
+            # evidence: Stage 2 must cite and bind any chunk it actually uses.
+            if fixed_multi_paper_table and not any(
+                submission_evidence_eligible(record)
+                and record_source_type(record) == "table"
+                for record in cited_records
+            ):
+                supplement_focus = " ".join(
+                    [
+                        _query_selection_focus(query),
+                        *(
+                            str(fact.get("source_excerpt") or fact.get("fact") or "")
+                            for fact in judgment.get("extracted_facts") or []
+                            if isinstance(fact, dict)
+                        ),
+                    ]
+                )
+                scores, _ = _paper_record_scores(
+                    records,
+                    supplement_focus,
+                    source_question=query.question,
+                )
+                ranked_tables = sorted(
+                    (
+                        index
+                        for index, record in enumerate(records)
+                        if submission_evidence_eligible(record)
+                        and record_source_type(record) == "table"
+                    ),
+                    key=lambda index: (-scores[index], index),
+                )
+                for index in ranked_tables[
+                    :FIXED_SELECTED_TABLE_SUPPLEMENTS_PER_PAPER
+                ]:
+                    record = records[index]
+                    chunk_id = str(record.get("chunk_id") or "")
+                    if not chunk_id:
+                        continue
+                    fixed_table_supplements_by_paper.setdefault(
+                        paper_id, []
+                    ).append(record)
+                    if chunk_id not in seen_primary:
+                        seen_primary.add(chunk_id)
+                        primary.append((record, ""))
 
         # Round-robin by paper. A rank-1 paper with many citations must not
         # consume the cap before rank-44 receives even one evidence chunk.
@@ -2824,6 +4072,9 @@ class PairwiseAOAIReader:
         visual_image_records = prioritized_image_records(
             visual_image_records_by_paper
         )
+        fixed_table_supplement_records = prioritized_image_records(
+            fixed_table_supplements_by_paper
+        )
         if len(by_paper) > self.max_answer_papers:
             raise ReadingResponseError(
                 f"{query.query_id}: {len(by_paper)} accepted papers exceed "
@@ -2859,6 +4110,16 @@ class PairwiseAOAIReader:
             primary_chunk_ids.add(chunk_id)
             quotes = evidence_quotes.get(chunk_id) or [""]
             primary.append((record, quotes[0]))
+        # Unlike generic neighbours, fixed-table supplements must remain
+        # visible even when the ordinary context-evidence cap is saturated.
+        # Fair paper rotation prevents a high-ranked paper from consuming this
+        # small supplemental budget before later authoritative papers.
+        for record in fixed_table_supplement_records:
+            chunk_id = str(record.get("chunk_id") or "")
+            if not chunk_id or chunk_id in primary_chunk_ids:
+                continue
+            primary_chunk_ids.add(chunk_id)
+            primary.append((record, ""))
         for record, quote in round_robin:
             chunk_id = str(record.get("chunk_id") or "")
             if not chunk_id or chunk_id in primary_chunk_ids:
@@ -2944,6 +4205,7 @@ class PairwiseAOAIReader:
         # therefore consume the finite AOAI image budget first.  Broader visual
         # evidence and neighbouring images are supplemental.
         add_images(answer_image_records)
+        add_images(fixed_table_supplement_records)
         add_images(visual_image_records)
         add_images(record for record, _ in neighbours)
         attached_image_paths = set(image_paths)
@@ -2960,10 +4222,31 @@ class PairwiseAOAIReader:
                 and readable_image_path(record) in attached_image_paths
             )
         ]
+        requested_handoff_chunk_id_set = set(requested_handoff_chunk_ids)
+        fixed_table_supplement_chunk_ids = _ordered_unique(
+            str(record.get("chunk_id") or "")
+            for record in fixed_table_supplement_records
+            if str(record.get("chunk_id") or "")
+        )
         return {
             "text": "\n\n".join(parts),
             "records_by_id": records_by_id,
             "image_paths": image_paths,
+            "stage1_handoff_chunk_ids": [
+                chunk_id
+                for chunk_id in requested_handoff_chunk_ids
+                if chunk_id in records_by_id
+            ],
+            "python_supplemental_chunk_ids": [
+                chunk_id
+                for chunk_id in records_by_id
+                if chunk_id not in requested_handoff_chunk_id_set
+            ],
+            "fixed_selected_table_supplement_chunk_ids": [
+                chunk_id
+                for chunk_id in fixed_table_supplement_chunk_ids
+                if chunk_id in records_by_id
+            ],
             "answer_evidence_image_chunk_ids": answer_evidence_image_chunk_ids,
             "attached_answer_evidence_image_chunk_ids": (
                 attached_answer_evidence_image_chunk_ids
@@ -2988,11 +4271,13 @@ class PairwiseAOAIReader:
             answer_shape=answer_response_shape(query),
             max_evidence=self.max_evidence,
             max_evidence_per_paper=self.max_evidence_per_paper,
+            paper_set_policy=self.paper_set_policy,
         )
 
     def _answer_locator_repair_prompt(
         self,
         *,
+        query: Query | None = None,
         original_prompt: str,
         rejected_response: str,
         error: ReadingResponseError,
@@ -3007,14 +4292,86 @@ class PairwiseAOAIReader:
         ]
         error_text = str(error)
         error_corpus = "\n".join(dict.fromkeys(prior_errors or [error_text]))
+        error_corpus_folded = error_corpus.casefold()
+        direct_reported_optimum_context = bool(
+            query is not None
+            and _DIRECT_REPORTED_OPTIMUM_QUERY_RE.search(query.question)
+        )
+        axis_extent_context = bool(
+            query is not None and is_axis_extent_lookup_query(query)
+        )
+        genuine_extremum_context = bool(
+            query is not None and requires_extremum_operation(query)
+        )
+        axis_extent_repair = ""
+        if axis_extent_context:
+            axis_extent_repair = (
+                " This query contains an axis-extent lookup. A phrase such as "
+                "'roughly what is the highest value on the horizontal axis' asks "
+                "for the terminal visible tick/limit, not a winner among methods. "
+                "Delete any argmax/argmin for that clause. Re-read the actually "
+                "attached plot, create one minimal numeric value_kind='visual' "
+                "fact for the terminal tick, and bind that exact value with "
+                "operations=[] for this clause. Keep every other compound answer "
+                "part in its own fact and binding. A Table cell copied from visible "
+                "extracted text may be value_kind='reported'; use "
+                "value_kind='visual' only when that cell was read from an actually "
+                "attached table image. If another clause independently asks which "
+                "candidate is best/highest, retain a complete argmax/argmin only "
+                "for that separate clause."
+            )
+        direct_reported_optimum_repair = ""
+        if direct_reported_optimum_context:
+            direct_reported_optimum_repair = (
+                " This is a direct reported-optimum lookup with another atomic "
+                "answer part, not a request to rank parameter magnitudes. First "
+                "check whether the supplied source explicitly states the optimum or "
+                "winner. If it does, delete every argmax/argmin for that clause, set "
+                "operations=[] for that clause, create one minimal fact whose value is "
+                "the answer-bearing parameter value and whose value_kind='reported', "
+                "and bind its exact substring in the emitted answer. Keep each other "
+                "requested effect or condition in a separate atomic fact and binding. "
+                "A parameter such as gamma=0.98 is not a performance score: never rank "
+                "the released option values or invent pseudo-scores. Only if the source "
+                "does not state the optimum and instead supplies every raw candidate "
+                "performance operand may you use a complete grounded argmax/argmin."
+            )
+        labeled_selection_context = (
+            'id="A27_same_performance_requires_both_operands"' in original_prompt
+        )
+        labeled_selection_repair = ""
+        if labeled_selection_context:
+            labeled_selection_repair = (
+                " This is a labeled comparison-selection task. Use one atomic "
+                "numeric reported/visual fact for each side of every eligible "
+                "labeled row. Then use exactly one kind='select_where' operation. "
+                "Its fact_ids list contains every operand fact exactly once; its "
+                "comparisons list contains one object per row with exactly label, "
+                "left_fact_id, right_fact_id, left, and right. Copy left/right from "
+                "the named facts, use operator='==' for a same/equal question or "
+                "operator='!=' for a different question, and set result to the "
+                "unique label satisfying that predicate. The operation-local "
+                "expected and answer_fragment are that label, not boolean true/false. "
+                "Bind both final freeform and multiple-choice outputs to the same "
+                "select_where operation. Do not use a vector fact, reuse one fact on "
+                "both sides, turn equality into a reported status fact, or bind an "
+                "internal predicate boolean to the task label. Keep all labels and "
+                "numbers grounded in the live evidence; never copy synthetic example "
+                "values."
+            )
         comparison_repair = ""
         if (
-            "candidate labels must be distinct" in error_corpus
-            or "value must contain label and value" in error_corpus
-            or "candidates do not match label/value pairs" in error_corpus
-            or "does not express expected result" in error_corpus
-            or "does not equal computed result" in error_corpus
-            or "question explicitly requests argmax/argmin" in error_corpus
+            not labeled_selection_context
+            and not direct_reported_optimum_context
+            and (not axis_extent_context or genuine_extremum_context)
+            and (
+                "candidate labels must be distinct" in error_corpus
+                or "value must contain label and value" in error_corpus
+                or "candidates do not match label/value pairs" in error_corpus
+                or "does not express expected result" in error_corpus
+                or "does not equal computed result" in error_corpus
+                or "question explicitly requests argmax/argmin" in error_corpus
+            )
         ):
             comparison_repair = (
                 " This is an argmax/argmin comparison-contract error. For every "
@@ -3083,8 +4440,8 @@ class PairwiseAOAIReader:
                 "For a multiple-choice option that faithfully canonicalizes a directly "
                 "stated qualitative effect, a text fact may use the option's minimal "
                 "canonical phrase only when the cited source visibly states the same "
-                "direction and polarity. For example, source text saying performance "
-                "falls behind a baseline may ground 'harms performance'. Never use this "
+                "direction and polarity. For example, source text saying accuracy "
+                "drops below a reference may ground 'reduces accuracy'. Never use this "
                 "paraphrase rule to change a number, comparator, negation, condition, "
                 "dataset, model, or setting."
             )
@@ -3142,6 +4499,31 @@ class PairwiseAOAIReader:
                 "equal to result. Do not use this inventory for a last-reference "
                 "index lookup."
             )
+        ordinal_reference_repair = ""
+        ordinal = (
+            requested_reference_ordinal(query.question)
+            if query is not None
+            else None
+        )
+        if ordinal is not None and "ordinal bibliography lookup" in error_corpus:
+            target_chunks = _ordered_unique(
+                entry.chunk_id
+                for entry in requested_ordinal_bibliography_entries(
+                    query.question, context_records.values()
+                )
+            )
+            ordinal_reference_repair = (
+                f" This is an ordinal bibliography-addressing error. The query's "
+                f"ordinal means the bibliography entry labeled [{ordinal}]; it "
+                "never means the same-numbered citation occurrence encountered "
+                "while scanning body prose. Discard every body-order inference "
+                "and every answer fact taken from another bibliography label. "
+                f"Re-read the exact [{ordinal}] entry in these deterministic "
+                f"supplemental chunk_ids: {_json_dumps(target_chunks)}. Source "
+                f"each final answer-bound fact from within that [{ordinal}] entry, "
+                "then make facts, papers, and support cite only the retained "
+                "answer-bearing chunk pairs."
+            )
         minimal_freeform_repair = ""
         if "minimal atomic freeform" in error_corpus:
             minimal_freeform_repair = (
@@ -3175,6 +4557,102 @@ class PairwiseAOAIReader:
                 "it. A visibly printed dash is a source value and must remain a row; "
                 "never invent a numeric replacement."
             )
+        fixed_enumerative_row_repair = ""
+        if (
+            self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            and (
+                "open-ended fixed-selected multi-paper table" in error_corpus
+                or "fixed-selected multi-paper table must use every authoritative"
+                in error_corpus
+            )
+        ):
+            fixed_enumerative_row_repair = (
+                " This is an authoritative enumerative-row error. Upstream has "
+                "already selected every supplied paper as a qualifying answer "
+                "unit. Do not classify any selected paper as ineligible or use "
+                "a negative/constraint fact merely to account for it. Emit at "
+                "least one source-grounded answer.table.rows[i] row for every "
+                "selected paper. Bind a fact from that same paper directly to "
+                "the complete row when its value is the row object, or bind its "
+                "atomic facts to the corresponding leaf cells. Every binding's "
+                "answer_fragment must be an exact substring of the leaf path it "
+                "names; omit answer_fragment for an object-valued whole-row "
+                "binding. The value in each emitted cell must answer that exact "
+                "table-schema column. Never copy a value from a different source "
+                "field, such as an eligibility or reference-status column, into "
+                "the requested result column merely to satisfy row coverage."
+            )
+        filtered_singleton_repair = ""
+        if "filtered-singleton eligibility evidence" in error_corpus_folded:
+            filtered_singleton_repair = (
+                " This is an explicit eligibility-filter evidence error. Keep "
+                "a separate source-grounded fact for every listed "
+                "eligibility chunk_ids that proves the query's hard condition, "
+                "such as trained only on the named dataset or using the stated "
+                "budget. Include that chunk in papers and support. Do not delete "
+                "the eligibility fact merely because it is not an argmax numeric "
+                "operand, and do not put its text value into operation.candidates. "
+                "Keep the eligible label/value score fact separately in the "
+                "argmax/argmin operation."
+            )
+        scaling_identifier_repair = ""
+        if "canonical scaling identifier mismatch" in error_corpus_folded:
+            scaling_identifier_repair = (
+                " This is a deterministic scaling-identifier surface error. "
+                "Copy every expected Method and Base Model value from the "
+                "validation error exactly. Update the corresponding atomic "
+                "fact.value, table cell, freeform substring, answer_fragment, "
+                "and final_semantic_answer together; do not change the selected "
+                "papers or scientific model identities. These are the only "
+                "allowed canonical edits: source-body method punctuation, a "
+                "family-size hyphen, omission of a trailing lowercase syntactic "
+                "head 'model', and slash compression of co-introduced sizes of "
+                "one identical family."
+            )
+        canonical_row_identifier_repair = ""
+        if "canonical explicit row identifier mismatch" in error_corpus_folded:
+            canonical_row_identifier_repair = (
+                " This is a source-canonical row-identifier error caused by an "
+                "obvious one-character spelling difference in the released "
+                "query. Copy every expected row identifier from the validation "
+                "error exactly into the row-key cell, its atomic fact.value, "
+                "answer_fragment, and final semantic answer. Keep the requested "
+                "value and evidence unchanged. Do not apply fuzzy matching when "
+                "more than one source identifier is plausible."
+            )
+        one_row_per_method_repair = ""
+        if "one-row-per-method table" in error_corpus:
+            one_row_per_method_repair = (
+                " This is a duplicate-method row error. The question asks for "
+                "one answer for each canonical method, so emit exactly one row "
+                "per method. If the source explicitly names several equally "
+                "requested variants, preserve them together in that row's "
+                "string-valued answer cell. Do not create one row per variant. "
+                "For a singular base-model request, a later experiment described "
+                "as an additional generalizability check is not a second base "
+                "model row."
+            )
+        canonical_title_repair = ""
+        if "canonical paper title" in error_corpus_folded:
+            canonical_title_repair = (
+                " This is a canonical-title copying error. Copy the expected "
+                "Paper Title printed in the validation error byte-for-byte into "
+                "the named row, its source fact, derivation binding, and final "
+                "answer. A literal '&' is an ordinary JSON string character: "
+                "preserve an HTML entity such as '&#x27;' literally. Do not "
+                "decode it to an apostrophe and do not turn '&' into a numeric "
+                "JSON escape such as '\\u00026'. Bind each Paper Title row to "
+                "facts from exactly one selected source paper; never mix two "
+                "papers in one title row or leave its source owner ambiguous."
+            )
+        fixed_selected_repair_boundary = (
+            "For this fixed-selected workflow, never change the externally "
+            "selected submission paper set. For an open-ended multi-paper table, "
+            "do not omit a selected paper: emit its grounded answer row. "
+            if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            else "If a paper has no eligible direct evidence, omit that paper "
+            "rather than inventing a locator. "
+        )
         error_history = _json_dumps(list(dict.fromkeys(prior_errors or [error_text])))
         return (
             original_prompt
@@ -3183,14 +4661,17 @@ class PairwiseAOAIReader:
             "the derivation, comparison polarity, option mapping, table types, support, or "
             "evidence is inconsistent. Evidence used only while comparing may be omitted "
             "from papers/support. Every submitted chunk must come from the eligible list. "
-            "If a paper has no eligible direct evidence, omit that paper rather than "
-            "inventing a locator. For a fact binding, fact.value must be the smallest "
+            + fixed_selected_repair_boundary
+            + "For a fact binding, fact.value must be the smallest "
             "answer-bearing typed value copied from evidence and expressed by the exact "
             "answer_fragment; never keep a surrounding evidence sentence as fact.value "
             "when the answer uses only its concise value. While shortening, preserve every "
             "negation, quantifier, comparator, number, unit, and model identifier needed "
             "for the scientific claim; a generic noun such as GPU is not an adequate "
             "replacement for a specific hardware value. Do not repeat the rejected structure.\n"
+            + labeled_selection_repair
+            + direct_reported_optimum_repair
+            + axis_extent_repair
             + comparison_repair
             + table_binding_repair
             + object_fact_repair
@@ -3199,9 +4680,16 @@ class PairwiseAOAIReader:
             + evidence_set_repair
             + non_ready_repair
             + citation_count_repair
+            + ordinal_reference_repair
             + minimal_freeform_repair
             + visual_count_repair
             + table_inventory_repair
+            + fixed_enumerative_row_repair
+            + filtered_singleton_repair
+            + scaling_identifier_repair
+            + canonical_row_identifier_repair
+            + one_row_per_method_repair
+            + canonical_title_repair
             + "\n"
             f"Correction attempt: {repair_attempt}/{MAX_ANSWER_REPAIR_ATTEMPTS}\n"
             f"Validation error: {error}\n"
@@ -3209,7 +4697,7 @@ class PairwiseAOAIReader:
             "Do not reintroduce any earlier error while fixing the latest one.\n"
             f"Eligible evidence chunk_ids: {_json_dumps(eligible_chunk_ids)}\n"
             "<rejected_response>\n"
-            + rejected_response
+            + html.escape(rejected_response, quote=False)
             + "\n</rejected_response>\nReturn one corrected JSON object only."
         )
 
@@ -3220,6 +4708,8 @@ class PairwiseAOAIReader:
         payload_text: str,
         relevant_paper_ids: set[str],
         context_records: dict[str, Record],
+        canonical_paper_titles: Mapping[str, str] | None = None,
+        required_singleton_eligibility_chunk_ids: set[str] | None = None,
         attached_image_paths: list[str] | None = None,
         required_visual_paper_ids: set[str] | None = None,
     ) -> dict[str, Any]:
@@ -3406,6 +4896,52 @@ class PairwiseAOAIReader:
         answer = payload.get("answer")
         if not isinstance(answer, dict):
             raise ReadingResponseError(f"{query.query_id}: answer object is missing")
+        if (
+            self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            and "table" in query.answer_types
+            and re.search(r"(?i)\beach\s+method\b", query.question)
+        ):
+            method_columns = [
+                str(column.get("name") or "")
+                for column in query.table_schema or []
+                if column.get("is_row_key") is True
+                and str(column.get("name") or "").strip().casefold()
+                in {"method", "methods"}
+            ]
+            answer_table = answer.get("table")
+            answer_rows = (
+                answer_table.get("rows")
+                if isinstance(answer_table, dict)
+                else None
+            )
+            if method_columns and isinstance(answer_rows, list):
+                method_column = method_columns[0]
+                seen_methods: dict[str, int] = {}
+                duplicates: list[str] = []
+                for row_index, row in enumerate(answer_rows):
+                    if not isinstance(row, dict):
+                        continue
+                    method = str(row.get(method_column) or "").strip()
+                    # A model/variant suffix must not be used to disguise two
+                    # rows for one canonical method.  In an "each method"
+                    # answer, a trailing parenthetical or bracketed qualifier
+                    # belongs in its schema cell, not in the Method identity.
+                    canonical_method = re.sub(
+                        r"\s*(?:\([^()]+\)|\[[^\[\]]+\])\s*$",
+                        "",
+                        method,
+                    ).strip()
+                    key = canonical_method.casefold()
+                    if key and key in seen_methods:
+                        duplicates.append(method)
+                    elif key:
+                        seen_methods[key] = row_index
+                if duplicates:
+                    raise ReadingResponseError(
+                        f"{query.query_id}: one-row-per-method table cannot "
+                        "duplicate a canonical method across variant rows; "
+                        f"duplicate_methods={duplicates}"
+                    )
         derivation = payload.get("derivation")
         if isinstance(derivation, dict):
             for fact_index, fact in enumerate(derivation.get("facts") or []):
@@ -3432,6 +4968,80 @@ class PairwiseAOAIReader:
             )
         except DerivationValidationError as exc:
             raise ReadingResponseError(f"{query.query_id}: {exc}") from exc
+        if (
+            self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            and requires_scaling_eligibility_output(query)
+        ):
+            _validate_scaling_identifier_rows(
+                query=query,
+                answer=answer,
+                derivation=validated_derivation,
+                context_records=context_records,
+            )
+        if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY:
+            _validate_explicit_row_identifier_surfaces(
+                query=query,
+                answer=answer,
+                context_records=context_records,
+            )
+        paper_title_columns = [
+            str(column.get("name") or "")
+            for column in query.table_schema or []
+            if str(column.get("name") or "").strip().casefold() == "paper title"
+        ]
+        if paper_title_columns and canonical_paper_titles:
+            title_column = paper_title_columns[0]
+            facts_by_id_for_titles = {
+                str(fact["id"]): fact for fact in validated_derivation["facts"]
+            }
+            row_papers: dict[int, set[str]] = {}
+            for binding in validated_derivation["answer_bindings"]:
+                if binding.get("source_type") != "fact":
+                    continue
+                match = re.fullmatch(
+                    r"answer\.table\.rows\[(\d+)\](?:\..+)?",
+                    str(binding.get("answer_path") or ""),
+                )
+                fact = facts_by_id_for_titles.get(str(binding.get("source_id") or ""))
+                if match is None or fact is None:
+                    continue
+                row_papers.setdefault(int(match.group(1)), set()).add(
+                    str(fact["paper_id"])
+                )
+            answer_table = answer.get("table")
+            answer_rows = (
+                answer_table.get("rows")
+                if isinstance(answer_table, dict)
+                else []
+            )
+            for row_index, row in enumerate(answer_rows):
+                paper_ids = row_papers.get(row_index, set())
+                if len(paper_ids) != 1:
+                    raise ReadingResponseError(
+                        f"{query.query_id}: canonical Paper Title row "
+                        f"answer.table.rows[{row_index}] must be bound to exactly "
+                        f"one selected source paper; bound_paper_ids="
+                        f"{sorted(paper_ids)}"
+                    )
+                paper_id = next(iter(paper_ids))
+                expected_title = str(canonical_paper_titles.get(paper_id) or "")
+                actual_title = (
+                    str(row.get(title_column) or "")
+                    if isinstance(row, dict)
+                    else ""
+                )
+                if expected_title and actual_title != expected_title:
+                    raise ReadingResponseError(
+                        f"{query.query_id}: canonical Paper Title mismatch for "
+                        f"{paper_id} at answer.table.rows[{row_index}]."
+                        f"{title_column}; expected={expected_title!r}, "
+                        f"actual={actual_title!r}"
+                    )
+        _validate_ordinal_reference_support(
+            query=query,
+            derivation=validated_derivation,
+            context_records=context_records,
+        )
         if is_aggregate_citation_count_query(query):
             _validate_stage2_citation_count_support(
                 query=query,
@@ -3443,6 +5053,78 @@ class PairwiseAOAIReader:
             for fact in validated_derivation["facts"]
             for chunk_id in fact["chunk_ids"]
         }
+        required_eligibility_ids = set(
+            required_singleton_eligibility_chunk_ids or ()
+        )
+        if required_eligibility_ids:
+            extremum_fact_ids = {
+                str(fact_id)
+                for operation in validated_derivation["operations"]
+                if operation.get("kind") in {"argmax", "argmin"}
+                for fact_id in operation.get("fact_ids", [])
+            }
+            independent_eligibility_facts = [
+                fact
+                for fact in validated_derivation["facts"]
+                if str(fact["id"]) not in extremum_fact_ids
+                and any(
+                    str(chunk_id) in required_eligibility_ids
+                    for chunk_id in fact["chunk_ids"]
+                )
+            ]
+            independent_eligibility_ids = {
+                str(fact["id"]) for fact in independent_eligibility_facts
+            }
+            independent_eligibility_chunk_ids = {
+                str(chunk_id)
+                for fact in independent_eligibility_facts
+                for chunk_id in fact["chunk_ids"]
+                if str(chunk_id) in required_eligibility_ids
+            }
+            required_support_ids = {
+                chunk_id
+                for _, chunk_id in support_pairs
+                if chunk_id in required_eligibility_ids
+            }
+            missing_fact_chunks = sorted(
+                required_eligibility_ids - independent_eligibility_chunk_ids
+            )
+            missing_support_chunks = sorted(
+                required_eligibility_ids - required_support_ids
+            )
+            if missing_fact_chunks or missing_support_chunks:
+                raise ReadingResponseError(
+                    f"{query.query_id}: filtered-singleton eligibility evidence is "
+                    "missing from an independent derivation fact and submitted "
+                    "support; preserve the explicit hard-condition fact outside "
+                    "argmax/argmin for every required chunk; "
+                    f"missing_fact_chunks={missing_fact_chunks}, "
+                    f"missing_support_chunks={missing_support_chunks}, "
+                    f"required_chunk_ids={sorted(required_eligibility_ids)}"
+                )
+            top_level_bound_fact_ids = {
+                str(binding.get("source_id") or "")
+                for binding in validated_derivation["answer_bindings"]
+                if binding.get("source_type") == "fact"
+            }
+            allowed_filtered_fact_ids = (
+                extremum_fact_ids
+                | independent_eligibility_ids
+                | top_level_bound_fact_ids
+            )
+            unused_filtered_fact_ids = sorted(
+                str(fact["id"])
+                for fact in validated_derivation["facts"]
+                if str(fact["id"]) not in allowed_filtered_fact_ids
+            )
+            if unused_filtered_fact_ids:
+                raise ReadingResponseError(
+                    f"{query.query_id}: filtered-singleton eligibility evidence "
+                    "contains unused identity/background facts; keep only the "
+                    "independent hard-condition fact, compared operands, and "
+                    "directly answer-bound facts; unused_fact_ids="
+                    f"{unused_filtered_fact_ids}"
+                )
         if fact_pairs != paper_pairs:
             unsupported_facts = sorted(fact_pairs - paper_pairs)
             unrelated_evidence = sorted(paper_pairs - fact_pairs)
@@ -3457,6 +5139,63 @@ class PairwiseAOAIReader:
                 f"{query.query_id}: every derivation fact paper must appear in "
                 "paper_relevance"
             )
+        if (
+            self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+            and "table" in query.answer_types
+            and len(relevant_paper_ids) > 1
+        ):
+            support_paper_ids = {paper_id for paper_id, _ in support_pairs}
+            missing_facts = sorted(relevant_paper_ids - fact_paper_ids)
+            missing_support = sorted(relevant_paper_ids - support_paper_ids)
+            missing_relevance = sorted(relevant_paper_ids - seen_relevance)
+            if missing_facts or missing_support or missing_relevance:
+                raise ReadingResponseError(
+                    f"{query.query_id}: fixed-selected multi-paper table must "
+                    "use every authoritative selected paper with at least one "
+                    "grounded derivation fact, support mapping, and "
+                    "paper_relevance entry; "
+                    f"missing_facts={missing_facts}, "
+                    f"missing_support={missing_support}, "
+                    f"missing_relevance={missing_relevance}"
+                )
+            # Open-ended multi-paper table questions enumerate their answer
+            # rows through the authoritative selected papers themselves.  A
+            # paper-local negative or constraint fact that is never bound to
+            # an emitted row must not satisfy that completeness contract.  The
+            # derivation validator above has already resolved every path and
+            # checked that each direct fact binding's typed value agrees with
+            # the emitted row object or leaf, so this check can safely use the
+            # normalized bindings as a value-validated paper-to-row mapping.
+            #
+            # Explicit named-row questions are deliberately exempt: a selected
+            # paper may supply a shared constraint or comparison operand while
+            # another owner paper supplies the named output row.
+            if not explicit_table_row_items(query):
+                facts_by_id = {
+                    str(fact["id"]): fact
+                    for fact in validated_derivation["facts"]
+                }
+                row_bound_paper_ids = {
+                    str(facts_by_id[str(binding["source_id"])]["paper_id"])
+                    for binding in validated_derivation["answer_bindings"]
+                    if binding.get("source_type") == "fact"
+                    and re.fullmatch(
+                        r"answer\.table\.rows\[\d+\](?:\..+)?",
+                        str(binding.get("answer_path") or ""),
+                    )
+                }
+                missing_row_bindings = sorted(
+                    relevant_paper_ids - row_bound_paper_ids
+                )
+                if missing_row_bindings:
+                    raise ReadingResponseError(
+                        f"{query.query_id}: open-ended fixed-selected "
+                        "multi-paper table must bind at least one "
+                        "value-validated derivation fact from every "
+                        "authoritative selected paper directly to an emitted "
+                        "answer.table.rows[i] row or leaf; "
+                        f"missing_row_bindings={missing_row_bindings}"
+                    )
         # Stage 1 is deliberately recall-oriented, so an accepted paper can be a
         # visual false positive that Stage 2 correctly omits.  Enforce Stage-1's
         # paper-specific visual requirement only for papers that survive into the
@@ -3531,6 +5270,8 @@ class PairwiseAOAIReader:
         context_records: dict[str, Record],
         candidate_ids: list[str],
         relevant: list[dict[str, Any]],
+        stage1_relevant_paper_ids: list[str] | None = None,
+        submission_paper_ids: list[str] | None = None,
         image_count: int,
     ) -> Prediction:
         support_paper_ids: list[str] = []
@@ -3549,7 +5290,9 @@ class PairwiseAOAIReader:
         paper_records = [
             record
             for paper_id in _ordered_unique(support_paper_ids)
-            for record in self.chunk_store.load_paper(paper_id)
+            for record in recover_split_caption_table_records(
+                self.chunk_store.load_paper(paper_id)
+            )
         ]
         citation_overrides = infer_citation_locator_overrides(
             query,
@@ -3560,12 +5303,30 @@ class PairwiseAOAIReader:
         )
 
         evidence = []
+        object_locator_overrides: dict[str, dict[str, Any]] = {}
         for paper_id, chunk_id, record in support_items:
             citation_ids: tuple[str | None, ...] = citation_overrides.get(
                 chunk_id, (None,)
             )
             for citation_id in citation_ids:
                 metadata = dict(record.get("metadata") or {})
+                original_locator = coarse_locator(record)
+                prediction_locator = query_aware_prediction_locator(
+                    record, query.question
+                )
+                for object_field in ("table_id", "figure_id"):
+                    recovered_id = prediction_locator.get(object_field)
+                    if recovered_id == original_locator.get(object_field):
+                        continue
+                    metadata[object_field] = recovered_id
+                    object_locator_overrides.setdefault(
+                        chunk_id,
+                        {
+                            "source_type": record_source_type(record),
+                            "from": original_locator.get(object_field),
+                            "to": recovered_id,
+                        },
+                    )
                 if citation_id is not None:
                     metadata["citation_id"] = citation_id
                 result = RetrievalResult(
@@ -3595,9 +5356,12 @@ class PairwiseAOAIReader:
             multiple_choice = {
                 "gold": raw_answer["multiple_choice"]["label"]
             }
-        relevant_paper_ids = [
-            str(item["paper_id"]) for item in payload["paper_relevance"]
-        ]
+        fixed_selected = self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+        relevant_paper_ids = (
+            list(submission_paper_ids)
+            if fixed_selected and submission_paper_ids is not None
+            else _ordered_unique(support_paper_ids)
+        )
         return Prediction(
             query_id=query.query_id,
             gold_papers=[{"paper_id": paper_id} for paper_id in relevant_paper_ids],
@@ -3609,8 +5373,14 @@ class PairwiseAOAIReader:
             ),
             trace=[
                 {
-                    "stage": "pairwise_candidate_judgment",
-                    "judged": len(relevant),
+                    "stage": (
+                        "fixed_selected_evidence_extraction"
+                        if fixed_selected
+                        else "pairwise_candidate_judgment"
+                    ),
+                    "judged": len(candidate_ids),
+                    "paper_set_policy": self.paper_set_policy,
+                    "relevant_paper_ids": relevant_paper_ids,
                     "accepted_paper_ids": [item["paper_id"] for item in relevant],
                 },
                 {
@@ -3624,6 +5394,13 @@ class PairwiseAOAIReader:
                             chunk_id: list(citation_ids)
                             for chunk_id, citation_ids in citation_overrides.items()
                         },
+                    },
+                    "object_locator": {
+                        "version": QUERY_AWARE_OBJECT_LOCATOR_VERSION,
+                        "split_caption_version": (
+                            SPLIT_CAPTION_TABLE_LOCATOR_VERSION
+                        ),
+                        "overrides": object_locator_overrides,
                     },
                     "derivation": payload.get("derivation"),
                     "semantic_multiple_choice": raw_answer.get("multiple_choice"),
@@ -3743,12 +5520,23 @@ class PairwiseAOAIReader:
             # Do not retry or transform rejected image content.  Preserve the
             # paper-level run by judging the same selected context from text alone, and
             # make the degraded modality explicit in the checkpoint metadata.
+            if semantic_phase.startswith("judgment"):
+                modality_result_instruction = (
+                    "Judge A independently from paper identity and text. If the "
+                    "requested answer evidence depends on an image, set "
+                    "has_usable_answer_evidence=false and evidence_chunk_ids=[] "
+                    "in the required three-field JSON."
+                )
+            else:
+                modality_result_instruction = (
+                    "If the requested answer depends on an image, return "
+                    "status=needs_image in the required Stage-2 JSON."
+                )
             fallback_prompt = (
                 prompt
                 + "\n\nMODALITY OVERRIDE FOR THIS RETRY: No image is attached. "
                 "Ignore every earlier image mapping, do not claim visual inspection, "
-                "and return unreadable/needs_image when the requested fact depends on "
-                "an image."
+                + modality_result_instruction
             )
             sent_prompt = fallback_prompt
             try:
@@ -3817,8 +5605,19 @@ class PairwiseAOAIReader:
                 for chunk_id, record in records_by_id.items()
                 if readable_image_path(record) == path
             ]
+            mapped_records = [records_by_id[chunk_id] for chunk_id in chunk_ids]
+            sources = _ordered_unique(
+                record_source_type(record) for record in mapped_records
+            )
+            locators: list[dict[str, Any]] = []
+            for record in mapped_records:
+                locator = coarse_locator(record)
+                if locator not in locators:
+                    locators.append(locator)
             lines.append(
-                f"Image {index}: chunk_ids={','.join(chunk_ids)} file={Path(path).name}"
+                f"Image {index}: chunk_ids={','.join(chunk_ids)} "
+                f"source_types={_json_dumps(sources)} "
+                f"locators={_json_dumps(locators)} file={Path(path).name}"
             )
         return "\n".join(lines)
 
@@ -3895,6 +5694,399 @@ def _selection_tokens(text: str) -> list[str]:
     return output
 
 
+def _required_singleton_eligibility_chunk_ids(
+    query: Query,
+    judgments: Iterable[dict[str, Any]],
+) -> set[str]:
+    """Select the Stage-1 fact that proves the query's explicit ``only`` clause.
+
+    A paper may have several broad ``eligibility_condition`` facts.  Requiring
+    any one of them is too weak: a generic fact such as "is VLM-based" must not
+    replace the narrower condition "trained only on BaseSet (1000 clips)".
+    Rank within each selected paper using only lexical overlap with the local
+    query clause and retain every tied best fact.  If Stage 1 supplied no
+    lexical match, fail conservatively by retaining all of that paper's
+    eligibility facts.
+    """
+
+    clause = explicit_singleton_eligibility_clause(query.question)
+    clause_tokens = set(_selection_tokens(clause or ""))
+    required: set[str] = set()
+    for judgment in judgments:
+        eligible_facts = [
+            fact
+            for fact in (judgment.get("extracted_facts") or [])
+            if isinstance(fact, dict)
+            and str(fact.get("purpose") or "") == "eligibility_condition"
+            and str(fact.get("chunk_id") or "")
+        ]
+        if not eligible_facts:
+            continue
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for fact in eligible_facts:
+            # ``fact`` is free-form model prose.  ``source_excerpt`` has
+            # already been verified as a contiguous visible source substring,
+            # so only the latter may decide a hard deterministic requirement.
+            fact_text = str(fact.get("source_excerpt") or "")
+            fact_tokens = set(_selection_tokens(fact_text))
+            overlap = clause_tokens & fact_tokens
+            score = sum(3 if token.isdigit() else 1 for token in overlap)
+            scored.append((score, fact))
+        best_score = max(score for score, _ in scored)
+        selected = (
+            [fact for score, fact in scored if score == best_score]
+            if best_score > 0
+            else eligible_facts
+        )
+        required.update(str(fact["chunk_id"]) for fact in selected)
+    return required
+
+
+def _canonical_scaling_base_model(value: str) -> str:
+    """Apply the narrow canonical surface allowed for a scaling Base Model cell."""
+
+    canonical = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if re.search(r"\d+(?:\.\d+)?[bmk]\b", canonical, re.IGNORECASE):
+        canonical = re.sub(r"\s+models?\s*$", "", canonical, flags=re.IGNORECASE)
+    # Source prose often prints compact identifiers such as Infinity2B while
+    # table schemas use the conventional family-size form Infinity-2B.
+    canonical = re.sub(
+        r"(?<=[A-Za-z])(?=\d+(?:\.\d+)?[BMK]\b)",
+        "-",
+        canonical,
+    )
+    parts = [
+        part.strip()
+        for part in re.split(r"\s+(?:and|&)\s+|\s*,\s*", canonical)
+        if part.strip()
+    ]
+    parsed: list[tuple[str, str]] = []
+    for part in parts:
+        match = re.fullmatch(
+            r"(?P<family>.+?)-(?P<size>\d+(?:\.\d+)?[BMK])",
+            part,
+            re.IGNORECASE,
+        )
+        if match is None:
+            parsed = []
+            break
+        parsed.append((match.group("family"), match.group("size")))
+    if len(parsed) >= 2 and len({family.casefold() for family, _ in parsed}) == 1:
+        family = parsed[0][0]
+        canonical = f"{family}-{parsed[0][1]}/" + "/".join(
+            size for _, size in parsed[1:]
+        )
+    return canonical
+
+
+def _canonical_scaling_method(value: str) -> str:
+    """Remove a procedural scaling suffix from an owning method identity."""
+
+    canonical = unicodedata.normalize("NFKC", str(value or "")).strip()
+    reduced = re.sub(
+        r"\s*(?:\+|with|using)?\s*"
+        r"(?:inference(?:[- ]time)?|test[- ]time)\s+scaling\s*$",
+        "",
+        canonical,
+        flags=re.IGNORECASE,
+    ).strip()
+    return reduced or canonical
+
+
+def _source_identifier_surface(value: str, records: Iterable[Record]) -> str | None:
+    """Recover an equivalent identifier surface from cited source body text."""
+
+    tokens = re.findall(r"[A-Za-z]+|\d+(?:\.\d+)+|\d+[A-Za-z]+", value)
+    if not tokens:
+        return None
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])"
+        + r"[\s._+-]*".join(re.escape(token) for token in tokens)
+        + r"(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    candidates: list[tuple[int, int, str]] = []
+    for record in records:
+        body = _without_corpus_title_prefix(str(record.get("text") or ""))
+        if value in body:
+            return value
+        for match in pattern.finditer(body):
+            surface = match.group(0)
+            window = body[max(0, match.start() - 80) : match.end() + 80]
+            introduction = bool(
+                re.search(
+                    r"\b(?:propose|present|introduce|term(?:ed)?|call(?:ed)?)\b",
+                    window,
+                    re.IGNORECASE,
+                )
+            )
+            punctuation = sum(character in "-._+" for character in surface)
+            candidates.append((introduction, punctuation, surface))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
+def _source_specific_base_model(value: str, records: Iterable[Record]) -> str:
+    """Recover one unambiguous family+size identifier omitted by the model."""
+
+    canonical = _canonical_scaling_base_model(value)
+    if re.search(r"\d+(?:\.\d+)?[BMK]\b", canonical, re.IGNORECASE):
+        return canonical
+    family = canonical.strip()
+    if not family or not re.fullmatch(r"[A-Za-z][A-Za-z0-9._+-]*", family):
+        return canonical
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9]){re.escape(family)}(?P<separator>[- ]?)"
+        r"(?P<size>\d+(?:\.\d+)?[BMK])\b"
+        r"(?P<version>\s+v\d+(?:\.\d+)*)?",
+        re.IGNORECASE,
+    )
+    identifiers: dict[str, str] = {}
+    cointroduced: dict[str, str] = {}
+    for record in records:
+        body = _without_corpus_title_prefix(str(record.get("text") or ""))
+        record_matches = list(pattern.finditer(body))
+        rendered_record: list[tuple[re.Match[str], str]] = []
+        for match in record_matches:
+            size = match.group("size")
+            separator = match.group("separator")
+            version = match.group("version") or ""
+            # Preserve an explicit source-space when a versioned family name
+            # such as SANA-1.5 is followed by its parameter size.  For compact
+            # forms such as Infinity2B, use the conventional family-size dash.
+            rendered_separator = separator or "-"
+            identifier = f"{family}{rendered_separator}{size}{version}"
+            identifiers.setdefault(identifier.casefold(), identifier)
+            rendered_record.append((match, identifier))
+        if len(rendered_record) >= 2:
+            # Combine only variants introduced together inside one sentence.
+            # Later ``also`` experiments normally live in another sentence or
+            # chunk and must not silently expand a singular primary answer.
+            contiguous = all(
+                re.fullmatch(
+                    r"\s*(?:,|and|&|,\s*and)\s*",
+                    body[left.end() : right.start()],
+                    re.IGNORECASE,
+                )
+                is not None
+                for (left, _), (right, _) in zip(
+                    rendered_record,
+                    rendered_record[1:],
+                    strict=False,
+                )
+            )
+            if contiguous:
+                combined = _canonical_scaling_base_model(
+                    " and ".join(identifier for _, identifier in rendered_record)
+                )
+                cointroduced.setdefault(combined.casefold(), combined)
+    if len(cointroduced) == 1:
+        return next(iter(cointroduced.values()))
+    if len(identifiers) != 1:
+        return canonical
+    return next(iter(identifiers.values()))
+
+
+def _validate_scaling_identifier_rows(
+    *,
+    query: Query,
+    answer: dict[str, Any],
+    derivation: dict[str, Any],
+    context_records: Mapping[str, Record],
+) -> None:
+    """Require deterministic canonical method/model surfaces for scaling rows."""
+
+    table = answer.get("table")
+    rows = table.get("rows") if isinstance(table, dict) else None
+    if not isinstance(rows, list):
+        return
+    schema_names = {
+        str(column.get("name") or "").strip().casefold(): str(
+            column.get("name") or ""
+        )
+        for column in query.table_schema or []
+    }
+    method_column = schema_names.get("method") or schema_names.get("methods")
+    base_column = schema_names.get("base model")
+    if not method_column or not base_column:
+        return
+    facts_by_id = {str(fact["id"]): fact for fact in derivation["facts"]}
+    cell_fact_ids: dict[tuple[int, str], list[str]] = {}
+    for binding in derivation["answer_bindings"]:
+        if binding.get("source_type") != "fact":
+            continue
+        match = re.fullmatch(
+            r"answer\.table\.rows\[(\d+)\]\.([^\n]+)",
+            str(binding.get("answer_path") or ""),
+        )
+        if match is None:
+            continue
+        cell_fact_ids.setdefault((int(match.group(1)), match.group(2)), []).append(
+            str(binding.get("source_id") or "")
+        )
+
+    mismatches: list[str] = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        actual_method = str(row.get(method_column) or "")
+        canonical_method = _canonical_scaling_method(actual_method)
+        method_records: list[Record] = []
+        for fact_id in cell_fact_ids.get((row_index, method_column), []):
+            fact = facts_by_id.get(fact_id)
+            if fact is None:
+                continue
+            method_records.extend(
+                context_records[chunk_id]
+                for chunk_id in fact["chunk_ids"]
+                if chunk_id in context_records
+            )
+        expected_method = _source_identifier_surface(canonical_method, method_records)
+        expected_method = expected_method or canonical_method
+        if expected_method and actual_method != expected_method:
+            mismatches.append(
+                f"answer.table.rows[{row_index}].{method_column}: "
+                f"expected={expected_method!r}, actual={actual_method!r}"
+            )
+
+        actual_base = str(row.get(base_column) or "")
+        base_records: list[Record] = []
+        for fact_id in cell_fact_ids.get((row_index, base_column), []):
+            fact = facts_by_id.get(fact_id)
+            if fact is None:
+                continue
+            base_records.extend(
+                context_records[chunk_id]
+                for chunk_id in fact["chunk_ids"]
+                if chunk_id in context_records
+            )
+        expected_base = _source_specific_base_model(actual_base, base_records)
+        if actual_base != expected_base:
+            mismatches.append(
+                f"answer.table.rows[{row_index}].{base_column}: "
+                f"expected={expected_base!r}, actual={actual_base!r}"
+            )
+    if mismatches:
+        raise ReadingResponseError(
+            f"{query.query_id}: canonical scaling identifier mismatch; "
+            + "; ".join(mismatches)
+        )
+
+
+def _identifier_key(value: str) -> str:
+    return re.sub(
+        r"[^a-z0-9]+",
+        "",
+        unicodedata.normalize("NFKC", str(value or "")).casefold(),
+    )
+
+
+def _one_edit_or_equal(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right, strict=True)) == 1
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    short_index = 0
+    long_index = 0
+    skipped = 0
+    while short_index < len(shorter) and long_index < len(longer):
+        if shorter[short_index] == longer[long_index]:
+            short_index += 1
+            long_index += 1
+            continue
+        skipped += 1
+        long_index += 1
+        if skipped > 1:
+            return False
+    return True
+
+
+def _source_identifier_tokens(records: Iterable[Record]) -> dict[str, set[str]]:
+    tokens: dict[str, set[str]] = {}
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z][A-Za-z0-9]*"
+        r"(?:[-_][A-Za-z0-9]+)+|[A-Z][A-Z0-9]{2,})(?![A-Za-z0-9])"
+    )
+    for record in records:
+        body = _without_corpus_title_prefix(str(record.get("text") or ""))
+        for match in pattern.finditer(body):
+            surface = match.group(0)
+            key = _identifier_key(surface)
+            if key:
+                tokens.setdefault(key, set()).add(surface)
+    return tokens
+
+
+def _validate_explicit_row_identifier_surfaces(
+    *,
+    query: Query,
+    answer: dict[str, Any],
+    context_records: Mapping[str, Record],
+) -> None:
+    """Prefer one unique source spelling over a one-character query typo."""
+
+    required = explicit_table_row_items(query)
+    table = answer.get("table")
+    rows = table.get("rows") if isinstance(table, dict) else None
+    row_keys = [
+        str(column.get("name") or "")
+        for column in query.table_schema or []
+        if column.get("is_row_key") is True
+    ]
+    if not required or not isinstance(rows, list) or len(row_keys) != 1:
+        return
+    row_key = row_keys[0]
+    row_surfaces = table_row_key_texts(query, rows)
+    source_tokens = _source_identifier_tokens(context_records.values())
+    mismatches: list[str] = []
+    used_rows: set[int] = set()
+    for item in required:
+        item_key = _identifier_key(item)
+        if len(item_key) < 6 or re.search(r"\s", item.strip()):
+            continue
+        row_candidates = [
+            index
+            for index, surface in enumerate(row_surfaces)
+            if index not in used_rows
+            and _one_edit_or_equal(item_key, _identifier_key(surface))
+        ]
+        if len(row_candidates) != 1:
+            continue
+        row_index = row_candidates[0]
+        used_rows.add(row_index)
+        # Punctuation-only variation (RISurConv versus RISur-Conv) is not a
+        # spelling correction: keep the released query's row surface because
+        # the official string evaluator distinguishes it.  Correct only when
+        # the alphanumeric keys themselves differ by exactly one character.
+        if source_tokens.get(item_key):
+            continue
+        nearby = {
+            surface
+            for key, surfaces in source_tokens.items()
+            if key != item_key and _one_edit_or_equal(item_key, key)
+            for surface in surfaces
+        }
+        nearby_keys = {_identifier_key(surface) for surface in nearby}
+        if len(nearby_keys) != 1:
+            continue
+        expected = sorted(nearby, key=lambda value: (len(value), value))[0]
+        actual = str(rows[row_index].get(row_key) or "")
+        if actual != expected:
+            mismatches.append(
+                f"answer.table.rows[{row_index}].{row_key}: "
+                f"expected={expected!r}, actual={actual!r}, query_item={item!r}"
+            )
+    if mismatches:
+        raise ReadingResponseError(
+            f"{query.query_id}: canonical explicit row identifier mismatch; "
+            + "; ".join(mismatches)
+        )
+
+
 def _canonical_object_kind(raw_kind: str) -> str:
     kind = raw_kind.casefold().rstrip(".")
     if kind in {"fig", "figure"}:
@@ -3938,6 +6130,37 @@ def _record_object_keys(record: Record) -> set[tuple[str, str]]:
     if source_type in {"figure", "table", "equation_algorithm", "citation_context"}:
         keys.update(_explicit_object_keys(str(record.get("text") or "")[:2_000]))
     return keys
+
+
+def _metadata_figure_object_keys(record: Record) -> set[tuple[str, str]]:
+    """Return only exact Figure identifiers declared by record metadata.
+
+    Deterministic visual handoff must not treat a Figure number merely mentioned
+    in another Figure's caption or OCR text as ownership of that numbered object.
+    """
+
+    figure_id = (record.get("metadata") or {}).get("figure_id")
+    if figure_id is None:
+        return set()
+    return {
+        key
+        for key in _explicit_object_keys(f"Figure {figure_id}")
+        if key[0] == "figure"
+    }
+
+
+def _without_corpus_title_prefix(text: str) -> str:
+    """Remove the synthetic corpus title line from a scoped Figure caption.
+
+    MinerU chunks begin with ``[VENUE YEAR] paper title``.  Candidate metadata
+    already supplies that identity; retaining it in a query that asks whether a
+    term occurs *inside a Figure* would blur the location boundary.
+    """
+
+    first, separator, remainder = text.partition("\n")
+    if separator and re.match(r"^\[[^\]]+\]\s+", first.strip()):
+        return remainder
+    return text
 
 
 def _requested_source_types(focus: str) -> set[str]:
@@ -4041,6 +6264,7 @@ def _ranked_image_record_indices(
     reasons: list[list[str]],
     limit: int,
     question: str,
+    scoped_source_type: str | None = None,
 ) -> list[int]:
     if limit <= 0:
         return []
@@ -4049,6 +6273,10 @@ def _ranked_image_record_indices(
         for index, item_reasons in enumerate(reasons)
         if "explicit_object_reference" in item_reasons
         and readable_image_path(records[index])
+        and (
+            scoped_source_type is None
+            or record_source_type(records[index]) == scoped_source_type
+        )
     }
     # MinerU commonly emits the panels of one official figure as consecutive
     # images, while only the last panel carries the shared ``figure_id`` and
@@ -4134,6 +6362,10 @@ def _ranked_image_record_indices(
             index
             for index, record in enumerate(records)
             if readable_image_path(record)
+            and (
+                scoped_source_type is None
+                or record_source_type(record) == scoped_source_type
+            )
         ),
         key=lambda index: (
             index not in explicit_group_indices,
@@ -4164,6 +6396,9 @@ def _ranked_image_record_indices(
                 index,
             ),
         )
+        if scoped_source_type == "table":
+            structural_fallback_indices.update(early_structural[:2])
+            candidates = _ordered_unique_ints([*early_structural[:2], *candidates])
         if explicit_visual or explicit_image_source:
             # "primary/main figure/table" often has a generic caption whose
             # lexical score is weak. Reserve three slots for early structural
@@ -4221,12 +6456,15 @@ def _bounded_formatted_record(
     focus: str,
     max_chars: int,
     selected: bool | None = None,
+    source_text: str | None = None,
 ) -> str:
     empty = reader._format_record(record, text="", selected=selected)
     if len(empty) >= max_chars:
         return empty[:max_chars]
     excerpt = _focused_excerpt(
-        str(record.get("text") or ""), focus, max_chars - len(empty)
+        str(record.get("text") or "") if source_text is None else source_text,
+        focus,
+        max_chars - len(empty),
     )
     return reader._format_record(record, text=excerpt, selected=selected)[:max_chars]
 

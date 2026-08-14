@@ -19,9 +19,8 @@ from littraceqa.candidate_handoff import CandidatePaper
 from littraceqa.chunk_store import IMAGE_PATH_ERROR_KEY, ChunkStore
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.di_pipeline.llm.fake import FakeLLM
-from littraceqa.mineru_record import readable_image_path
+from littraceqa.mineru_record import coarse_locator, readable_image_path
 from littraceqa.submission import prediction_to_submission
-
 
 VALID_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
@@ -210,6 +209,21 @@ def _judgment(
             "candidate_answer": {"meaning": answer_meaning} if chunk_id else {},
             "confidence": 0.98,
             "reason": "the table contains the value" if chunk_id else "no match",
+        }
+    )
+
+
+def _simple_judgment(
+    *,
+    relevant: bool,
+    usable: bool,
+    chunk_ids: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "is_relevant_to_answer": relevant,
+            "has_usable_answer_evidence": usable,
+            "evidence_chunk_ids": list(chunk_ids or []),
         }
     )
 
@@ -424,8 +438,10 @@ def test_each_candidate_is_judged_independently_then_answered(tmp_path):
     _write_corpus(corpus)
     llm = FakeLLM(
         responses=[
-            _judgment("direct_answer", "p1#table"),
-            _judgment("irrelevant"),
+            _simple_judgment(
+                relevant=True, usable=True, chunk_ids=["p1#table"]
+            ),
+            _simple_judgment(relevant=False, usable=False),
             _answer(),
         ]
     )
@@ -463,7 +479,12 @@ def test_stage_specific_completion_limits_are_forwarded(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
     llm = _RecordingMultimodalLLM(
-        [_judgment("direct_answer", "p1#table"), _answer()]
+        [
+            _simple_judgment(
+                relevant=True, usable=True, chunk_ids=["p1#table"]
+            ),
+            _answer(),
+        ]
     )
     reader = PairwiseAOAIReader(
         ChunkStore(corpus),
@@ -567,9 +588,190 @@ def test_answer_context_adds_eligible_same_paper_visual_rescue(tmp_path):
     context = reader._answer_context(_query(), [judgment])
 
     assert list(context["records_by_id"]) == ["p1#bad-table", "p1#fig2"]
+    assert context["stage1_handoff_chunk_ids"] == ["p1#bad-table"]
+    assert context["python_supplemental_chunk_ids"] == ["p1#fig2"]
     assert context["image_paths"] == [str(image_path)]
     assert '"submission_eligible":false' in context["text"]
     assert '"submission_eligible":true' in context["text"]
+
+
+def test_compound_visual_answer_adds_ranked_text_companions_as_context_only(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    records = []
+    expected_companions = []
+    for paper_id, figure_number, answer_text in (
+        (
+            "p1",
+            1,
+            "The closest prior method applies feature rotation to task features "
+            "to minimize semantic disparities.",
+        ),
+        (
+            "p2",
+            2,
+            "The detector has three modification categories: ADD, EDIT, and REMOVE.",
+        ),
+    ):
+        image_path = _write_trusted_image(
+            tmp_path, paper_id, f"figure-{figure_number}.png"
+        )
+        records.append(
+            {
+                "paper_id": paper_id,
+                "chunk_id": f"{paper_id}#fig",
+                "chunk_type": "figure",
+                "text": f"Figure {figure_number}: framework overview.",
+                "metadata": {
+                    "page": 2,
+                    "figure_id": f"Figure {figure_number}",
+                    "image_path": str(image_path),
+                },
+            }
+        )
+        # Identity anchors and bibliography spans are deliberately not eligible
+        # for this regular-prose companion pool, even when they repeat options.
+        records.extend(
+            [
+                {
+                    "paper_id": paper_id,
+                    "chunk_id": f"{paper_id}#abstract",
+                    "chunk_type": "title_abstract",
+                    "text": answer_text,
+                    "metadata": {"page": 1},
+                },
+                {
+                    "paper_id": paper_id,
+                    "chunk_id": f"{paper_id}#reference",
+                    "chunk_type": "text_span",
+                    "text": answer_text,
+                    "metadata": {"page": 9, "section": "References"},
+                },
+            ]
+        )
+        for index, text in enumerate(
+            (
+                answer_text,
+                "The framework compares positive and negative pairs.",
+                "The paper discusses a geometric operation on task features.",
+                "The method detects object-level differences and coherence.",
+                "An unrelated implementation detail about data loading.",
+            ),
+            start=1,
+        ):
+            chunk_id = f"{paper_id}#text{index}"
+            records.append(
+                {
+                    "paper_id": paper_id,
+                    "chunk_id": chunk_id,
+                    "chunk_type": "text_span",
+                    "text": text,
+                    "metadata": {"page": index + 2, "section": "Method"},
+                }
+            )
+            if index <= 4:
+                expected_companions.append(chunk_id)
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
+        FakeLLM(),
+        answer_neighbor_chunks=0,
+    )
+    query = Query(
+        "q_compound_visual",
+        (
+            "Comparing two papers, one whose framework figure applies a geometric "
+            "operation to task features through its closest prior method, and "
+            "another whose framework figure distinguishes edit operations, what "
+            "is the operation and how many categories are there?"
+        ),
+        ["multiple_choice"],
+        options={
+            "A": "two categories; feature scaling",
+            "B": "three categories; feature rotation",
+        },
+    )
+    judgments = [
+        {
+            "paper_id": paper_id,
+            "rank": rank,
+            "label": "direct_answer",
+            "send_to_answer_agent": True,
+            "evidence_chunk_ids": [f"{paper_id}#fig"],
+        }
+        for rank, paper_id in enumerate(("p1", "p2"), start=1)
+    ]
+
+    context = reader._answer_context(query, judgments)
+
+    assert context["stage1_handoff_chunk_ids"] == ["p1#fig", "p2#fig"]
+    assert set(context["python_supplemental_chunk_ids"]) == set(
+        expected_companions
+    )
+    assert len(context["python_supplemental_chunk_ids"]) == 8
+    assert "p1#text1" in context["records_by_id"]
+    assert "p2#text1" in context["records_by_id"]
+    assert "p1#text5" not in context["records_by_id"]
+    assert "p2#text5" not in context["records_by_id"]
+    assert "p1#abstract" not in context["records_by_id"]
+    assert "p2#reference" not in context["records_by_id"]
+    assert context["text"].count('"stage1_selected":false') == 8
+
+
+def test_single_part_visual_answer_does_not_add_text_companions(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_path = _write_trusted_image(tmp_path, "p1", "figure-1.png")
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#fig",
+            "chunk_type": "figure",
+            "text": "Figure 1: the plotted value is 42.",
+            "metadata": {
+                "page": 2,
+                "figure_id": "Figure 1",
+                "image_path": str(image_path),
+            },
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#text",
+            "chunk_type": "text_span",
+            "text": "The plotted value is 42.",
+            "metadata": {"page": 3, "section": "Results"},
+        },
+    ]
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
+        FakeLLM(),
+        answer_neighbor_chunks=0,
+    )
+    query = Query(
+        "q_single_visual",
+        "What value is shown in Figure 1?",
+        ["multiple_choice"],
+        options={"A": "41", "B": "42"},
+    )
+    judgment = {
+        "paper_id": "p1",
+        "rank": 1,
+        "label": "direct_answer",
+        "send_to_answer_agent": True,
+        "evidence_chunk_ids": ["p1#fig"],
+    }
+
+    context = reader._answer_context(query, [judgment])
+
+    assert list(context["records_by_id"]) == ["p1#fig"]
+    assert context["python_supplemental_chunk_ids"] == []
 
 
 def test_explicit_figure_keeps_same_page_split_panels(tmp_path):
@@ -670,7 +872,7 @@ def test_explicit_figure_does_not_attach_unrelated_second_image(tmp_path):
     assert context["omitted_image_chunk_ids"] == ["p1#fig6"]
 
 
-def test_paper_relevance_is_separate_from_minimal_answer_support(tmp_path):
+def test_submitted_papers_are_exactly_the_answer_support_owners(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
     reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
@@ -704,8 +906,145 @@ def test_paper_relevance_is_separate_from_minimal_answer_support(tmp_path):
         image_count=0,
     )
 
-    assert prediction.gold_papers == [{"paper_id": "p1"}, {"paper_id": "p2"}]
+    assert prediction.gold_papers == [{"paper_id": "p1"}]
     assert {item.paper_id for item in prediction.evidence} == {"p1"}
+
+    simple_prediction = reader._build_prediction(
+        query=query,
+        payload=payload,
+        context_records=context_records,
+        candidate_ids=["p1", "p2"],
+        relevant=[{"paper_id": "p1"}],
+        stage1_relevant_paper_ids=["p2", "p1"],
+        image_count=0,
+    )
+    assert simple_prediction.gold_papers == [{"paper_id": "p1"}]
+
+
+def test_final_prediction_recovers_merged_table_locator_without_changing_chunk(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#merged-table",
+        "chunk_type": "table",
+        "text": """[ACL 2025] 500x C ompressor
+Table 3: ArxivQA results comparing 500xCompressor and ICAE.
+Table 4: Cross-domain results on NaturalQuestions (NaturalQ) and RACE.
+| Dataset | NaturalQ | RACE |
+| Ours500→1 | 41.36 | 21.37 |
+| ICAE500→1 | 26.65 | 14.24 |
+""",
+        "metadata": {
+            "title": "500x C ompressor: Generalized Prompt Compression",
+            "page": 6,
+            "table_id": "Table 3",
+        },
+    }
+    corpus.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    query = Query(
+        "merged-table",
+        "What value is reported for ICAE on the NaturalQ benchmark?",
+        ["freeform"],
+    )
+    context_records = {record["chunk_id"]: record}
+    payload = _structured_answer_payload({"p1": [record["chunk_id"]]})
+
+    prediction = reader._build_prediction(
+        query=query,
+        payload=payload,
+        context_records=context_records,
+        candidate_ids=["p1"],
+        relevant=[{"paper_id": "p1"}],
+        image_count=0,
+    )
+
+    submission = prediction_to_submission(query, prediction)
+    assert submission["evidence"] == [
+        {
+            "paper_id": "p1",
+            "source_type": "table",
+            "locator": {"page": 6, "table_id": "Table 4"},
+        }
+    ]
+    assert record["metadata"]["table_id"] == "Table 3"
+    assert prediction.trace[1]["object_locator"]["overrides"] == {
+        "p1#merged-table": {
+            "source_type": "table",
+            "from": "Table 3",
+            "to": "Table 4",
+        }
+    }
+
+
+def test_answer_context_recovers_adjacent_split_table_captions(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#time",
+            "chunk_type": "table",
+            "text": """[NAACL 2025] Track-SQL
+| Dataset | Total time(s) |
+| --- | --- |
+| SParC | 240.348±1.45 |
+| CoSQL | 214.456±2.56 |
+""",
+            "metadata": {"page": 17, "table_id": None},
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#memory",
+            "chunk_type": "table",
+            "text": """[NAACL 2025] Track-SQL
+Table 13: Inference time performance of the Track-SQL framework.
+Table 14: Memory Costs of Training and Inference in the Track-SQL Framework.
+| Metric | SESE(Inference) |
+| --- | --- |
+| Graphics Memory(GB) | 2.235 |
+""",
+            "metadata": {"page": 17, "table_id": "Table 13"},
+        },
+    ]
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), answer_neighbor_chunks=0
+    )
+    query = Query(
+        "split-tables",
+        "Report the SParC inference time and graphics memory.",
+        ["freeform"],
+    )
+    judgment = {
+        "paper_id": "p1",
+        "rank": 1,
+        "label": "direct_answer",
+        "send_to_answer_agent": True,
+        "evidence_chunk_ids": ["p1#time", "p1#memory"],
+    }
+
+    context = reader._answer_context(query, [judgment])
+
+    assert coarse_locator(context["records_by_id"]["p1#time"]) == {
+        "page": 17,
+        "table_id": "Table 13",
+    }
+    assert coarse_locator(context["records_by_id"]["p1#memory"]) == {
+        "page": 17,
+        "table_id": "Table 14",
+    }
+    assert '"table_id":"Table 13"' in context["text"]
+    assert '"table_id":"Table 14"' in context["text"]
+    assert reader.chunk_store.load_paper("p1")[0]["metadata"]["table_id"] is None
+    assert (
+        reader.chunk_store.load_paper("p1")[1]["metadata"]["table_id"]
+        == "Table 13"
+    )
 
 
 def test_stage_two_rejects_submitted_chunk_unused_by_derivation(tmp_path):
@@ -1245,7 +1584,9 @@ def test_explicit_visual_query_still_requires_visual_fact_without_stage_one_flag
 def test_untrusted_corpus_image_is_never_attached_without_image_root(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_image_corpus(corpus, tmp_path, image_count=1)
-    llm = _RecordingMultimodalLLM([_judgment("irrelevant")])
+    llm = _RecordingMultimodalLLM(
+        [_simple_judgment(relevant=False, usable=False)]
+    )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
     reader.judge_candidate(
@@ -1303,8 +1644,12 @@ def test_invented_stage_one_chunk_id_is_a_hard_error(tmp_path):
 def test_stage_one_repairs_invented_chunk_id_once_with_same_validator(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     image_paths = _write_image_corpus(corpus, tmp_path, image_count=1)
-    invented_response = _judgment("direct_answer", "p1#fig0010")
-    repaired_response = _judgment("direct_answer", "p1#fig1")
+    invented_response = _simple_judgment(
+        relevant=True, usable=True, chunk_ids=["p1#fig0010"]
+    )
+    repaired_response = _simple_judgment(
+        relevant=True, usable=True, chunk_ids=["p1#fig1"]
+    )
     llm = _RecordingMultimodalLLM([invented_response, repaired_response])
     reader = PairwiseAOAIReader(
         ChunkStore(corpus, image_root=_image_root(tmp_path)), llm
@@ -1339,6 +1684,33 @@ def test_stage_one_repairs_invented_chunk_id_once_with_same_validator(tmp_path):
     assert judgment["calls"][1]["raw_response"] == repaired_response
     assert judgment["judgment_call_count"] == 2
     assert judgment["judgment"]["evidence_chunk_ids"] == ["p1#fig1"]
+
+
+def test_current_stage_one_repairs_legacy_schema_to_exact_three_fields(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    llm = FakeLLM(
+        responses=[
+            _judgment("direct_answer", "p1#table"),
+            _simple_judgment(
+                relevant=True,
+                usable=True,
+                chunk_ids=["p1#table"],
+            ),
+        ]
+    )
+    reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
+
+    judgment = reader.judge_candidate(
+        _query(), CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    )
+
+    assert judgment["send_to_answer_agent"] is True
+    assert judgment["evidence_chunk_ids"] == ["p1#table"]
+    assert "must use exactly is_relevant_to_answer" in judgment["calls"][0][
+        "parse_error"
+    ]
+    assert judgment["calls"][1]["parse_error"] is None
 
 
 def _write_compaction_corpus(path) -> None:
@@ -1379,7 +1751,13 @@ def _write_compaction_corpus(path) -> None:
 def test_oversized_paper_is_compacted_and_judged_with_one_initial_call(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_compaction_corpus(corpus)
-    llm = FakeLLM(responses=[_judgment("direct_answer", "p1#table")])
+    llm = FakeLLM(
+        responses=[
+            _simple_judgment(
+                relevant=True, usable=True, chunk_ids=["p1#table"]
+            )
+        ]
+    )
     reader = PairwiseAOAIReader(
         ChunkStore(corpus),
         llm,
@@ -1459,6 +1837,238 @@ def test_single_paper_context_is_deterministic_and_preserves_original_records(
     assert '"segment"' not in first["text"]
 
 
+def test_coordinated_metric_lookup_uses_only_available_table_context(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    table_path = _write_trusted_image(tmp_path, "p1", "table-1.png")
+    figure_path = _write_trusted_image(tmp_path, "p1", "figure-1.png")
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#title",
+            "chunk_type": "title_abstract",
+            "text": "[ICML 2025] Distracting Method Alpha\nThe abstract reports 99.9.",
+            "metadata": {"page": 1},
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#table",
+            "chunk_type": "table",
+            "text": (
+                "[ICML 2025] Exact Method Alpha\n"
+                "Table 1: Gemma2-9B-Instruct | LC win rate | 73.4"
+            ),
+            "metadata": {
+                "page": 5,
+                "table_id": "Table 1",
+                "image_path": str(table_path),
+            },
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#figure",
+            "chunk_type": "figure",
+            "text": "Figure 1: A distracting score of 88.8.",
+            "metadata": {
+                "page": 2,
+                "figure_id": "Figure 1",
+                "image_path": str(figure_path),
+            },
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#text",
+            "chunk_type": "text_span",
+            "text": "A nearby method reports an LC win rate of 91.0.",
+            "metadata": {"page": 5, "section": "Results"},
+        },
+    ]
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    query = Query(
+        "q_metric_pair",
+        (
+            "What LC win rate does Method Alpha achieve on Gemma2-9B-Instruct, "
+            "and what LC win rate does Method Beta achieve on that model?"
+        ),
+        ["multiple_choice"],
+        options={"A": "73.4 and 59.7", "B": "other"},
+    )
+
+    context = reader._paper_context(
+        query,
+        CandidatePaper("p1", 1, "Exact Method Alpha", "ICML", 2025),
+        reader.chunk_store.load_paper("p1"),
+    )
+
+    assert context["selected_chunk_ids"] == ["p1#table"]
+    assert set(context["omitted_chunk_ids"]) == {
+        "p1#title",
+        "p1#figure",
+        "p1#text",
+    }
+    assert context["image_paths"] == [str(table_path)]
+    assert context["selected_image_chunk_ids"] == ["p1#table"]
+    assert "Gemma2-9B-Instruct | LC win rate | 73.4" in context["text"]
+    assert "[ICML 2025] Exact Method Alpha" not in context["text"]
+    assert "99.9" not in context["text"]
+    assert "88.8" not in context["text"]
+    assert "91.0" not in context["text"]
+
+
+def test_coordinated_metric_lookup_without_tables_keeps_normal_figure_image(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    figure_path = _write_trusted_image(tmp_path, "p1", "results.png")
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#title",
+            "chunk_type": "title_abstract",
+            "text": "Method Alpha reports benchmark results.",
+            "metadata": {"page": 1},
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#figure",
+            "chunk_type": "figure",
+            "text": "Figure 1: Method Alpha LC win rate on Model-Z.",
+            "metadata": {
+                "page": 2,
+                "figure_id": "Figure 1",
+                "image_path": str(figure_path),
+            },
+        },
+    ]
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    query = Query(
+        "q_metric_pair_no_table",
+        (
+            "What LC win rate does Method Alpha achieve, and what LC win rate "
+            "does Method Beta achieve?"
+        ),
+        ["multiple_choice"],
+        options={"A": "one", "B": "two"},
+    )
+
+    context = reader._paper_context(
+        query,
+        CandidatePaper("p1", 1, "Method Alpha", "ACL", 2025),
+        reader.chunk_store.load_paper("p1"),
+    )
+
+    assert context["selected_chunk_ids"] == ["p1#title", "p1#figure"]
+    assert context["image_paths"] == [str(figure_path)]
+    assert context["selected_image_chunk_ids"] == ["p1#figure"]
+
+
+def test_explicit_visual_scope_precedes_coordinated_table_scope(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    figure_path = _write_trusted_image(tmp_path, "p1", "primary.png")
+    table_path = _write_trusted_image(tmp_path, "p1", "table.png")
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#figure",
+            "chunk_type": "figure",
+            "text": "Figure 1: The primary method figure explicitly shows Score-A.",
+            "metadata": {
+                "page": 2,
+                "figure_id": "Figure 1",
+                "image_path": str(figure_path),
+            },
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#table",
+            "chunk_type": "table",
+            "text": "Table 1: Score-A 90 and Score-B 80.",
+            "metadata": {
+                "page": 3,
+                "table_id": "Table 1",
+                "image_path": str(table_path),
+            },
+        },
+    ]
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    query = Query(
+        "q_visual_metric_pair",
+        (
+            "Which papers explicitly show Score-A in their primary method figure, "
+            "and what performance score does Method Beta achieve?"
+        ),
+        ["freeform"],
+    )
+
+    context = reader._paper_context(
+        query,
+        CandidatePaper("p1", 1, "Method Alpha", "ACL", 2025),
+        reader.chunk_store.load_paper("p1"),
+    )
+
+    assert context["selected_chunk_ids"] == ["p1#figure"]
+    assert context["image_paths"] == [str(figure_path)]
+
+
+def test_oversized_scoped_table_does_not_reintroduce_corpus_title(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    long_table = (
+        "[ICML 2025] Distracting Compound Method Name\n"
+        "Table 1: Model-Z LC win rate for Method Alpha is 73.4.\n"
+        + "unrelated cells " * 1_200
+    )
+    corpus.write_text(
+        json.dumps(
+            {
+                "paper_id": "p1",
+                "chunk_id": "p1#table",
+                "chunk_type": "table",
+                "text": long_table,
+                "metadata": {"page": 4, "table_id": "Table 1"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), max_paper_context_chars=8_000
+    )
+    query = Query(
+        "q_metric_pair_large_table",
+        (
+            "What LC win rate does Method Alpha achieve, and what LC win rate "
+            "does Method Beta achieve?"
+        ),
+        ["multiple_choice"],
+        options={"A": "73.4 and 59.7", "B": "other"},
+    )
+
+    context = reader._paper_context(
+        query,
+        CandidatePaper("p1", 1, "Method Alpha", "ICML", 2025),
+        reader.chunk_store.load_paper("p1"),
+    )
+
+    assert len(context["text"]) <= 8_000
+    assert "Distracting Compound Method Name" not in context["text"]
+    assert "LC win rate for Method Alpha is 73.4" in context["text"]
+
+
 def test_real_but_omitted_chunk_id_is_rejected_by_stage_one(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_compaction_corpus(corpus)
@@ -1471,7 +2081,11 @@ def test_real_but_omitted_chunk_id_is_rejected_by_stage_one(tmp_path):
     context = probe._paper_context(query, candidate, store.load_paper("p1"))
     omitted_chunk_id = context["omitted_chunk_ids"][0]
     llm = FakeLLM(
-        responses=[_judgment("direct_answer", omitted_chunk_id)]
+        responses=[
+            _simple_judgment(
+                relevant=True, usable=True, chunk_ids=[omitted_chunk_id]
+            )
+        ]
     )
     reader = PairwiseAOAIReader(
         store, llm, max_paper_context_chars=8_000
@@ -1507,6 +2121,706 @@ def test_development_metadata_is_rejected_before_any_llm_call(
             query, CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
         )
     assert llm.calls == []
+
+
+def test_simple_stage_one_contract_builds_source_linked_handoff(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_simple_judgment(
+            relevant=True, usable=True, chunk_ids=["p1#table"]
+        ),
+        allowed_records=records,
+    )
+
+    assert parsed["is_relevant_to_answer"] is True
+    assert parsed["has_usable_answer_evidence"] is True
+    assert parsed["send_to_answer_agent"] is True
+    assert parsed["evidence_chunk_ids"] == ["p1#table"]
+    assert parsed["evidence"] == [
+        {
+            "chunk_id": "p1#table",
+            "source_type": "table",
+            "locator": {"page": 3, "table_id": "Table 1"},
+            "purpose": "answer",
+            "quote_or_value": "",
+        }
+    ]
+
+
+def test_compound_method_component_is_not_effective_relevance_without_evidence(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    corpus.write_text(
+        json.dumps(
+            {
+                "paper_id": "base",
+                "chunk_id": "base#table",
+                "chunk_type": "table",
+                "text": "Table 1: D-FINE reports 55.8 mAP after 72 epochs.",
+                "metadata": {"page": 4, "table_id": "Table 1"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("base")
+    }
+
+    parsed = reader._parse_judgment(
+        query=Query(
+            "compound_component",
+            (
+                "What mAP does DEIM-D-FINE-X achieve, and what mAP does "
+                "Mr. DETR achieve?"
+            ),
+            ["multiple_choice"],
+            options={"A": "one", "B": "two"},
+        ),
+        candidate=CandidatePaper("base", 3, "D-FINE: Redefine Regression Task"),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records=records,
+    )
+
+    assert parsed["model_is_relevant_to_answer"] is True
+    assert parsed["is_relevant_to_answer"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert "base/component" in " ".join(parsed["routing_adjustments"])
+
+
+def test_compound_method_guard_is_fail_open_when_full_name_is_reported(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    corpus.write_text(
+        json.dumps(
+            {
+                "paper_id": "base",
+                "chunk_id": "base#table",
+                "chunk_type": "table",
+                "text": "Table 1: DEIM-D-FINE-X reports 56.5 mAP.",
+                "metadata": {"page": 4, "table_id": "Table 1"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("base")
+    }
+
+    parsed = reader._parse_judgment(
+        query=Query(
+            "compound_full_name",
+            (
+                "What mAP does DEIM-D-FINE-X achieve, and what mAP does "
+                "Mr. DETR achieve?"
+            ),
+            ["multiple_choice"],
+            options={"A": "one", "B": "two"},
+        ),
+        candidate=CandidatePaper("base", 3, "D-FINE: Redefine Regression Task"),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records=records,
+    )
+
+    assert parsed["is_relevant_to_answer"] is True
+
+
+def test_simple_stage_one_rule_blocks_usable_when_relevance_is_false(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_simple_judgment(
+            relevant=False, usable=True, chunk_ids=["p1#table"]
+        ),
+        allowed_records=records,
+    )
+
+    assert parsed["is_relevant_to_answer"] is False
+    assert parsed["model_has_usable_answer_evidence"] is True
+    assert parsed["has_usable_answer_evidence"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert parsed["evidence_chunk_ids"] == []
+    assert _answer_review_pool([{"paper_id": "p1", "rank": 1, **parsed}]) == []
+
+
+def test_open_ended_paper_list_requires_usable_inclusion_evidence(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+    query = Query(
+        "paper_list",
+        "Which 2025 papers explicitly print MCTS in their primary figure?",
+        ["table"],
+        table_schema=[
+            {"name": "Paper", "type": "string", "is_row_key": True}
+        ],
+    )
+
+    parsed = reader._parse_judgment(
+        query=query,
+        candidate=CandidatePaper("p1", 1, "MCTS in the Title", "ACL", 2025),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records=records,
+    )
+
+    assert parsed["model_is_relevant_to_answer"] is True
+    assert parsed["model_has_usable_answer_evidence"] is False
+    assert parsed["is_relevant_to_answer"] is False
+    assert parsed["has_usable_answer_evidence"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert any(
+        "open-ended paper list" in adjustment
+        for adjustment in parsed["routing_adjustments"]
+    )
+
+
+def test_simple_stage_one_requires_exact_fields_and_ids(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+
+    with pytest.raises(ReadingResponseError, match="exactly"):
+        reader._parse_judgment(
+            query=_query(),
+            candidate=candidate,
+            payload_text=json.dumps(
+                {
+                    "is_relevant_to_answer": True,
+                    "has_usable_answer_evidence": True,
+                    "evidence_chunk_ids": ["p1#table"],
+                    "reason": "extra field",
+                }
+            ),
+            allowed_records=records,
+        )
+    with pytest.raises(ReadingResponseError, match="requires at least one"):
+        reader._parse_judgment(
+            query=_query(),
+            candidate=candidate,
+            payload_text=_simple_judgment(relevant=True, usable=True),
+            allowed_records=records,
+        )
+
+
+def test_simple_visual_handoff_requires_an_actually_attached_cited_image(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_path = _write_trusted_image(tmp_path, "p1", "figure-4.png")
+    corpus.write_text(
+        json.dumps(
+            {
+                "paper_id": "p1",
+                "chunk_id": "p1#fig4",
+                "chunk_type": "figure",
+                "text": "Figure 4: plots.",
+                "metadata": {
+                    "page": 4,
+                    "figure_id": "Figure 4",
+                    "image_path": str(image_path),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+    query = Query(
+        "visual",
+        "How many plots are visible in Figure 4?",
+        ["freeform"],
+    )
+    kwargs = {
+        "query": query,
+        "candidate": CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        "payload_text": _simple_judgment(
+            relevant=True, usable=True, chunk_ids=["p1#fig4"]
+        ),
+        "allowed_records": records,
+    }
+
+    with pytest.raises(ReadingResponseError, match="actually attached image"):
+        reader._parse_judgment(**kwargs)
+    parsed = reader._parse_judgment(
+        **kwargs, attached_image_paths=[str(image_path)]
+    )
+    assert parsed["send_to_answer_agent"] is True
+    assert parsed["visual"] == {"required": True, "status": "inspected"}
+
+
+def test_compound_visual_table_keeps_stage1_v30_but_answer_gate_is_candidate_local(
+    tmp_path,
+):
+    image_path = _write_trusted_image(tmp_path, "table-paper", "table-1.png")
+    record = {
+        "paper_id": "table-paper",
+        "chunk_id": "table-paper#tab1",
+        "chunk_type": "table",
+        "text": "SpeechSet | multimodal | error 0.412",
+        "metadata": {
+            "page": 4,
+            "table_id": "Table 1",
+            "image_path": str(image_path),
+        },
+    }
+    corpus = tmp_path / "chunks.jsonl"
+    corpus.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    query = Query(
+        "compound_visual_table",
+        (
+            "Roughly what is the highest population-distance value on the "
+            "horizontal axis, and what error does the multimodal model report "
+            "on SpeechSet?"
+        ),
+        ["multiple_choice"],
+        options={"A": "axis 50; error 0.517", "B": "axis 70; error 0.412"},
+    )
+
+    parsed = reader._parse_judgment(
+        query=query,
+        candidate=CandidatePaper(
+            "table-paper", 1, "Synthetic Audio Study", "ACL", 2025
+        ),
+        payload_text=_simple_judgment(
+            relevant=True,
+            usable=True,
+            chunk_ids=["table-paper#tab1"],
+        ),
+        allowed_records={"table-paper#tab1": record},
+        attached_image_paths=[str(image_path)],
+    )
+
+    assert parsed["question_type"] == "visual"
+    assert parsed["send_to_answer_agent"] is True
+    # Stage-1 v30 used a query-wide visual marker.  Keep that checkpoint shape
+    # stable; Stage 2 now narrows the actual visual-fact requirement to cited
+    # figure papers, so an ordinary table cell remains a reported fact.
+    assert parsed["visual"] == {"required": True, "status": "inspected"}
+    assert parsed["evidence"][0]["source_type"] == "table"
+
+
+def test_compound_axis_and_table_answer_accepts_reported_or_visual_table_fact(
+    tmp_path,
+):
+    figure_image = _write_trusted_image(tmp_path, "plot-paper", "figure-2.png")
+    table_image = _write_trusted_image(tmp_path, "table-paper", "table-1.png")
+    records = [
+        {
+            "paper_id": "plot-paper",
+            "chunk_id": "plot-paper#fig2",
+            "chunk_type": "figure",
+            "text": "Figure 2: population distance plot.",
+            "metadata": {
+                "page": 3,
+                "figure_id": "Figure 2",
+                "image_path": str(figure_image),
+            },
+        },
+        {
+            "paper_id": "table-paper",
+            "chunk_id": "table-paper#tab1",
+            "chunk_type": "table",
+            "text": "SpeechSet | multimodal | error 0.412",
+            "metadata": {
+                "page": 4,
+                "table_id": "Table 1",
+                "image_path": str(table_image),
+            },
+        },
+    ]
+    corpus = tmp_path / "chunks.jsonl"
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    selected_text = "axis near 70; error=0.412"
+    query = Query(
+        "compound_axis_table_answer",
+        (
+            "Roughly what is the highest population-distance value on the "
+            "horizontal axis, and what error does the multimodal model report "
+            "on SpeechSet?"
+        ),
+        ["multiple_choice"],
+        options={"A": "axis near 50; error=0.517", "B": selected_text},
+    )
+    payload = {
+        "status": "ready",
+        "paper_relevance": [
+            {
+                "paper_id": "plot-paper",
+                "role": "answer_source",
+                "reason": "The attached plot supplies the axis extent.",
+            },
+            {
+                "paper_id": "table-paper",
+                "role": "answer_source",
+                "reason": "The table supplies the reported cell.",
+            },
+        ],
+        "papers": [
+            {
+                "paper_id": "plot-paper",
+                "evidence_chunk_ids": ["plot-paper#fig2"],
+            },
+            {
+                "paper_id": "table-paper",
+                "evidence_chunk_ids": ["table-paper#tab1"],
+            },
+        ],
+        "derivation": {
+            "facts": [
+                {
+                    "id": "axis_extent",
+                    "name": "terminal horizontal-axis tick",
+                    "value": 70,
+                    "value_kind": "visual",
+                    "paper_id": "plot-paper",
+                    "chunk_ids": ["plot-paper#fig2"],
+                },
+                {
+                    "id": "table_error",
+                    "name": "SpeechSet multimodal error",
+                    "value": 0.412,
+                    "value_kind": "reported",
+                    "paper_id": "table-paper",
+                    "chunk_ids": ["table-paper#tab1"],
+                },
+            ],
+            "operations": [],
+            "answer_bindings": [
+                {
+                    "answer_path": "answer.multiple_choice",
+                    "source_type": "fact",
+                    "source_id": "axis_extent",
+                    "answer_fragment": "70",
+                },
+                {
+                    "answer_path": "answer.multiple_choice",
+                    "source_type": "fact",
+                    "source_id": "table_error",
+                    "answer_fragment": "0.412",
+                },
+            ],
+            "final_semantic_answer": selected_text,
+        },
+        "answer": {
+            "multiple_choice": {
+                "label": "B",
+                "selected_option_text": selected_text,
+            }
+        },
+        "support": [
+            {
+                "answer_path": "answer.multiple_choice",
+                "paper_id": "plot-paper",
+                "chunk_ids": ["plot-paper#fig2"],
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "paper_id": "table-paper",
+                "chunk_ids": ["table-paper#tab1"],
+            },
+        ],
+        "completeness": {
+            "answered_parts": ["axis extent", "reported table cell"],
+            "missing": [],
+        },
+    }
+    context_records = {record["chunk_id"]: record for record in records}
+    attached = [str(figure_image), str(table_image)]
+
+    reported = reader._parse_answer(
+        query=query,
+        payload_text=json.dumps(payload),
+        relevant_paper_ids={"plot-paper", "table-paper"},
+        context_records=context_records,
+        attached_image_paths=attached,
+        required_visual_paper_ids={"plot-paper"},
+    )
+    assert reported["derivation"]["facts"][1]["value_kind"] == "reported"
+
+    payload["derivation"]["facts"][1]["value_kind"] = "visual"
+    visual = reader._parse_answer(
+        query=query,
+        payload_text=json.dumps(payload),
+        relevant_paper_ids={"plot-paper", "table-paper"},
+        context_records=context_records,
+        attached_image_paths=attached,
+        required_visual_paper_ids={"plot-paper", "table-paper"},
+    )
+    assert visual["derivation"]["facts"][1]["value_kind"] == "visual"
+
+
+def test_visual_owner_handoff_does_not_route_an_unattached_exact_figure(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    image_path = _write_trusted_image(tmp_path, "p1", "figure-4.png")
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#fig4",
+        "chunk_type": "figure",
+        "text": "Figure 4: plots.",
+        "metadata": {
+            "page": 4,
+            "figure_id": "Figure 4",
+            "image_path": str(image_path),
+        },
+    }
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+
+    parsed = reader._parse_judgment(
+        query=Query(
+            "visual-unattached",
+            "How many plots are visible in Figure 4 of Paper One?",
+            ["freeform"],
+        ),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records={"p1#fig4": record},
+        attached_image_paths=[],
+        resolved_target_owner=True,
+    )
+
+    assert parsed["has_usable_answer_evidence"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert parsed["evidence_chunk_ids"] == []
+
+
+def test_visual_owner_handoff_does_not_route_a_wrong_figure_number(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    image_path = _write_trusted_image(tmp_path, "p1", "figure-5.png")
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#fig5",
+        "chunk_type": "figure",
+        "text": "Figure 5: plots.",
+        "metadata": {
+            "page": 5,
+            "figure_id": "Figure 5",
+            "image_path": str(image_path),
+        },
+    }
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+
+    parsed = reader._parse_judgment(
+        query=Query(
+            "visual-wrong-number",
+            "How many plots are visible in Figure 4 of Paper One?",
+            ["freeform"],
+        ),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records={"p1#fig5": record},
+        attached_image_paths=[str(image_path)],
+        resolved_target_owner=True,
+    )
+
+    assert parsed["has_usable_answer_evidence"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert parsed["evidence_chunk_ids"] == []
+
+
+def test_visual_owner_handoff_requires_a_resolved_hard_owner(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    image_path = _write_trusted_image(tmp_path, "p1", "figure-4.png")
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#fig4",
+        "chunk_type": "figure",
+        "text": "Figure 4: plots.",
+        "metadata": {
+            "page": 4,
+            "figure_id": "Figure 4",
+            "image_path": str(image_path),
+        },
+    }
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+
+    parsed = reader._parse_judgment(
+        query=Query(
+            "visual-unresolved-owner",
+            "How many plots are visible in Figure 4?",
+            ["freeform"],
+        ),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records={"p1#fig4": record},
+        attached_image_paths=[str(image_path)],
+        resolved_target_owner=False,
+    )
+
+    assert parsed["has_usable_answer_evidence"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert parsed["evidence_chunk_ids"] == []
+
+
+def test_visual_owner_handoff_does_not_route_a_nonvisual_table_object(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    image_path = _write_trusted_image(tmp_path, "p1", "table-4.png")
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#tab4",
+        "chunk_type": "table",
+        "text": "Table 4: results.",
+        "metadata": {
+            "page": 4,
+            "table_id": "Table 4",
+            "image_path": str(image_path),
+        },
+    }
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+
+    parsed = reader._parse_judgment(
+        query=Query(
+            "nonvisual-table",
+            "What value is reported in Table 4 of Paper One?",
+            ["freeform"],
+        ),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records={"p1#tab4": record},
+        attached_image_paths=[str(image_path)],
+        resolved_target_owner=True,
+    )
+
+    assert parsed["question_type"] == "other"
+    assert parsed["has_usable_answer_evidence"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert parsed["evidence_chunk_ids"] == []
+
+
+def test_visual_owner_handoff_ignores_figure_number_mentioned_only_in_caption(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    image_path = _write_trusted_image(tmp_path, "p1", "figure-5.png")
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#fig5",
+        "chunk_type": "figure",
+        "text": "Figure 5: comparison with the result shown in Figure 4.",
+        "metadata": {
+            "page": 5,
+            "figure_id": "Figure 5",
+            "image_path": str(image_path),
+        },
+    }
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+
+    parsed = reader._parse_judgment(
+        query=Query(
+            "visual-caption-only",
+            "How many plots are visible in Figure 4 of Paper One?",
+            ["freeform"],
+        ),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_simple_judgment(relevant=True, usable=False),
+        allowed_records={"p1#fig5": record},
+        attached_image_paths=[str(image_path)],
+        resolved_target_owner=True,
+    )
+
+    assert parsed["has_usable_answer_evidence"] is False
+    assert parsed["send_to_answer_agent"] is False
+    assert parsed["evidence_chunk_ids"] == []
+
+
+def test_visual_owner_handoff_rejects_raw_usable_with_only_wrong_figure_cited(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    figure_4_path = _write_trusted_image(tmp_path, "p1", "figure-4.png")
+    figure_5_path = _write_trusted_image(tmp_path, "p1", "figure-5.png")
+    records = {
+        "p1#fig4": {
+            "paper_id": "p1",
+            "chunk_id": "p1#fig4",
+            "chunk_type": "figure",
+            "text": "Figure 4: requested plots.",
+            "metadata": {
+                "page": 4,
+                "figure_id": "Figure 4",
+                "image_path": str(figure_4_path),
+            },
+        },
+        "p1#fig5": {
+            "paper_id": "p1",
+            "chunk_id": "p1#fig5",
+            "chunk_type": "figure",
+            "text": "Figure 5: a different plot.",
+            "metadata": {
+                "page": 5,
+                "figure_id": "Figure 5",
+                "image_path": str(figure_5_path),
+            },
+        },
+    }
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+
+    with pytest.raises(ReadingResponseError, match="exact requested Figure"):
+        reader._parse_judgment(
+            query=Query(
+                "visual-wrong-cite",
+                "How many plots are visible in Figure 4 of Paper One?",
+                ["freeform"],
+            ),
+            candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+            payload_text=_simple_judgment(
+                relevant=True,
+                usable=True,
+                chunk_ids=["p1#fig5"],
+            ),
+            allowed_records=records,
+            attached_image_paths=[str(figure_4_path), str(figure_5_path)],
+            resolved_target_owner=True,
+        )
 
 
 def test_stage_one_rejects_relevant_distractor_role(tmp_path):
@@ -1932,7 +3246,9 @@ def test_stage_one_last_reference_index_does_not_require_counted_items(tmp_path)
     assert parsed["label"] == "direct_answer"
 
 
-def test_stage_one_accepts_clause_scoped_argmin_as_direct_option(tmp_path):
+def test_stage_one_routes_clause_scoped_argmin_evidence_without_solving_option(
+    tmp_path,
+):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(
         corpus,
@@ -1954,41 +3270,15 @@ def test_stage_one_accepts_clause_scoped_argmin_as_direct_option(tmp_path):
             "D": "44.20 / 1.84",
         },
     )
-    response = {
-        "paper_role": "target_owner",
-        "label": "direct_answer",
-        "answerable_from_this_paper": True,
-        "satisfied_constraints": [
-            "Atlas-256 id/cos=44.20",
-            "best eFM FID over all eligible rows=1.84",
-        ],
-        "missing_constraints": [],
-        "blocking_mismatches": [],
-        "visual": {"required": False, "status": "not_needed"},
-        "evidence": [
-            {
-                "chunk_id": "p1#table",
-                "purpose": "answer",
-                "quote_or_value": (
-                    "TinySet eFM 1.84; Atlas-256 id/cos 44.20 and eFM 24.30"
-                ),
-            }
-        ],
-        "candidate_answer": {
-            "units": [
-                {
-                    "name": "ordered id/cos and best eFM FID",
-                    "value": "44.20 / 1.84",
-                    "value_kind": "computed",
-                    "matched_option_labels": ["D"],
-                }
-            ],
-            "rows": [],
-        },
-        "confidence": 0.99,
-        "reason": "The first modifier is local and best FID is the table argmin.",
-    }
-    llm = _RecordingMultimodalLLM([json.dumps(response)])
+    llm = _RecordingMultimodalLLM(
+        [
+            _simple_judgment(
+                relevant=True,
+                usable=True,
+                chunk_ids=["p1#table"],
+            )
+        ]
+    )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
     judgment = reader.judge_candidate(
@@ -1998,19 +3288,23 @@ def test_stage_one_accepts_clause_scoped_argmin_as_direct_option(tmp_path):
         ),
     )
 
-    assert judgment["label"] == "direct_answer"
-    assert judgment["candidate_answer"]["units"][0][
-        "matched_option_labels"
-    ] == ["D"]
+    assert judgment["is_relevant_to_answer"] is True
+    assert judgment["has_usable_answer_evidence"] is True
+    assert judgment["send_to_answer_agent"] is True
+    assert judgment["evidence_chunk_ids"] == ["p1#table"]
+    assert judgment["candidate_answer"] == {"units": [], "rows": []}
+    assert judgment["question_type"] == "calculation"
     assert judgment["logical_judgment_attempt_count"] == 1
-    assert "J16_coordinated_clause_scope_and_argmin" in judgment[
-        "few_shot_example_ids"
+    assert judgment["few_shot_example_ids"] == [
+        "J0_common_wrong_owner",
+        "JC1_calculation_relevant_usable",
+        "JC2_calculation_relevant_not_usable",
     ]
-    assert "does not modify the second clause" in llm.calls[0]["prompt"]
+    assert "The candidate does not need to complete" in llm.calls[0]["prompt"]
     assert '"label":"D","text":"44.20 / 1.84"' in llm.calls[0]["prompt"]
 
 
-def test_stage_one_repairs_unmatched_owner_values_to_partial_answer(tmp_path):
+def test_stage_one_routes_owner_values_without_matching_an_option(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(
         corpus,
@@ -2022,51 +3316,14 @@ def test_stage_one_repairs_unmatched_owner_values_to_partial_answer(tmp_path):
         ["multiple_choice"],
         options={"A": "81.2 / 1.47", "B": "80.1 / 14.7"},
     )
-    initial = {
-        "paper_role": "target_owner",
-        "label": "direct_answer",
-        "answerable_from_this_paper": True,
-        "satisfied_constraints": ["Cedar owner", "scores 81.2 and 14.7"],
-        "missing_constraints": [],
-        "blocking_mismatches": [],
-        "visual": {"required": False, "status": "not_needed"},
-        "evidence": [
-            {
-                "chunk_id": "p1#table",
-                "purpose": "answer",
-                "quote_or_value": "Cedar scores 81.2 and 14.7",
-            }
-        ],
-        "candidate_answer": {
-            "units": [
-                {
-                    "name": "first score",
-                    "value": 81.2,
-                    "value_kind": "reported",
-                    "matched_option_labels": [],
-                },
-                {
-                    "name": "second score",
-                    "value": 14.7,
-                    "value_kind": "reported",
-                    "matched_option_labels": [],
-                },
-            ],
-            "rows": [],
-        },
-        "confidence": 0.97,
-        "reason": "The owning table directly reports both values.",
-    }
-    repair = {
-        **initial,
-        "label": "partial_answer",
-        "missing_constraints": [
-            "unambiguous mapping to one complete released option"
-        ],
-        "reason": "The owner values are valid but identify no complete option.",
-    }
     llm = _RecordingMultimodalLLM(
-        [json.dumps(initial), json.dumps(repair)]
+        [
+            _simple_judgment(
+                relevant=True,
+                usable=True,
+                chunk_ids=["p1#table"],
+            )
+        ]
     )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
@@ -2077,24 +3334,17 @@ def test_stage_one_repairs_unmatched_owner_values_to_partial_answer(tmp_path):
         ),
     )
 
-    assert judgment["label"] == "partial_answer"
-    assert judgment["relevant"] is True
-    assert judgment["answerable_from_this_paper"] is True
+    assert judgment["is_relevant_to_answer"] is True
+    assert judgment["has_usable_answer_evidence"] is True
+    assert judgment["send_to_answer_agent"] is True
     assert judgment["evidence_chunk_ids"] == ["p1#table"]
-    assert [
-        unit["value"] for unit in judgment["candidate_answer"]["units"]
-    ] == [81.2, 14.7]
-    assert judgment["calls"][0]["parse_error"].startswith(
-        "direct_answer for a multiple-choice query requires exactly one"
-    )
-    assert judgment["calls"][1]["parse_error"] is None
-    assert "downgrade to partial_answer" in llm.calls[1]["prompt"]
-    assert "Keep an authoritative wrong-owner candidate irrelevant" in llm.calls[1][
-        "prompt"
-    ]
+    assert judgment["candidate_answer"] == {"units": [], "rows": []}
+    assert judgment["logical_judgment_attempt_count"] == 1
+    assert judgment["calls"][0]["parse_error"] is None
+    assert len(llm.calls) == 1
 
 
-def test_stage_one_repairs_direct_multi_paper_operand_from_mention_only(
+def test_stage_one_routes_one_direct_multi_paper_operand_without_repair(
     tmp_path,
 ):
     corpus = tmp_path / "chunks.jsonl"
@@ -2108,44 +3358,14 @@ def test_stage_one_repairs_direct_multi_paper_operand_from_mention_only(
         ["multiple_choice"],
         options={"A": "59.7 / 40.1", "B": "59.7 / 42.8"},
     )
-    initial = {
-        "paper_role": "answer_source",
-        "label": "mention_only",
-        "answerable_from_this_paper": False,
-        "satisfied_constraints": ["Cedar owner", "Cedar score=59.7"],
-        "missing_constraints": ["Flint score"],
-        "blocking_mismatches": [],
-        "visual": {"required": False, "status": "not_needed"},
-        "evidence": [
-            {
-                "chunk_id": "p1#table",
-                "purpose": "answer",
-                "quote_or_value": "Cedar requested score: 59.7",
-            }
-        ],
-        "candidate_answer": {"units": [], "rows": []},
-        "confidence": 0.94,
-        "reason": "The other method is not in this paper.",
-    }
-    repair = {
-        **initial,
-        "label": "partial_answer",
-        "answerable_from_this_paper": True,
-        "candidate_answer": {
-            "units": [
-                {
-                    "name": "Cedar requested operand",
-                    "value": 59.7,
-                    "value_kind": "reported",
-                    "matched_option_labels": [],
-                }
-            ],
-            "rows": [],
-        },
-        "reason": "Cedar is one complete directly reported operand.",
-    }
     llm = _RecordingMultimodalLLM(
-        [json.dumps(initial), json.dumps(repair)]
+        [
+            _simple_judgment(
+                relevant=True,
+                usable=True,
+                chunk_ids=["p1#table"],
+            )
+        ]
     )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
@@ -2156,27 +3376,17 @@ def test_stage_one_repairs_direct_multi_paper_operand_from_mention_only(
         ),
     )
 
-    assert judgment["label"] == "partial_answer"
-    assert judgment["relevant"] is True
-    assert judgment["answerable_from_this_paper"] is True
-    assert judgment["candidate_answer"]["units"] == [
-        {
-            "name": "Cedar requested operand",
-            "value": 59.7,
-            "value_kind": "reported",
-            "matched_option_labels": [],
-        }
-    ]
-    assert judgment["calls"][0]["parse_error"].startswith(
-        "mention_only cannot cite answer-purpose evidence"
-    )
-    assert judgment["calls"][1]["parse_error"] is None
-    assert "one directly reported requested operand is partial_answer" in llm.calls[
-        1
-    ]["prompt"]
+    assert judgment["is_relevant_to_answer"] is True
+    assert judgment["has_usable_answer_evidence"] is True
+    assert judgment["send_to_answer_agent"] is True
+    assert judgment["evidence_chunk_ids"] == ["p1#table"]
+    assert judgment["candidate_answer"] == {"units": [], "rows": []}
+    assert judgment["logical_judgment_attempt_count"] == 1
+    assert judgment["calls"][0]["parse_error"] is None
+    assert "does not need to complete the entire answer" in llm.calls[0]["prompt"]
 
 
-def test_stage_one_repairs_wrong_owner_figure_candidate_without_cross_image(
+def test_named_owner_gate_rejects_wrong_figure_owner_without_cross_image(
     tmp_path,
 ):
     corpus = tmp_path / "chunks.jsonl"
@@ -2210,58 +3420,7 @@ def test_stage_one_repairs_wrong_owner_figure_candidate_without_cross_image(
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
     )
-    initial = {
-        "paper_role": "target_owner",
-        "label": "direct_answer",
-        "answerable_from_this_paper": True,
-        "satisfied_constraints": ["Figure 2"],
-        "missing_constraints": [],
-        "blocking_mismatches": [],
-        "visual": {"required": True, "status": "inspected"},
-        "evidence": [
-            {
-                "chunk_id": "p1#fig2",
-                "purpose": "constraint",
-                "quote_or_value": "Figure 2",
-            },
-            {
-                "chunk_id": "p1#fig2",
-                "purpose": "answer",
-                "quote_or_value": "I set an alarm for 7:00.",
-            },
-        ],
-        "candidate_answer": {
-            "units": [
-                {
-                    "name": "assistant reply",
-                    "value": "I set an alarm for 7:00.",
-                    "value_kind": "visual",
-                    "matched_option_labels": [],
-                }
-            ],
-            "rows": [],
-        },
-        "confidence": 0.93,
-        "reason": "The figure appears to contain the reply.",
-    }
-    repair = {
-        "paper_role": "distractor",
-        "label": "irrelevant",
-        "answerable_from_this_paper": False,
-        "satisfied_constraints": [],
-        "missing_constraints": ["Cedar Navigation Lab paper owner"],
-        "blocking_mismatches": [
-            "candidate is Cedar-Reflection, not Cedar Navigation Lab"
-        ],
-        "visual": {"required": False, "status": "not_needed"},
-        "evidence": [],
-        "candidate_answer": {"units": [], "rows": []},
-        "confidence": 0.99,
-        "reason": "The title-like phrase names a different paper owner.",
-    }
-    llm = _RecordingMultimodalLLM(
-        [json.dumps(initial), json.dumps(repair)]
-    )
+    llm = _RecordingMultimodalLLM([])
     reader = PairwiseAOAIReader(
         ChunkStore(corpus, image_root=_image_root(tmp_path)), llm
     )
@@ -2275,30 +3434,40 @@ def test_stage_one_repairs_wrong_owner_figure_candidate_without_cross_image(
         },
     )
 
+    correct_owner = CandidatePaper(
+        "p2",
+        1,
+        "Cedar Navigation Lab: Learning Reliable Screen Routes",
+        "NeurIPS",
+        2025,
+    )
+    wrong_owner = CandidatePaper(
+        "p1",
+        8,
+        "Cedar-Reflection: Recovering GUI Agents from Mistakes",
+        "NeurIPS",
+        2025,
+    )
+    resolution = resolve_named_owner(query, (correct_owner, wrong_owner))
+
     judgment = reader.judge_candidate(
         query,
-        CandidatePaper(
-            "p1",
-            8,
-            "Cedar-Reflection: Recovering GUI Agents from Mistakes",
-            "NeurIPS",
-            2025,
-        ),
+        wrong_owner,
+        owner_resolution=resolution,
     )
 
+    assert resolution["paper_id"] == "p2"
+    assert resolution["hard_gate"] is True
+    assert llm.calls == []
+    assert judgment["is_relevant_to_answer"] is False
+    assert judgment["has_usable_answer_evidence"] is False
+    assert judgment["send_to_answer_agent"] is False
+    assert judgment["evidence_chunk_ids"] == []
     assert judgment["label"] == "irrelevant"
     assert judgment["paper_role"] == "distractor"
-    assert judgment["logical_judgment_attempt_count"] == 2
-    assert "duplicate evidence" in judgment["calls"][0]["parse_error"]
-    assert judgment["calls"][1]["parse_error"] is None
-    assert [call["image_paths"] for call in llm.calls] == [
-        [str(figure_2_path)],
-        [str(figure_2_path)],
-    ]
-    assert "treat the title-like name as an explicit owner" in llm.calls[0][
-        "prompt"
-    ]
-    assert "Emit each chunk_id exactly once" in llm.calls[1]["prompt"]
+    assert judgment["base_judgment_call_count"] == 0
+    assert judgment["logical_judgment_attempt_count"] == 0
+    assert judgment["calls"] == []
 
 
 def test_stage_one_rejects_claimed_visual_inspection_without_attachment(tmp_path):
@@ -2409,7 +3578,7 @@ def test_wrong_owner_text_evidence_cannot_claim_visual_inspection(tmp_path):
         )
 
 
-def test_stage_one_repairs_q031_wrong_owner_visual_conflict_without_exhaustion(
+def test_stage_one_q031_wrong_owner_returns_simple_negative_without_repair(
     tmp_path,
 ):
     corpus = tmp_path / "chunks.jsonl"
@@ -2438,16 +3607,9 @@ def test_stage_one_repairs_q031_wrong_owner_visual_conflict_without_exhaustion(
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
     )
-    initial = _wrong_owner_judgment(
-        visual_required=True,
-        visual_status="inspected",
-        evidence_chunk_id="p1#text",
+    llm = _RecordingMultimodalLLM(
+        [_simple_judgment(relevant=False, usable=False)]
     )
-    repair = _wrong_owner_judgment(
-        visual_required=True,
-        visual_status="not_needed",
-    )
-    llm = _RecordingMultimodalLLM([initial, repair])
     reader = PairwiseAOAIReader(
         ChunkStore(corpus, image_root=_image_root(tmp_path)), llm
     )
@@ -2468,21 +3630,19 @@ def test_stage_one_repairs_q031_wrong_owner_visual_conflict_without_exhaustion(
         ),
     )
 
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 1
+    assert judgment["is_relevant_to_answer"] is False
+    assert judgment["has_usable_answer_evidence"] is False
+    assert judgment["send_to_answer_agent"] is False
+    assert judgment["evidence_chunk_ids"] == []
     assert judgment["label"] == "irrelevant"
     assert judgment["visual"] == {
         "required": False,
         "status": "not_needed",
     }
-    assert judgment["logical_judgment_attempt_count"] == 2
-    assert judgment["calls"][0]["parse_error"] == (
-        "visual.status=inspected requires evidence from the actually attached "
-        "source image"
-    )
-    assert judgment["calls"][1]["parse_error"] is None
-    assert "visual.required is candidate-local, not query-level" in llm.calls[1][
-        "prompt"
-    ]
+    assert judgment["question_type"] == "visual"
+    assert judgment["logical_judgment_attempt_count"] == 1
+    assert judgment["calls"][0]["parse_error"] is None
 
 
 def test_stage_one_rejects_visual_evidence_when_a_different_image_was_attached(
@@ -2810,7 +3970,7 @@ def test_answer_prompt_preserves_source_linked_stage_one_hypotheses_not_raw_pros
     prompt = reader._answer_prompt(query, [judgment], context)
 
     summary_text = prompt.split(
-        "Accepted paper summary (fallible source-linked hypotheses, not evidence):\n",
+        "Stage-1 handoff metadata (routing information, not evidence):\n",
         1,
     )[1].split("\n\n", 1)[0]
     summary = json.loads(summary_text)
@@ -3097,34 +4257,12 @@ def test_named_owner_resolver_is_unique_conservative_and_typo_tolerant():
     assert unresolved["hard_gate"] is False
 
 
-def test_resolved_correct_owner_normalizes_model_role_without_forcing_relevance(
+def test_resolved_correct_owner_preserves_relevance_without_forcing_handoff(
     tmp_path,
 ):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
-    response = json.dumps(
-        {
-            "paper_role": "distractor",
-            "label": "mention_only",
-            "answerable_from_this_paper": False,
-            "satisfied_constraints": ["DynaPipe owner"],
-            "missing_constraints": ["requested author-filtered count"],
-            "blocking_mismatches": [
-                "Candidate title does not match the named owner."
-            ],
-            "visual": {"required": False, "status": "not_needed"},
-            "evidence": [
-                {
-                    "chunk_id": "p1#table",
-                    "purpose": "constraint",
-                    "quote_or_value": "owner context only",
-                }
-            ],
-            "candidate_answer": {"units": [], "rows": []},
-            "confidence": 0.4,
-            "reason": "The owner is correct but the requested count is absent.",
-        }
-    )
+    response = _simple_judgment(relevant=True, usable=False)
     llm = _RecordingMultimodalLLM([response])
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
     query = Query(
@@ -3142,83 +4280,24 @@ def test_resolved_correct_owner_normalizes_model_role_without_forcing_relevance(
     )
 
     assert resolution["hard_gate"] is True
+    assert judgment["is_relevant_to_answer"] is True
+    assert judgment["has_usable_answer_evidence"] is False
+    assert judgment["send_to_answer_agent"] is False
     assert judgment["paper_role"] == "target_owner"
     assert judgment["identity_conflict"] is False
-    assert judgment["label"] == "mention_only"
-    assert judgment["relevant"] is False
+    assert judgment["label"] == "supporting_only"
+    assert judgment["relevant"] is True
     assert judgment["blocking_mismatches"] == []
-    assert judgment["evidence_chunk_ids"] == ["p1#table"]
-    review_pool = _answer_review_pool([judgment])
-    assert review_pool[0]["answer_pool_reason"] == "target_owner_recheck"
-    assert review_pool[0]["stage1_label"] == "mention_only"
-
-    scientific_mismatch = json.loads(response)
-    scientific_mismatch["blocking_mismatches"] = [
-        "This candidate paper uses a different dataset than the question requests."
-    ]
-    parsed = reader._parse_judgment(
-        query=query,
-        candidate=candidate,
-        payload_text=json.dumps(scientific_mismatch),
-        allowed_records={
-            record["chunk_id"]: record
-            for record in reader.chunk_store.load_paper(candidate.paper_id)
-        },
-        resolved_target_owner=True,
-    )
-    assert parsed["paper_role"] == "target_owner"
-    assert parsed["blocking_mismatches"] == [
-        "This candidate paper uses a different dataset than the question requests."
-    ]
-
-    uncertain_identity_mismatch = json.loads(response)
-    uncertain_identity_mismatch["paper_role"] = "uncertain"
-    uncertain_parsed = reader._parse_judgment(
-        query=query,
-        candidate=candidate,
-        payload_text=json.dumps(uncertain_identity_mismatch),
-        allowed_records={
-            record["chunk_id"]: record
-            for record in reader.chunk_store.load_paper(candidate.paper_id)
-        },
-        resolved_target_owner=True,
-    )
-    assert uncertain_parsed["paper_role"] == "target_owner"
-    assert uncertain_parsed["blocking_mismatches"] == []
-    uncertain_review_pool = _answer_review_pool(
-        [
-            {
-                **uncertain_parsed,
-                "paper_id": candidate.paper_id,
-                "rank": candidate.rank,
-                "relevant": False,
-                "identity_conflict": False,
-            }
-        ]
-    )
-    assert uncertain_review_pool[0]["answer_pool_reason"] == "target_owner_recheck"
+    assert judgment["evidence_chunk_ids"] == []
+    assert judgment["candidate_answer"] == {"units": [], "rows": []}
+    assert _answer_review_pool([judgment]) == []
+    assert len(llm.calls) == 1
 
 
-def test_soft_named_match_does_not_override_model_role(tmp_path):
+def test_soft_named_match_does_not_override_simple_relevance_decision(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
-    response = json.dumps(
-        {
-            "paper_role": "distractor",
-            "label": "irrelevant",
-            "answerable_from_this_paper": False,
-            "satisfied_constraints": ["UniAD is cited"],
-            "missing_constraints": ["a paper using UniAD in its comparison table"],
-            "blocking_mismatches": [
-                "The candidate is a cited baseline, not an answer-bearing paper."
-            ],
-            "visual": {"required": False, "status": "not_needed"},
-            "evidence": [],
-            "candidate_answer": {"units": [], "rows": []},
-            "confidence": 0.9,
-            "reason": "The named title is only the cited baseline.",
-        }
-    )
+    response = _simple_judgment(relevant=False, usable=False)
     llm = _RecordingMultimodalLLM([response])
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
     query = Query(
@@ -3243,12 +4322,14 @@ def test_soft_named_match_does_not_override_model_role(tmp_path):
 
     assert resolution["status"] == "resolved"
     assert resolution["hard_gate"] is False
-    assert judgment["paper_role"] == "distractor"
-    assert judgment["identity_conflict"] is True
-    assert judgment["blocking_mismatches"] == [
-        "The candidate is a cited baseline, not an answer-bearing paper."
-    ]
+    assert judgment["is_relevant_to_answer"] is False
+    assert judgment["has_usable_answer_evidence"] is False
+    assert judgment["send_to_answer_agent"] is False
+    assert judgment["paper_role"] == "topic_only"
+    assert judgment["identity_conflict"] is False
+    assert judgment["evidence_chunk_ids"] == []
     assert _answer_review_pool([judgment]) == []
+    assert len(llm.calls) == 1
 
 
 def test_named_owner_gate_checkpoints_wrong_owner_without_aoai(tmp_path):
@@ -3277,6 +4358,10 @@ def test_named_owner_gate_checkpoints_wrong_owner_without_aoai(tmp_path):
     assert llm.calls == []
     assert judgment["paper_role"] == "distractor"
     assert judgment["label"] == "irrelevant"
+    assert judgment["is_relevant_to_answer"] is False
+    assert judgment["has_usable_answer_evidence"] is False
+    assert judgment["send_to_answer_agent"] is False
+    assert judgment["evidence_chunk_ids"] == []
     assert judgment["identity_conflict"] is True
     assert judgment["evidence"] == []
     assert judgment["visual"] == {"required": False, "status": "not_needed"}
@@ -3305,7 +4390,7 @@ def test_named_owner_gate_checkpoints_wrong_owner_without_aoai(tmp_path):
     )
 
 
-def test_stage_one_q004_repairs_four_without_inventory_to_eight_spatial_axes(
+def test_stage_one_q004_routes_attached_figure_without_counting_spatial_axes(
     tmp_path,
 ):
     image_path = _write_trusted_image(tmp_path, "p1", "figure-4.png")
@@ -3336,50 +4421,12 @@ def test_stage_one_q004_repairs_four_without_inventory_to_eight_spatial_axes(
     candidate = CandidatePaper("p1", 1, "DynaPipe: Dynamic Layer Redistribution")
     resolution = resolve_named_owner(query, (candidate,))
 
-    def response(*, value, label, counted_items=None):
-        unit = {
-            "name": "Figure 4 subfigure count",
-            "value": value,
-            "value_kind": "visual",
-            "matched_option_labels": [label],
-        }
-        if counted_items is not None:
-            unit["counted_items"] = counted_items
-        return json.dumps(
-            {
-                "paper_role": "target_owner",
-                "label": "direct_answer",
-                "answerable_from_this_paper": True,
-                "satisfied_constraints": ["DynaPipe Figure 4"],
-                "missing_constraints": [],
-                "blocking_mismatches": [],
-                "visual": {"required": True, "status": "inspected"},
-                "evidence": [
-                    {
-                        "chunk_id": "p1#fig4",
-                        "purpose": "answer",
-                        "quote_or_value": "Figure 4",
-                    }
-                ],
-                "candidate_answer": {"units": [unit], "rows": []},
-                "confidence": 0.99,
-                "reason": "Read from the attached figure.",
-            }
-        )
-
-    axes = [
-        f"{row}-row col-{column} axes"
-        for row in ("top", "bottom")
-        for column in range(1, 5)
-    ]
     llm = _RecordingMultimodalLLM(
         [
-            response(
-                value=4,
-                label="B",
-                counted_items=["(a)", "(b)", "Qwen2.5-14B", "Qwen2.5-32B"],
-            ),
-            response(value=8, label="C", counted_items=axes),
+            _simple_judgment(
+                relevant=True,
+                usable=False,
+            )
         ]
     )
     reader = PairwiseAOAIReader(
@@ -3393,21 +4440,24 @@ def test_stage_one_q004_repairs_four_without_inventory_to_eight_spatial_axes(
         owner_resolution=resolution,
     )
 
-    assert len(llm.calls) == 2
-    assert "must use a distinct spatial identifier" in (
-        judgment["calls"][0]["parse_error"]
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["image_paths"] == [str(image_path)]
+    prompt = str(llm.calls[0]["prompt"])
+    assert 'source_types=["figure"]' in prompt
+    assert '"figure_id":"Figure 4"' in prompt
+    assert judgment["is_relevant_to_answer"] is True
+    assert judgment["model_has_usable_answer_evidence"] is False
+    assert judgment["has_usable_answer_evidence"] is True
+    assert judgment["send_to_answer_agent"] is True
+    assert judgment["question_type"] == "visual"
+    assert judgment["evidence_chunk_ids"] == ["p1#fig4"]
+    assert judgment["candidate_answer"] == {"units": [], "rows": []}
+    assert any(
+        "exact numbered object" in adjustment
+        for adjustment in judgment["routing_adjustments"]
     )
-    assert "independently bounded coordinate-axes" in str(
-        llm.calls[1]["prompt"]
-    )
-    assert judgment["candidate_answer"]["units"][0] == {
-        "name": "Figure 4 subfigure count",
-        "value": 8,
-        "value_kind": "visual",
-        "matched_option_labels": ["C"],
-        "counted_items": axes,
-    }
-    assert judgment["judgment_call_count"] == 2
+    assert judgment["calls"][0]["parse_error"] is None
+    assert judgment["judgment_call_count"] == 1
 
 
 def test_q004_visual_count_repairs_bare_group_labels_to_eight_spatial_axes(
@@ -3634,10 +4684,11 @@ def test_table_prompt_requires_exact_schema_keys_and_source_cells(tmp_path):
     prompt = reader._answer_prompt(query, relevant, context)
 
     assert "Use every table_schema name verbatim" in prompt
-    assert "exact string displayed in the cited" in prompt
+    assert "``source_exact`` applies only to non-row-key string cells" in prompt
+    assert "string displayed in the cited source cell" in prompt
     assert "Do not append %, units, or explanatory prose" in prompt
     assert "unless they literally appear in" in prompt
-    assert "Preserve punctuation and typography byte-for-byte as displayed" in prompt
+    assert "preserve punctuation and typography\n  byte-for-byte as displayed" in prompt
     assert "Do not numerically normalize a string-valued cell" in prompt
     assert "Preserve\n  a visibly printed missing-value mark as a string" in prompt
     assert "only a genuinely" in prompt
@@ -3688,8 +4739,9 @@ def test_table_prompt_uses_canonical_row_keys_and_splits_named_settings(
     prompt = reader._answer_prompt(query, relevant, context)
 
     assert "row-key entity or method name" in prompt
-    assert "canonical spelling visibly" in prompt
-    assert "question contains an obvious typo" in prompt
+    assert "preserve the query-facing shortest" in prompt
+    assert "Correct it from the source only when it is a" in prompt
+    assert "unique one-character insertion" in prompt
     assert "copy its spacing" in prompt
     assert "typography exactly from the source" in prompt
     assert "two\n  separately requested rows" in prompt
@@ -4066,7 +5118,7 @@ def test_answer_purpose_image_precedes_higher_rank_constraint_image(tmp_path):
     ]
 
 
-def test_stage_one_rejects_answer_evidence_without_official_locator(tmp_path):
+def test_stage_one_hands_off_usable_chunk_without_official_locator(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     corpus.write_text(
         json.dumps(
@@ -4083,14 +5135,23 @@ def test_stage_one_rejects_answer_evidence_without_official_locator(tmp_path):
     )
     llm = FakeLLM(
         responses=[
-            _judgment("direct_answer", "p1#bad"),
-            _judgment("direct_answer", "p1#bad"),
+            _simple_judgment(
+                relevant=True,
+                usable=True,
+                chunk_ids=["p1#bad"],
+            )
         ]
     )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
     candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
-    with pytest.raises(ReadingResponseError, match="submission-eligible"):
-        reader.judge_candidate(_query(), candidate)
+
+    judgment = reader.judge_candidate(_query(), candidate)
+
+    assert judgment["is_relevant_to_answer"] is True
+    assert judgment["has_usable_answer_evidence"] is True
+    assert judgment["send_to_answer_agent"] is True
+    assert judgment["evidence_chunk_ids"] == ["p1#bad"]
+    assert judgment["evidence"][0]["locator"] == {}
 
 
 def test_answer_repairs_invalid_locator_once_and_keeps_fail_closed_evidence(tmp_path):
@@ -4621,6 +5682,69 @@ def test_answer_repair_explains_unique_argmin_fact_contract(
     assert "keep a lone 'KS' as 'KS', not 'KS (m = 128)'" in prompt
 
 
+def test_answer_repair_prioritizes_direct_reported_optimum_over_argmax(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    store = ChunkStore(corpus)
+    reader = PairwiseAOAIReader(store, FakeLLM())
+    record = store.load_paper("p1")[0]
+    query = Query(
+        "reported_optimum",
+        (
+            "In the Cedar paper, what optimal temporal decay factor gamma "
+            "achieves the best performance across three base models, and what "
+            "happens when gamma exceeds 1.0?"
+        ),
+        ["multiple_choice"],
+        options={"A": "gamma=0.97; stable", "C": "gamma=0.98; harmful"},
+    )
+
+    prompt = reader._answer_locator_repair_prompt(
+        query=query,
+        original_prompt="ORIGINAL",
+        rejected_response='{"status":"ready"}',
+        error=ReadingResponseError(
+            "q: question explicitly requests argmax/argmin; derivation must use "
+            "a grounded operation"
+        ),
+        context_records={"p1#table": record},
+        repair_attempt=1,
+    )
+
+    assert "direct reported-optimum lookup" in prompt
+    assert "value_kind='reported'" in prompt
+    assert "operations=[]" in prompt
+    assert "not a performance score" in prompt
+    assert "argmax/argmin comparison-contract error" not in prompt
+
+
+def test_answer_repair_uses_select_where_for_labeled_equality_selection(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    store = ChunkStore(corpus)
+    reader = PairwiseAOAIReader(store, FakeLLM())
+    record = store.load_paper("p1")[0]
+
+    prompt = reader._answer_locator_repair_prompt(
+        original_prompt=(
+            'ORIGINAL\n<example id="A27_same_performance_requires_both_operands">'
+        ),
+        rejected_response='{"status":"ready"}',
+        error=ReadingResponseError(
+            "q: derivation.operations[0].answer_binding.answer_fragment='Task B' "
+            "does not express expected result True"
+        ),
+        context_records={"p1#table": record},
+        repair_attempt=1,
+    )
+
+    assert "labeled comparison-selection task" in prompt
+    assert "kind='select_where'" in prompt
+    assert "every operand fact exactly once" in prompt
+    assert "expected and answer_fragment are that label, not boolean" in prompt
+    assert "argmax/argmin comparison-contract error" not in prompt
+
+
 def test_citation_count_repair_prompts_require_rebuilt_identity_inventory(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
@@ -4645,11 +5769,10 @@ def test_citation_count_repair_prompts_require_rebuilt_identity_inventory(tmp_pa
         repair_attempt=1,
     )
 
-    for prompt in (judgment_prompt, answer_prompt):
-        assert "FirstAuthor et al. (YYYY)" in prompt
-        assert "method acronym" in prompt
-        assert "last-reference index" in prompt
-    assert "counted_items" in judgment_prompt
+    assert "exactly these fields: is_relevant_to_answer" in judgment_prompt
+    assert "FirstAuthor et al. (YYYY)" in answer_prompt
+    assert "method acronym" in answer_prompt
+    assert "last-reference index" in answer_prompt
     assert "fact.value" in answer_prompt
     assert "operation.items" in answer_prompt
 
@@ -4703,6 +5826,38 @@ def test_answer_repair_splits_object_fact_for_freeform_and_table(tmp_path):
     assert "do not bind the object itself to text" in prompt
 
 
+def test_answer_repair_handles_canonical_title_error_case_insensitively(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    store = ChunkStore(corpus)
+    reader = PairwiseAOAIReader(
+        store,
+        FakeLLM(),
+        paper_set_policy="fixed_selected",
+    )
+    record = store.load_paper("p1")[0]
+
+    prompt = reader._answer_locator_repair_prompt(
+        original_prompt="ORIGINAL",
+        rejected_response=(
+            '{"answer":{"table":{"rows":[{"Paper Title":'
+            '"Don\\u00026#x27;t Shake"}]}}}'
+        ),
+        error=ReadingResponseError(
+            "q: canonical Paper Title mismatch for p1 at "
+            "answer.table.rows[0].Paper Title; expected=\"Don&#x27;t Shake\", "
+            "actual=\"Don\\u00026#x27;t Shake\""
+        ),
+        context_records={"p1#table": record},
+        repair_attempt=1,
+    )
+
+    assert "canonical-title copying error" in prompt
+    assert "byte-for-byte" in prompt
+    assert "preserve an HTML entity such as '&#x27;' literally" in prompt
+    assert "Do not decode it to an apostrophe" in prompt
+
+
 def test_answer_repair_accumulates_visual_scalar_and_support_constraints(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     _write_corpus(corpus)
@@ -4731,6 +5886,44 @@ def test_answer_repair_accumulates_visual_scalar_and_support_constraints(tmp_pat
     assert "All validation errors seen so far" in prompt
     assert prior_errors[0] in prompt
     assert "Do not reintroduce any earlier error" in prompt
+
+
+def test_axis_extent_repair_removes_false_argmax_but_preserves_table_fact_choice(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    record = reader.chunk_store.load_paper("p1")[0]
+    query = Query(
+        "axis_extent_repair",
+        (
+            "Roughly what is the highest population-distance value on the "
+            "horizontal axis, and what error does the multimodal model report "
+            "on SpeechSet?"
+        ),
+        ["multiple_choice"],
+        options={"A": "axis 50; error 0.517", "B": "axis 70; error 0.412"},
+    )
+
+    prompt = reader._answer_locator_repair_prompt(
+        query=query,
+        original_prompt="ORIGINAL",
+        rejected_response='{"status":"ready"}',
+        error=ReadingResponseError(
+            "question explicitly requests argmax/argmin; derivation must use "
+            "a grounded operation"
+        ),
+        context_records={str(record["chunk_id"]): record},
+        repair_attempt=1,
+    )
+
+    assert "This query contains an axis-extent lookup" in prompt
+    assert "terminal visible tick/limit, not a winner among methods" in prompt
+    assert "Delete any argmax/argmin for that clause" in prompt
+    assert "Table cell copied from visible extracted text may be" in prompt
+    assert "value_kind='reported'" in prompt
+    assert "argmax/argmin comparison-contract error" not in prompt
 
 
 def test_candidate_cache_key_changes_when_image_bytes_change(tmp_path):
@@ -4890,7 +6083,9 @@ def test_prompt_jailbreak_filter_retries_with_title_abstract_only(tmp_path):
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
     )
-    llm = _PromptFilterOnceLLM(_judgment("irrelevant"))
+    llm = _PromptFilterOnceLLM(
+        _simple_judgment(relevant=False, usable=False)
+    )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
     judgment = reader.judge_candidate(
@@ -4982,7 +6177,8 @@ def test_sexual_prompt_filter_retries_with_title_abstract_only(tmp_path):
         )
     )
     llm = _PromptFilterOnceLLM(
-        _judgment("irrelevant"), error=sexual_filter
+        _simple_judgment(relevant=False, usable=False),
+        error=sexual_filter,
     )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
@@ -5048,7 +6244,10 @@ def test_title_abstract_filter_gets_final_metadata_only_fallback(tmp_path):
                         filtered_categories=("sexual",),
                     )
                 )
-            return {"text": _judgment("irrelevant"), "usage": None}
+            return {
+                "text": _simple_judgment(relevant=False, usable=False),
+                "usage": None,
+            }
 
     llm = TwoFilterLLM()
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
@@ -5125,7 +6324,9 @@ def test_prompt_jailbreak_filter_uses_metadata_when_no_title_abstract(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    llm = _PromptFilterOnceLLM(_judgment("irrelevant"))
+    llm = _PromptFilterOnceLLM(
+        _simple_judgment(relevant=False, usable=False)
+    )
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
     judgment = reader.judge_candidate(
@@ -5162,12 +6363,19 @@ def test_image_policy_rejection_falls_back_to_text_and_is_recorded(tmp_path):
     llm = PolicyRejectingLLM()
     reader = PairwiseAOAIReader(ChunkStore(corpus), llm)
 
-    result = reader._complete("prompt", ["blocked.jpg"])
+    result = reader._complete(
+        "prompt",
+        ["blocked.jpg"],
+        semantic_phase="judgment_initial_full_context",
+    )
 
     assert [item["image_paths"] for item in llm.calls] == [["blocked.jpg"], None]
     assert "No image is attached" in llm.calls[1]["prompt"]
     assert "Ignore every earlier image mapping" in llm.calls[1]["prompt"]
     assert "do not claim visual inspection" in llm.calls[1]["prompt"]
+    assert "Judge A independently" in llm.calls[1]["prompt"]
+    assert "has_usable_answer_evidence=false" in llm.calls[1]["prompt"]
+    assert "evidence_chunk_ids=[]" in llm.calls[1]["prompt"]
     assert result["image_fallback_reason"] == "content_policy_violation"
     assert result["requested_image_count"] == 1
     assert result["attached_image_count"] == 0
@@ -5218,7 +6426,10 @@ def test_prompt_filter_after_image_fallback_counts_each_provider_call(tmp_path):
                 raise ImagePolicyError("blocked image")
             if len(self.calls) == 2:
                 raise _PromptFilterError()
-            return {"text": _judgment("irrelevant"), "usage": None}
+            return {
+                "text": _simple_judgment(relevant=False, usable=False),
+                "usage": None,
+            }
 
     llm = ImageThenPromptFilterLLM()
     reader = PairwiseAOAIReader(
@@ -5246,6 +6457,13 @@ def test_prompt_filter_after_image_fallback_counts_each_provider_call(tmp_path):
         str(llm.calls[1]["prompt"]).encode("utf-8")
     ).hexdigest()
     assert attempt["prompt_characters"] == len(str(llm.calls[1]["prompt"]))
+    assert judgment["is_relevant_to_answer"] is False
+    assert judgment["has_usable_answer_evidence"] is False
+    assert judgment["send_to_answer_agent"] is False
+    assert judgment["requested_image_count"] == 0
+    assert judgment["requested_image_chunk_ids"] == []
+    assert judgment["attached_image_count"] == 0
+    assert judgment["attached_image_chunk_ids"] == []
     assert judgment["judgment_call_count"] == 3
     assert judgment["provider_invocation_count"] == 3
 
@@ -5253,9 +6471,15 @@ def test_prompt_filter_after_image_fallback_counts_each_provider_call(tmp_path):
 def test_explicit_image_attaches_only_exact_object_in_one_paper_call(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     image_paths = _write_image_corpus(corpus, tmp_path, image_count=12)
-    raw = json.loads(_judgment("direct_answer", "p1#fig12", answer_meaning="12"))
-    raw["visual"] = {"required": True, "status": "inspected"}
-    llm = _RecordingMultimodalLLM([json.dumps(raw)])
+    llm = _RecordingMultimodalLLM(
+        [
+            _simple_judgment(
+                relevant=True,
+                usable=True,
+                chunk_ids=["p1#fig12"],
+            )
+        ]
+    )
     reader = PairwiseAOAIReader(
         ChunkStore(corpus, image_root=_image_root(tmp_path)),
         llm,
@@ -5278,14 +6502,19 @@ def test_explicit_image_attaches_only_exact_object_in_one_paper_call(tmp_path):
     assert "figure-12.png" in prompt
     assert judgment["base_judgment_call_count"] == 1
     assert judgment["judgment_call_count"] == 1
-    assert judgment["label"] == "direct_answer"
+    assert judgment["is_relevant_to_answer"] is True
+    assert judgment["has_usable_answer_evidence"] is True
+    assert judgment["send_to_answer_agent"] is True
     assert judgment["evidence_chunk_ids"] == ["p1#fig12"]
     assert judgment["judgment"]["visual"] == {
         "required": True,
         "status": "inspected",
     }
     assert judgment["paper_readable_image_count"] == 12
+    assert judgment["requested_image_count"] == 1
+    assert judgment["requested_image_chunk_ids"] == ["p1#fig12"]
     assert judgment["attached_image_count"] == 1
+    assert judgment["attached_image_chunk_ids"] == ["p1#fig12"]
     assert judgment["paper_image_compacted"] is True
     assert len(judgment["omitted_image_chunk_ids"]) == 11
     assert "batch_count" not in judgment
@@ -5316,6 +6545,68 @@ def test_paper_image_selection_is_deterministic(tmp_path):
     assert first["image_paths"][0].endswith("figure-12.png")
     assert first["total_readable_image_count"] == 12
     assert len(first["omitted_image_chunk_ids"]) == 11
+
+
+def test_explicit_figure_term_context_excludes_title_body_and_tables(tmp_path):
+    figure_path = _write_trusted_image(tmp_path, "p1", "figure-1.png")
+    table_path = _write_trusted_image(tmp_path, "p1", "table-1.png")
+    corpus = tmp_path / "chunks.jsonl"
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#title",
+            "chunk_type": "title_abstract",
+            "text": "MCTS appears in the paper title and body.",
+            "metadata": {},
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#fig1",
+            "chunk_type": "figure",
+            "text": "[ACL 2025] MCTS in the Paper Title\nFigure 1: Primary framework with UCT.",
+            "metadata": {
+                "page": 2,
+                "figure_id": "Figure 1",
+                "image_path": str(figure_path),
+            },
+        },
+        {
+            "paper_id": "p1",
+            "chunk_id": "p1#tab1",
+            "chunk_type": "table",
+            "text": "Table 1: MCTS result.",
+            "metadata": {
+                "page": 3,
+                "table_id": "Table 1",
+                "image_path": str(table_path),
+            },
+        },
+    ]
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)), FakeLLM()
+    )
+    query = Query(
+        "figure_term",
+        "Which papers explicitly mention MCTS in their primary framework figure?",
+        ["table"],
+        table_schema=[
+            {"name": "Paper", "type": "string", "is_row_key": True}
+        ],
+    )
+
+    context = reader._paper_context(
+        query, CandidatePaper("p1", 1, "MCTS in the Paper Title"), records
+    )
+
+    assert context["selected_chunk_ids"] == ["p1#fig1"]
+    assert context["selected_image_chunk_ids"] == ["p1#fig1"]
+    assert "MCTS in the Paper Title" not in context["text"]
+    assert "Figure 1: Primary framework with UCT." in context["text"]
+    assert "Table 1: MCTS result" not in context["text"]
 
 
 def test_implicit_numeric_comparison_keeps_early_figure_fallbacks(tmp_path):
@@ -5427,3 +6718,275 @@ def test_reader_rejects_more_images_than_aoai_accepts(tmp_path, image_limits):
 
     with pytest.raises(ValueError, match="between 0 and 10"):
         PairwiseAOAIReader(ChunkStore(corpus), FakeLLM(), **image_limits)
+
+
+def _selected_evidence_response(*facts):
+    return json.dumps({"evidence_facts": list(facts)})
+
+
+def test_fixed_selected_mode_extracts_facts_and_preserves_all_submitted_papers(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    llm = FakeLLM(
+        responses=[
+            _selected_evidence_response(
+                {
+                    "chunk_id": "p1#table",
+                    "purpose": "answer_value",
+                    "fact": "Method X reports 42 on Dataset Y.",
+                    "source_excerpt": "Method X reports 42 on Dataset Y.",
+                }
+            ),
+            _selected_evidence_response(),
+            _answer(),
+        ]
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), llm, paper_set_policy="fixed_selected"
+    )
+    candidates = (
+        CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        CandidatePaper("p2", 2, "Paper Two", "ACL", 2025),
+    )
+
+    judgments = [reader.judge_candidate(_query(), item) for item in candidates]
+    prediction, answer_record = reader.answer_from_judgments(
+        _query(), candidates, judgments
+    )
+
+    assert len(llm.calls) == 3
+    assert "DECISION A" not in llm.calls[0]
+    assert '"is_relevant_to_answer"' not in llm.calls[0]
+    assert judgments[0]["checkpoint_kind"] == "fixed_selected_evidence"
+    assert judgments[0]["is_relevant_to_answer"] is True
+    assert judgments[0]["send_to_answer_agent"] is True
+    assert judgments[0]["extracted_facts"][0]["fact"].endswith("Dataset Y.")
+    assert judgments[1]["is_relevant_to_answer"] is True
+    assert judgments[1]["send_to_answer_agent"] is False
+    assert judgments[1]["evidence_chunk_ids"] == []
+    assert answer_record["accepted_paper_ids"] == ["p1", "p2"]
+    assert answer_record["submission_paper_ids"] == ["p1", "p2"]
+    assert answer_record["stage1_relevant_paper_ids"] is None
+    assert [item["paper_id"] for item in prediction.gold_papers] == ["p1", "p2"]
+    assert "Method X reports 42 on Dataset Y." in llm.calls[2]
+    assert '"externally_selected":true' in llm.calls[2]
+    assert '"deterministic_context_fallback":true' in llm.calls[2]
+
+
+def test_fixed_selected_extractor_drops_non_source_excerpt_fail_closed(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), paper_set_policy="fixed_selected"
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    records = reader.chunk_store.load_paper("p1")
+
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=candidate,
+        payload_text=_selected_evidence_response(
+            {
+                "chunk_id": "p1#table",
+                "purpose": "answer_value",
+                "fact": "Invented fact.",
+                "source_excerpt": "This text is absent from the source.",
+            }
+        ),
+        allowed_records={record["chunk_id"]: record for record in records},
+        attached_image_paths=[],
+        allow_legacy_schema=False,
+    )
+
+    assert parsed["evidence_chunk_ids"] == []
+    assert parsed["extracted_facts"] == []
+    assert parsed["send_to_answer_agent"] is False
+    assert parsed["dropped_evidence_facts"] == [
+        {
+            "index": 0,
+            "chunk_id": "p1#table",
+            "reason": "source_excerpt_not_visible_verbatim",
+        }
+    ]
+
+
+def test_fixed_selected_extractor_uses_excerpt_not_free_form_fact_as_focus(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), paper_set_policy="fixed_selected"
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    records = reader.chunk_store.load_paper("p1")
+
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=candidate,
+        payload_text=_selected_evidence_response(
+            {
+                "chunk_id": "p1#table",
+                "purpose": "answer_value",
+                "fact": "An intentionally misleading free-form hypothesis.",
+                "source_excerpt": "Method X reports 42 on Dataset Y.",
+            }
+        ),
+        allowed_records={record["chunk_id"]: record for record in records},
+        attached_image_paths=[],
+        allow_legacy_schema=False,
+    )
+
+    assert parsed["extracted_facts"][0]["fact"].startswith("An intentionally")
+    assert parsed["evidence"][0]["quote_or_value"] == (
+        "Method X reports 42 on Dataset Y."
+    )
+
+
+def test_fixed_selected_excerpt_must_have_been_visible_after_compaction(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    hidden_excerpt = "HIDDEN TAIL VALUE 999"
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#long",
+        "chunk_type": "text_span",
+        "text": (
+            "Method X reports a value on Dataset Y. "
+            + ("unrelated filler " * 2_000)
+            + hidden_excerpt
+        ),
+        "metadata": {"page": 1, "section": "Results"},
+    }
+    corpus.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus),
+        FakeLLM(),
+        paper_set_policy="fixed_selected",
+        max_paper_context_chars=8_000,
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    context = reader._paper_context(_query(), candidate, [record])
+
+    assert hidden_excerpt not in context["text"]
+    assert hidden_excerpt not in context["records_by_id"]["p1#long"]["text"]
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=candidate,
+        payload_text=_selected_evidence_response(
+            {
+                "chunk_id": "p1#long",
+                "purpose": "answer_value",
+                "fact": "The hidden value is 999.",
+                "source_excerpt": hidden_excerpt,
+            }
+        ),
+        allowed_records=context["records_by_id"],
+        attached_image_paths=[],
+        allow_legacy_schema=False,
+    )
+    assert parsed["extracted_facts"] == []
+    assert parsed["dropped_evidence_facts"][0]["reason"] == (
+        "source_excerpt_not_visible_verbatim"
+    )
+
+
+def test_fixed_selected_visual_query_requires_attached_visual_fact(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_path = _write_trusted_image(tmp_path, "p1", "figure-1.png")
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#fig1",
+        "chunk_type": "figure",
+        "text": "Figure 1: Results for Method X.",
+        "metadata": {
+            "page": 1,
+            "figure_id": "Figure 1",
+            "image_path": str(image_path),
+        },
+    }
+    corpus.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
+        FakeLLM(),
+        paper_set_policy="fixed_selected",
+    )
+    query = Query(
+        query_id="q_visual",
+        question="According to Figure 1, what value is shown for Method X?",
+        answer_types=["freeform"],
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+
+    with pytest.raises(ReadingResponseError, match="visual_fact"):
+        reader._parse_judgment(
+            query=query,
+            candidate=candidate,
+            payload_text=_selected_evidence_response(
+                {
+                    "chunk_id": "p1#fig1",
+                    "purpose": "answer_value",
+                    "fact": "Figure 1 contains the requested value.",
+                    "source_excerpt": "Figure 1: Results for Method X.",
+                }
+            ),
+            allowed_records={"p1#fig1": record},
+            attached_image_paths=[str(image_path)],
+            allow_legacy_schema=False,
+        )
+
+
+def test_fixed_selected_extractor_rejects_cross_paper_chunk(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), paper_set_policy="fixed_selected"
+    )
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    p2_record = reader.chunk_store.load_paper("p2")[0]
+
+    with pytest.raises(ReadingResponseError, match="belongs to another paper"):
+        reader._parse_judgment(
+            query=_query(),
+            candidate=candidate,
+            payload_text=_selected_evidence_response(
+                {
+                    "chunk_id": "p2#text",
+                    "purpose": "answer_value",
+                    "fact": "Unrelated fact.",
+                    "source_excerpt": "This paper studies an unrelated topic.",
+                }
+            ),
+            allowed_records={"p2#text": p2_record},
+            attached_image_paths=[],
+            allow_legacy_schema=False,
+        )
+
+
+def test_fixed_selected_policy_changes_both_cache_keys(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    store = ChunkStore(corpus)
+    candidate = CandidatePaper("p1", 1, "Paper One", "ACL", 2025)
+    records = store.load_paper("p1")
+    judgment = {
+        "paper_id": "p1",
+        "rank": 1,
+        "cache_key": "placeholder",
+        "is_relevant_to_answer": True,
+        "has_usable_answer_evidence": True,
+        "send_to_answer_agent": True,
+        "evidence_chunk_ids": ["p1#table"],
+    }
+    ordinary = PairwiseAOAIReader(store, FakeLLM())
+    fixed = PairwiseAOAIReader(
+        store, FakeLLM(), paper_set_policy="fixed_selected"
+    )
+
+    assert ordinary.judgment_cache_key(_query(), candidate, records) != (
+        fixed.judgment_cache_key(_query(), candidate, records)
+    )
+    assert ordinary.answer_cache_key(_query(), [judgment]) != (
+        fixed.answer_cache_key(_query(), [judgment])
+    )

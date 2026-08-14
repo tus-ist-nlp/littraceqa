@@ -27,7 +27,7 @@ class DerivationValidationError(ValueError):
     """A structured derivation contradicts its inputs or final answer."""
 
 
-ANSWER_DERIVATION_VERSION = "answer-derivation-v3-eligibility-scoped-extremum"
+ANSWER_DERIVATION_VERSION = "answer-derivation-v8-number-word-and-contrast-bindings"
 
 
 _COMPARE_OPERATORS = {
@@ -140,13 +140,60 @@ _DELTA_QUERY_RE = re.compile(
     r"(?:difference|increase|decrease|improvement|reduction|change)\b",
     re.IGNORECASE,
 )
+_PERCENT_CHANGE_QUERY_RE = re.compile(
+    r"^(?=[^?\n]*\b(?:percent(?:age)?(?![- ]?points?\b)|relative)\b)"
+    r"(?=[^?\n]*\b(?:decreas\w*|increas\w*|reduc\w*|improv\w*|"
+    r"drop(?:ped|ping|s)?|gain(?:ed|ing|s)?|chang\w*)\b)",
+    re.IGNORECASE,
+)
 _MATCH_COMPARISON_QUERY_RE = re.compile(
     r"\b(?:do|does|did|are|is|were|was)\b[^?\n]{0,160}\b"
     r"(?:match(?:es|ed)?|same|equal|identical|different|differ(?:s|ed)?)\b",
     re.IGNORECASE,
 )
+_LABELED_MATCH_SELECTION_QUERY_RE = re.compile(
+    r"\b(?:for|on|under|in)\s+which\s+"
+    r"(?:task|dataset|benchmark|setting|condition|case|category|row|method|"
+    r"system|model|option)\b|"
+    r"\bwhich\s+(?:task|dataset|benchmark|setting|condition|case|category|"
+    r"row|method|system|model|option)\b",
+    re.IGNORECASE,
+)
 _EXTREME_QUERY_RE = re.compile(
     r"\b(?:highest|lowest|largest|smallest|maximum|minimum|best|worst)\b",
+    re.IGNORECASE,
+)
+_AXIS_EXTENT_LOOKUP_RE = re.compile(
+    r"\b(?:roughly|approximately|about)?\s*"
+    r"what\s+(?:is|was|are|were)\s+(?:the\s+)?"
+    r"(?:highest|largest|maximum)\s+"
+    r"(?:[^?;,]{0,100}?\s+)?"
+    r"(?:value|tick|label|extent|limit)\s+"
+    r"(?:shown\s+|visible\s+|labelled\s+|labeled\s+|displayed\s+)?"
+    r"(?:on|along|of)\s+(?:the\s+)?"
+    r"(?:horizontal|vertical|x|y)[- ]axis\b|"
+    r"\b(?:roughly|approximately|about)?\s*"
+    r"what\s+(?:is|was|are|were)\s+(?:the\s+)?"
+    r"(?:highest|largest|maximum)\s+"
+    r"(?:shown\s+|visible\s+|labelled\s+|labeled\s+|displayed\s+)?"
+    r"(?:horizontal|vertical|x|y)[- ]axis\s+"
+    r"(?:value|tick|label|extent|limit)\b",
+    re.IGNORECASE,
+)
+_MEAN_AGGREGATION_QUERY_RE = re.compile(
+    r"\b(?:arithmetic\s+)?(?:mean|average)\s+of\b|"
+    r"\b(?:mean|average)\s+(?:value|score|result|rate|metric)s?\s+"
+    r"(?:across|over)\b|"
+    r"\bwhat\s+(?:is|was|are|were)\s+(?:the\s+)?"
+    r"(?:arithmetic\s+)?(?:mean|average)(?!\s+(?:precision|recall))\b|"
+    r"\bwhat\s+(?:arithmetic\s+)?(?:mean|average)\b|"
+    r"\bon\s+average\b",
+    re.IGNORECASE,
+)
+_NAMED_MEAN_METRIC_RE = re.compile(
+    r"\bmean\s+(?:squared|absolute)\s+error\b|"
+    r"\bmean\s+average\s+precision\b|"
+    r"\baverage\s+precision\b",
     re.IGNORECASE,
 )
 _ELIGIBILITY_VERB = (
@@ -174,6 +221,64 @@ def has_explicit_singleton_eligibility_filter(question: str) -> bool:
     """
 
     return _EXPLICIT_SINGLETON_FILTER_RE.search(question) is not None
+
+
+def is_mean_aggregation_query(query: Query) -> bool:
+    """Whether the released question explicitly asks to aggregate by a mean.
+
+    Named metrics such as mean squared error and average precision are scalar
+    lookups, not instructions to average a supplied operand set.
+    """
+
+    question = str(query.question or "")
+    if _NAMED_MEAN_METRIC_RE.search(question):
+        return False
+    return _MEAN_AGGREGATION_QUERY_RE.search(question) is not None
+
+
+def is_axis_extent_lookup_query(query: Query) -> bool:
+    """Whether a clause asks for the largest visible coordinate-axis extent.
+
+    This is a visual scalar lookup: ``highest`` describes the final labeled
+    coordinate, not a winner chosen from performance candidates.
+    """
+
+    return _AXIS_EXTENT_LOOKUP_RE.search(str(query.question or "")) is not None
+
+
+def requires_extremum_operation(query: Query) -> bool:
+    """Whether any non-axis-extent extremum remains in the official question."""
+
+    question = str(query.question or "")
+    without_axis_extents = _AXIS_EXTENT_LOOKUP_RE.sub(" ", question)
+    return _EXTREME_QUERY_RE.search(without_axis_extents) is not None
+
+
+def explicit_singleton_eligibility_clause(question: str) -> str | None:
+    """Return the local ``only`` clause that constrains eligibility.
+
+    The returned text is query-only and deliberately stops before a following
+    result verb.  It lets the reader distinguish the actual singleton filter
+    (for example, ``trained only on BaseSet (1000 clips)``) from other broad
+    eligibility facts elsewhere in the same question (for example,
+    ``VLM-based``).
+    """
+
+    match = _EXPLICIT_SINGLETON_FILTER_RE.search(question)
+    if match is None:
+        return None
+    clause = question[match.start() :]
+    stop = re.search(
+        r"\b(?:achiev(?:e|es|ed|ing)|obtain(?:s|ed|ing)?|"
+        r"attain(?:s|ed|ing)?|report(?:s|ed|ing)?|"
+        r"yield(?:s|ed|ing)?|score(?:s|d|ing)?|"
+        r"perform(?:s|ed|ing)?)\b",
+        clause[match.end() - match.start() :],
+        re.IGNORECASE,
+    )
+    if stop is not None:
+        clause = clause[: match.end() - match.start() + stop.start()]
+    return clause.strip(" ,;:?.") or None
 
 
 def is_aggregate_citation_count_query(query: Query) -> bool:
@@ -294,6 +399,7 @@ def validate_answer_semantics(
         validated_operation, computed = _validate_operation(
             operation,
             index,
+            query=query,
             facts_by_id=facts_by_id,
             answer=answer,
         )
@@ -449,7 +555,7 @@ def _validate_required_reasoning_contracts(
     output_groups = _semantic_output_path_groups(query)
     if not output_groups:
         return
-    explicit_extreme = _EXTREME_QUERY_RE.search(query.question) is not None
+    explicit_extreme = requires_extremum_operation(query)
     explicit_singleton_filter = has_explicit_singleton_eligibility_filter(
         query.question
     )
@@ -469,13 +575,21 @@ def _validate_required_reasoning_contracts(
             "instructions such as 'return only the name' do not qualify"
         )
     requested: list[tuple[set[str], str, bool]] = []
-    if _DELTA_QUERY_RE.search(query.question):
+    percent_change_requested = _PERCENT_CHANGE_QUERY_RE.search(query.question)
+    if percent_change_requested:
+        requested.append(({"percent_change"}, "percentage change", False))
+    elif _DELTA_QUERY_RE.search(query.question):
         # A paper may explicitly print an already-computed improvement.  Keep
         # that legitimate lookup path, but do not let a ``text`` fact masquerade
         # as a derived value.
         requested.append(({"subtract"}, "numeric delta", True))
     if _MATCH_COMPARISON_QUERY_RE.search(query.question):
-        requested.append(({"compare"}, "equality comparison", True))
+        if _LABELED_MATCH_SELECTION_QUERY_RE.search(query.question):
+            requested.append(
+                ({"select_where"}, "labeled equality selection", False)
+            )
+        else:
+            requested.append(({"compare"}, "equality comparison", True))
     if explicit_extreme:
         # A filtered extremum must show the eligible set explicitly, even if a
         # paper happens to describe its own result as best.  Otherwise a model
@@ -488,12 +602,26 @@ def _validate_required_reasoning_contracts(
                 not explicit_singleton_filter,
             )
         )
+    if is_mean_aggregation_query(query):
+        # A source may directly print the requested aggregate. Otherwise the
+        # constituent values must be exposed and averaged deterministically.
+        requested.append(({"mean"}, "arithmetic mean", True))
 
     for kinds, description, allow_direct_reported in requested:
         operation_ids = {
             str(operation["id"])
             for operation in operations
             if operation.get("kind") in kinds
+            and (
+                description
+                not in {"equality comparison", "labeled equality selection"}
+                or operation.get("operator") in {"==", "!="}
+            )
+            and (
+                operation.get("kind") != "select_where"
+                or operation.get("operator")
+                == _required_select_where_operator(query.question)
+            )
         }
         if not operation_ids:
             if allow_direct_reported and _all_output_groups_bind_reported_facts(
@@ -519,6 +647,14 @@ def _validate_required_reasoning_contracts(
                     "freeform/multiple-choice conclusion must bind to the grounded "
                     f"{sorted(kinds)} operation"
                 )
+
+
+def _required_select_where_operator(question: str) -> str:
+    """Return the predicate a labeled comparison selection must satisfy."""
+
+    if re.search(r"\b(?:different|differ(?:s|ed)?)\b", question, re.IGNORECASE):
+        return "!="
+    return "=="
 
 
 def _all_output_groups_bind_reported_facts(
@@ -742,7 +878,18 @@ def _minimal_freeform_surface_matches(
     if _is_compare_kind(source_kind) or isinstance(source_value, bool):
         expected = "yes" if bool(source_value) else "no"
         return normalized == expected
-    if source_kind in {"add", "subtract", "multiply", "divide", "count"} or (
+    if source_kind == "percent_change":
+        number = _canonical_minimal_numeric_surface(source_value)
+        return normalized in {number, f"{number}%", f"{number} percent"}
+    if source_kind in {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "mean",
+        "percent_change",
+        "count",
+    } or (
         isinstance(source_value, (int, float, Decimal))
         and not isinstance(source_value, bool)
     ):
@@ -753,7 +900,17 @@ def _minimal_freeform_surface_matches(
 def _canonical_minimal_surface(source_value: Any, source_kind: str) -> str:
     if _is_compare_kind(source_kind) or isinstance(source_value, bool):
         return "Yes" if bool(source_value) else "No"
-    if source_kind in {"add", "subtract", "multiply", "divide", "count"} or (
+    if source_kind == "percent_change":
+        return f"{_canonical_minimal_numeric_surface(source_value)}%"
+    if source_kind in {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "mean",
+        "percent_change",
+        "count",
+    } or (
         isinstance(source_value, (int, float, Decimal))
         and not isinstance(source_value, bool)
     ):
@@ -953,6 +1110,7 @@ def _validate_operation(
     operation: Any,
     index: int,
     *,
+    query: Query,
     facts_by_id: dict[str, dict[str, Any]],
     answer: dict[str, Any],
 ) -> tuple[dict[str, Any], Any]:
@@ -980,10 +1138,14 @@ def _validate_operation(
     referenced_facts = [facts_by_id[fact_id] for fact_id in fact_ids]
 
     computed: Any
-    if kind in {"add", "subtract", "multiply", "divide"}:
+    if kind in {"add", "subtract", "multiply", "divide", "mean"}:
         operands = operation.get("operands")
         if not isinstance(operands, list) or len(operands) < 2:
             raise DerivationValidationError(f"{path}.operands needs at least two numbers")
+        if kind == "mean" and len(fact_ids) < 2:
+            raise DerivationValidationError(
+                f"{path}.mean requires at least two distinct sourced numeric facts"
+            )
         numbers = [_decimal(value, f"{path}.operands") for value in operands]
         fact_numbers = [
             _decimal(fact["value"], f"{path}.fact_ids[{fact_index}].value")
@@ -994,11 +1156,32 @@ def _validate_operation(
             fact_numbers,
             path=f"{path}.operands",
         )
-        computed = _compute_arithmetic(kind, numbers, operation, path)
+        if kind == "mean":
+            if not is_mean_aggregation_query(query):
+                raise DerivationValidationError(
+                    f"{path}.kind='mean' requires mean/average wording in the "
+                    "official query"
+                )
+            computed = _compute_mean(numbers, operation, path)
+        else:
+            computed = _compute_arithmetic(kind, numbers, operation, path)
         reported = _decimal(operation.get("result"), f"{path}.result")
         if reported != computed:
             raise DerivationValidationError(
                 f"{path}.result={reported} but deterministic {kind} gives {computed}"
+            )
+    elif kind == "percent_change":
+        computed = _compute_percent_change(
+            operation,
+            path=path,
+            fact_ids=fact_ids,
+            facts_by_id=facts_by_id,
+        )
+        reported = _decimal(operation.get("result"), f"{path}.result")
+        if reported != computed:
+            raise DerivationValidationError(
+                f"{path}.result={reported} but deterministic percent_change "
+                f"gives {computed}"
             )
     elif kind == "count":
         items = operation.get("items")
@@ -1058,6 +1241,113 @@ def _validate_operation(
                 f"{path}.result={result!r} is not a deterministic {kind} winner {sorted(winners)}"
             )
         computed = result
+    elif kind == "select_where":
+        operator = str(operation.get("operator") or "")
+        if operator not in _COMPARE_OPERATORS:
+            raise DerivationValidationError(
+                f"{path}.operator is invalid: {operator!r}"
+            )
+        comparisons = operation.get("comparisons")
+        if not isinstance(comparisons, list) or len(comparisons) < 2:
+            raise DerivationValidationError(
+                f"{path}.comparisons needs at least two labeled comparison rows"
+            )
+
+        normalized_labels: set[str] = set()
+        comparison_fact_ids: list[str] = []
+        matching_labels: list[str] = []
+        for comparison_index, comparison in enumerate(comparisons):
+            comparison_path = f"{path}.comparisons[{comparison_index}]"
+            required_fields = {
+                "label",
+                "left_fact_id",
+                "right_fact_id",
+                "left",
+                "right",
+            }
+            if not isinstance(comparison, dict) or set(comparison) != required_fields:
+                raise DerivationValidationError(
+                    f"{comparison_path} must contain exactly "
+                    "label/left_fact_id/right_fact_id/left/right"
+                )
+            label = _non_empty_string(
+                comparison.get("label"), f"{comparison_path}.label"
+            )
+            normalized_label = _normalize_item(label)
+            if normalized_label in normalized_labels:
+                raise DerivationValidationError(
+                    f"{path}.comparison labels must be distinct"
+                )
+            normalized_labels.add(normalized_label)
+
+            left_fact_id = _non_empty_string(
+                comparison.get("left_fact_id"),
+                f"{comparison_path}.left_fact_id",
+            )
+            right_fact_id = _non_empty_string(
+                comparison.get("right_fact_id"),
+                f"{comparison_path}.right_fact_id",
+            )
+            if left_fact_id == right_fact_id:
+                raise DerivationValidationError(
+                    f"{comparison_path} must reference two distinct operand facts"
+                )
+            unknown_row_fact_ids = [
+                fact_id
+                for fact_id in (left_fact_id, right_fact_id)
+                if fact_id not in facts_by_id
+            ]
+            if unknown_row_fact_ids:
+                raise DerivationValidationError(
+                    f"{comparison_path} references unknown facts: "
+                    f"{unknown_row_fact_ids}"
+                )
+            comparison_fact_ids.extend((left_fact_id, right_fact_id))
+
+            left = _decimal(comparison.get("left"), f"{comparison_path}.left")
+            right = _decimal(comparison.get("right"), f"{comparison_path}.right")
+            fact_left = _decimal(
+                facts_by_id[left_fact_id]["value"],
+                f"{comparison_path}.left_fact_id.value",
+            )
+            fact_right = _decimal(
+                facts_by_id[right_fact_id]["value"],
+                f"{comparison_path}.right_fact_id.value",
+            )
+            if left != fact_left or right != fact_right:
+                raise DerivationValidationError(
+                    f"{comparison_path}.left/right do not match referenced "
+                    "fact values"
+                )
+            if _COMPARE_OPERATORS[operator](left, right):
+                matching_labels.append(label)
+
+        repeated_fact_ids = sorted(
+            fact_id
+            for fact_id, count in Counter(comparison_fact_ids).items()
+            if count != 1
+        )
+        if repeated_fact_ids:
+            raise DerivationValidationError(
+                f"{path}.comparisons must use each operand fact exactly once; "
+                f"invalid={repeated_fact_ids}"
+            )
+        if set(comparison_fact_ids) != set(fact_ids):
+            raise DerivationValidationError(
+                f"{path}.fact_ids must equal the facts used by comparisons"
+            )
+        if len(matching_labels) != 1:
+            raise DerivationValidationError(
+                f"{path} must select exactly one matching label; got "
+                f"{matching_labels}"
+            )
+        result = _non_empty_string(operation.get("result"), f"{path}.result")
+        computed = matching_labels[0]
+        if result != computed:
+            raise DerivationValidationError(
+                f"{path}.result={result!r} but deterministic selection gives "
+                f"{computed!r}"
+            )
     elif kind == "compare":
         operator = str(operation.get("operator") or "")
         if operator not in _COMPARE_OPERATORS:
@@ -1156,27 +1446,139 @@ def _compute_arithmetic(
 
     if any(number == 0 for number in numbers[1:]):
         raise DerivationValidationError(f"{path} divides by zero")
+    rational = Fraction(numbers[0])
+    for number in numbers[1:]:
+        rational /= Fraction(number)
+    return _compute_rational_with_contract(
+        rational,
+        operation=operation,
+        path=path,
+        operation_name="divide",
+    )
+
+
+def _compute_mean(
+    numbers: list[Decimal],
+    operation: dict[str, Any],
+    path: str,
+) -> Decimal:
+    """Compute an arithmetic mean under the shared exact-or-rounded contract."""
+
+    rational = sum((Fraction(number) for number in numbers), start=Fraction(0))
+    rational /= len(numbers)
+    return _compute_rational_with_contract(
+        rational,
+        operation=operation,
+        path=path,
+        operation_name="mean",
+    )
+
+
+def _compute_percent_change(
+    operation: dict[str, Any],
+    *,
+    path: str,
+    fact_ids: list[str],
+    facts_by_id: dict[str, dict[str, Any]],
+) -> Decimal:
+    """Compute a source-grounded directional percentage change.
+
+    ``old`` is always the origin/baseline denominator and ``new`` is the
+    refined/final value.  Direction makes the numerator unambiguous:
+    decrease=(old-new)/old*100 and increase=(new-old)/old*100.
+    """
+
+    if len(fact_ids) != 2:
+        raise DerivationValidationError(
+            f"{path}.fact_ids must contain exactly old and new source facts"
+        )
+    old_fact_id = _non_empty_string(
+        operation.get("old_fact_id"), f"{path}.old_fact_id"
+    )
+    new_fact_id = _non_empty_string(
+        operation.get("new_fact_id"), f"{path}.new_fact_id"
+    )
+    if old_fact_id == new_fact_id:
+        raise DerivationValidationError(
+            f"{path}.old_fact_id and new_fact_id must be distinct"
+        )
+    if {old_fact_id, new_fact_id} != set(fact_ids):
+        raise DerivationValidationError(
+            f"{path}.fact_ids must equal old_fact_id and new_fact_id"
+        )
+
+    old = _decimal(operation.get("old"), f"{path}.old")
+    new = _decimal(operation.get("new"), f"{path}.new")
+    fact_old = _decimal(
+        facts_by_id[old_fact_id]["value"], f"{path}.old_fact_id.value"
+    )
+    fact_new = _decimal(
+        facts_by_id[new_fact_id]["value"], f"{path}.new_fact_id.value"
+    )
+    if old != fact_old or new != fact_new:
+        raise DerivationValidationError(
+            f"{path}.old/new do not match their referenced source fact values"
+        )
+    if old == 0:
+        raise DerivationValidationError(
+            f"{path}.old origin denominator must be non-zero"
+        )
+
+    direction = str(operation.get("direction") or "").strip().casefold()
+    if direction not in {"decrease", "increase"}:
+        raise DerivationValidationError(
+            f"{path}.direction must be 'decrease' or 'increase'"
+        )
+    if direction == "decrease" and new > old:
+        raise DerivationValidationError(
+            f"{path}.direction='decrease' contradicts new > old"
+        )
+    if direction == "increase" and new < old:
+        raise DerivationValidationError(
+            f"{path}.direction='increase' contradicts new < old"
+        )
+
+    scale = _decimal(operation.get("scale"), f"{path}.scale")
+    if scale != Decimal(100):
+        raise DerivationValidationError(f"{path}.scale must equal 100")
+    numerator = old - new if direction == "decrease" else new - old
+    rational = Fraction(numerator) / Fraction(old) * Fraction(scale)
+    return _compute_rational_with_contract(
+        rational,
+        operation=operation,
+        path=path,
+        operation_name="percent_change",
+    )
+
+
+def _compute_rational_with_contract(
+    rational: Fraction,
+    *,
+    operation: dict[str, Any],
+    path: str,
+    operation_name: str,
+) -> Decimal:
+    """Apply the shared exact-or-rounded contract to a rational result."""
+
     exact = operation.get("exact")
     rounding = operation.get("rounding")
     if exact is True and rounding is not None:
         raise DerivationValidationError(
-            f"{path} divide must use either exact=true or rounding, not both"
+            f"{path} {operation_name} must use either exact=true or rounding, "
+            "not both"
         )
     if exact is not True and rounding is None:
         raise DerivationValidationError(
-            f"{path} divide requires exact=true or a rounding contract"
+            f"{path} {operation_name} requires exact=true or a rounding contract"
         )
     if exact not in (None, True):
         raise DerivationValidationError(f"{path}.exact must be true when present")
 
-    rational = Fraction(numbers[0])
-    for number in numbers[1:]:
-        rational /= Fraction(number)
     if exact is True:
         decimal_places = _terminating_decimal_places(rational.denominator)
         if decimal_places is None:
             raise DerivationValidationError(
-                f"{path} exact division is non-terminating; provide rounding"
+                f"{path} exact {operation_name} is non-terminating; provide rounding"
             )
         with localcontext() as context:
             context.prec = max(
@@ -1436,7 +1838,7 @@ def _fragment_contains_fact(fragment: str, value: Any) -> bool:
         source = _decimal(value, "fact value")
         return any(
             _decimal_grounding_matches(source, target)
-            for target in _decimal_tokens(fragment)
+            for target in _numbers_in_text(fragment)
         )
     if isinstance(value, str):
         expected = _normalize_item(value)
@@ -1614,7 +2016,14 @@ def _resolve_answer_path(
 
 
 def _operation_values_equal(kind: str, left: Any, right: Any) -> bool:
-    if kind in {"add", "subtract", "multiply", "divide"}:
+    if kind in {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "mean",
+        "percent_change",
+    }:
         try:
             return _decimal(left, "answer_binding.expected") == _decimal(
                 right, "operation.result"
@@ -1644,7 +2053,14 @@ def _is_compare_kind(kind: str) -> bool:
 
 
 def _typed_answer_matches(answer_value: Any, computed: Any, kind: str) -> bool:
-    if kind in {"add", "subtract", "multiply", "divide"}:
+    if kind in {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "mean",
+        "percent_change",
+    }:
         if isinstance(answer_value, bool):
             return False
         try:
@@ -1663,7 +2079,15 @@ def _typed_answer_matches(answer_value: Any, computed: Any, kind: str) -> bool:
 
 
 def _fragment_contains_expected(fragment: str, computed: Any, kind: str) -> bool:
-    if kind in {"add", "subtract", "multiply", "divide", "count"}:
+    if kind in {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "mean",
+        "percent_change",
+        "count",
+    }:
         expected_number = _decimal(computed, "computed result")
         return expected_number in _numbers_in_text(fragment)
     if _is_compare_kind(kind):
@@ -1965,6 +2389,15 @@ def _comparison_fragment_matches(
     explicit = _explicit_boolean_polarity(text)
     if explicit is not None:
         return explicit is computed
+    if operator == "!=" and computed:
+        # A released compound option can express inequality by contrasting the
+        # two sourced values directly (for example, "2009 in paper A but 2003
+        # in paper B") without spelling out true/different.  Require an
+        # explicit contrast marker and at least two distinct numeric values;
+        # this remains narrower than accepting arbitrary prose for a boolean.
+        numbers = _numbers_in_text(text)
+        if len(numbers) >= 2 and re.search(r"(?i)\b(?:but|whereas|versus|vs\.?|while)\b", text):
+            return True
     equivalence = _equivalence_polarity(text)
     if equivalence is None:
         return False

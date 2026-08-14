@@ -10,9 +10,9 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import yaml
-import httpx
 
 from littraceqa import pairwise_run_store as pairwise_run_store_module
 from littraceqa.aoai_pairwise_reader import JudgmentResponseExhaustedError
@@ -184,8 +184,9 @@ def test_pairwise_build_llm_injects_fixed_grounding_system(monkeypatch):
 
     assert captured["json_mode"] is False
     assert captured["system"] == _RUNNER._PAIRWISE_SYSTEM
-    assert "Read only the supplied candidate papers and evidence" in captured["system"]
-    assert "do not search or use external knowledge" in captured["system"]
+    assert "Use only the supplied official query" in captured["system"]
+    assert "return JSON only" in captured["system"]
+    assert "Do not browse, use external knowledge" in captured["system"]
 
 
 def test_evidence_policy_is_explicit_and_never_inferred_from_filename() -> None:
@@ -1402,17 +1403,9 @@ def test_stage1_provider_ledger_counts_invalid_repair_500_and_whole_job_retry(
     monkeypatch.setattr(_RUNNER, "AOAI_TRANSIENT_COOLDOWN_SECONDS", 0)
     valid_response = json.dumps(
         {
-            "paper_role": "uncertain",
-            "label": "irrelevant",
-            "answerable_from_this_paper": False,
-            "satisfied_constraints": [],
-            "missing_constraints": ["requested value"],
-            "blocking_mismatches": [],
-            "visual": {"required": False, "status": "not_needed"},
-            "evidence": [],
-            "candidate_answer": {"units": [], "rows": []},
-            "confidence": 0.8,
-            "reason": "The requested value is absent.",
+            "is_relevant_to_answer": False,
+            "has_usable_answer_evidence": False,
+            "evidence_chunk_ids": [],
         }
     )
 
@@ -1498,7 +1491,9 @@ def test_stage1_provider_ledger_counts_invalid_repair_500_and_whole_job_retry(
         "provider_error",
         "response",
     ]
-    assert finalized[0]["parse_error"].startswith("q1/p1: invalid judgment label")
+    assert finalized[0]["parse_error"].startswith(
+        "q1/p1: current Stage-1 response must use exactly"
+    )
     assert finalized[1]["status_codes"] == [500]
     assert finalized[1]["retry_category"] == "transient_provider"
     assert finalized[1]["recovery_round"] == 1
@@ -1541,17 +1536,9 @@ def test_provider_ledger_writes_stay_on_coordinator_under_concurrency(
 ):
     response = json.dumps(
         {
-            "paper_role": "uncertain",
-            "label": "irrelevant",
-            "answerable_from_this_paper": False,
-            "satisfied_constraints": [],
-            "missing_constraints": ["requested value"],
-            "blocking_mismatches": [],
-            "visual": {"required": False, "status": "not_needed"},
-            "evidence": [],
-            "candidate_answer": {"units": [], "rows": []},
-            "confidence": 0.7,
-            "reason": "No answer.",
+            "is_relevant_to_answer": False,
+            "has_usable_answer_evidence": False,
+            "evidence_chunk_ids": [],
         }
     )
 
@@ -1972,7 +1959,15 @@ class _ConcurrentAnswerReader:
         self.lock = threading.Lock()
 
     def load_paper(self, paper_id: str) -> list[dict]:
-        return [{"paper_id": paper_id, "text": paper_id}]
+        return [
+            {
+                "paper_id": paper_id,
+                "chunk_id": f"{paper_id}#1",
+                "chunk_type": "text_span",
+                "text": paper_id,
+                "metadata": {"page": 1},
+            }
+        ]
 
     def judgment_cache_key(self, query, candidate, records) -> str:
         del query, records
@@ -1985,7 +1980,17 @@ class _ConcurrentAnswerReader:
     def answer_from_judgments(
         self, query, candidates, judgments, *, attempt_callback
     ):
-        del candidates, judgments
+        del candidates
+        accepted_paper_ids = [
+            str(judgment["paper_id"])
+            for judgment in judgments
+            if judgment.get("send_to_answer_agent") is True
+        ]
+        stage1_relevant_paper_ids = [
+            str(judgment["paper_id"])
+            for judgment in judgments
+            if judgment.get("is_relevant_to_answer") is True
+        ]
         with self.lock:
             self.calls.append(query.query_id)
             call_count = self.call_counts.get(query.query_id, 0) + 1
@@ -2041,6 +2046,8 @@ class _ConcurrentAnswerReader:
                     "query_id": query.query_id,
                     "status": "complete",
                     "cache_key": f"answer-cache:{query.query_id}",
+                    "accepted_paper_ids": accepted_paper_ids,
+                    "stage1_relevant_paper_ids": stage1_relevant_paper_ids,
                 },
             )
         finally:
@@ -2056,13 +2063,29 @@ def _complete_answer_state(
 ) -> _RUNNER.QueryExecutionState:
     state = _empty_execution_state(tmp_path, query_id, 1)
     candidate = state.handoff.candidate_papers[0]
+    chunk_id = f"{candidate.paper_id}#1"
     state.judgments[candidate.paper_id] = {
         "query_id": query_id,
         "paper_id": candidate.paper_id,
         "rank": candidate.rank,
         "status": "complete",
         "cache_key": f"judgment-cache:{candidate.paper_id}",
-        "label": "direct_answer",
+        "is_relevant_to_answer": True,
+        "has_usable_answer_evidence": True,
+        "send_to_answer_agent": True,
+        "evidence_chunk_ids": [chunk_id],
+        "context_chunk_ids": [chunk_id],
+        "evidence": [
+            {
+                "chunk_id": chunk_id,
+                "source_type": "text_span",
+                "locator": {"page": 1},
+                "purpose": "answer",
+                "quote_or_value": "",
+            }
+        ],
+        "attached_image_count": 0,
+        "attached_image_chunk_ids": [],
     }
     return state
 
@@ -2081,6 +2104,8 @@ def test_stage2_pool_parallelizes_uncached_queries_and_keeps_writes_on_coordinat
             "query_id": "q3",
             "status": "complete",
             "cache_key": "answer-cache:q3",
+            "accepted_paper_ids": ["q3_p1"],
+            "stage1_relevant_paper_ids": ["q3_p1"],
         },
     )
     reader = _ConcurrentAnswerReader(barrier=threading.Barrier(2))
@@ -2445,19 +2470,22 @@ def test_stage2_provider_ledger_records_transport_failure_before_retry(
             records,
             owner_resolution=owner_resolution,
         ),
-        "label": "direct_answer",
-        "relevant": True,
-        "paper_role": "target_owner",
-        "identity_conflict": False,
-        "blocking_mismatches": [],
-        "visual": {"required": False, "status": "not_needed"},
+        "is_relevant_to_answer": True,
+        "has_usable_answer_evidence": True,
+        "send_to_answer_agent": True,
+        "evidence_chunk_ids": ["p1#1"],
+        "context_chunk_ids": ["p1#1"],
         "evidence": [
             {
                 "chunk_id": "p1#1",
+                "source_type": "text_span",
+                "locator": {"page": 1},
                 "purpose": "answer",
-                "quote_or_value": "42",
+                "quote_or_value": "",
             }
         ],
+        "attached_image_count": 0,
+        "attached_image_chunk_ids": [],
     }
     handoff = _RUNNER.CandidateHandoff(query, candidates)
     paths = _RUNNER.QueryRunPaths.under(tmp_path / "run", query.query_id)
@@ -2715,6 +2743,8 @@ def _checkpointed_run(
     for candidate in candidates[:judgment_count]:
         records = store.load_paper(candidate.paper_id)
         chunk_id = str(records[0]["chunk_id"])
+        relevant = candidate.paper_id == "p1"
+        evidence_ids = [chunk_id] if relevant else []
         judgments.append(
             {
                 "query_id": query.query_id,
@@ -2728,21 +2758,26 @@ def _checkpointed_run(
                     owner_resolution=owner_resolution,
                 ),
                 "named_owner_resolution": owner_resolution,
-                "label": "direct_answer",
-                "relevant": True,
-                "satisfied_constraints": ["reported value"],
-                "missing_constraints": [],
-                "evidence": [
-                    {
-                        "chunk_id": chunk_id,
-                        "source_type": "text_span",
-                        "locator": {"page": 1},
-                        "quote_or_value": "42",
-                    }
-                ],
-                "candidate_answer": {"meaning": "42"},
-                "reason": "direct statement",
-                "visual_conflict": False,
+                "is_relevant_to_answer": relevant,
+                "has_usable_answer_evidence": relevant,
+                "send_to_answer_agent": relevant,
+                "evidence_chunk_ids": evidence_ids,
+                "context_chunk_ids": [chunk_id],
+                "evidence": (
+                    [
+                        {
+                            "chunk_id": chunk_id,
+                            "source_type": "text_span",
+                            "locator": {"page": 1},
+                            "purpose": "answer",
+                            "quote_or_value": "",
+                        }
+                    ]
+                    if relevant
+                    else []
+                ),
+                "attached_image_count": 0,
+                "attached_image_chunk_ids": [],
             }
         )
 
@@ -2768,6 +2803,8 @@ def _checkpointed_run(
         "query_id": query.query_id,
         "status": "complete",
         "cache_key": reader.answer_cache_key(query, judgments),
+        "accepted_paper_ids": ["p1"],
+        "stage1_relevant_paper_ids": ["p1"],
         "prediction": prediction.to_dict(),
     }
     submission = _RUNNER.prediction_to_submission(
@@ -2799,6 +2836,20 @@ def test_materialize_rejects_submission_that_differs_from_answer_checkpoint(
 
     with pytest.raises(ValueError, match="does not match answer checkpoint"):
         _RUNNER.materialize_run_outputs(run_dir, [handoff], reader)
+
+
+def test_materialize_support_only_papers_may_be_subset_of_stage2_handoff(tmp_path):
+    run_dir, handoff, reader, submission = _checkpointed_run(
+        tmp_path, candidate_count=2
+    )
+    answer_path = run_dir / "q1" / "answer.json"
+    answer_record = json.loads(answer_path.read_text(encoding="utf-8"))
+    answer_record["accepted_paper_ids"] = ["p1", "p2"]
+    answer_record["submission_paper_ids"] = ["p1"]
+    answer_path.write_text(json.dumps(answer_record), encoding="utf-8")
+
+    assert _RUNNER.materialize_run_outputs(run_dir, [handoff], reader) == (1, 1)
+    assert submission["gold_papers"] == [{"paper_id": "p1"}]
 
 
 def test_materialize_accepts_test_extra_submission_without_evidence(tmp_path):
@@ -2852,6 +2903,34 @@ def test_materialize_rejects_invalid_answer_checkpoint_identity(
 
     with pytest.raises(ValueError, match=message):
         _RUNNER.materialize_run_outputs(run_dir, [handoff], reader)
+
+
+def test_materialize_rejects_stage1_relevance_mismatch_in_answer_checkpoint(
+    tmp_path,
+):
+    run_dir, handoff, reader, _ = _checkpointed_run(tmp_path)
+    answer_path = run_dir / "q1" / "answer.json"
+    answer_record = json.loads(answer_path.read_text(encoding="utf-8"))
+    answer_record["stage1_relevant_paper_ids"] = ["p2"]
+    answer_path.write_text(json.dumps(answer_record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="do not match prediction.gold_papers"):
+        _RUNNER.materialize_run_outputs(run_dir, [handoff], reader)
+
+
+def test_judgment_checkpoint_rejects_mismatched_expanded_evidence(tmp_path):
+    run_dir, handoff, reader, _ = _checkpointed_run(tmp_path)
+    judgment_path = run_dir / "q1" / "candidate_judgments.jsonl"
+    rows = [
+        json.loads(line)
+        for line in judgment_path.read_text(encoding="utf-8").splitlines()
+    ]
+    rows[0]["evidence"] = []
+    judgments = {row["paper_id"]: row for row in rows}
+
+    status = _RUNNER.validate_judgment_checkpoint(handoff, judgments, reader)
+
+    assert status.stale_paper_ids == ("p1",)
 
 
 def test_unfiltered_run_requires_confirmation_after_printing_scope(capsys):
@@ -2963,17 +3042,9 @@ def test_global_runner_checkpoints_q004_wrong_31_with_one_provider_call(tmp_path
     )
     response = json.dumps(
         {
-            "paper_role": "uncertain",
-            "label": "unreadable",
-            "answerable_from_this_paper": False,
-            "satisfied_constraints": ["DynaPipe owner"],
-            "missing_constraints": ["readable Figure 4 image"],
-            "blocking_mismatches": [],
-            "visual": {"required": True, "status": "missing"},
-            "evidence": [],
-            "candidate_answer": {"units": [], "rows": []},
-            "confidence": 0.99,
-            "reason": "The requested visual is unavailable.",
+            "is_relevant_to_answer": True,
+            "has_usable_answer_evidence": False,
+            "evidence_chunk_ids": [],
         }
     )
     llm = _RUNNER.FakeLLM([response])
@@ -3004,9 +3075,23 @@ def test_global_runner_checkpoints_q004_wrong_31_with_one_provider_call(tmp_path
     assert len(persisted) == 32
     assert persisted[0]["paper_id"] == "p1"
     assert persisted[0]["base_judgment_call_count"] == 1
+    assert persisted[0]["is_relevant_to_answer"] is True
+    assert persisted[0]["has_usable_answer_evidence"] is False
+    assert persisted[0]["send_to_answer_agent"] is False
+    assert persisted[0]["evidence_chunk_ids"] == []
+    assert persisted[0]["requested_image_count"] == 0
+    assert persisted[0]["requested_image_chunk_ids"] == []
+    assert persisted[0]["attached_image_count"] == 0
+    assert persisted[0]["attached_image_chunk_ids"] == []
     deterministic = persisted[1:]
     assert len(deterministic) == 31
     assert all(item["label"] == "irrelevant" for item in deterministic)
+    assert all(item["is_relevant_to_answer"] is False for item in deterministic)
+    assert all(
+        item["has_usable_answer_evidence"] is False for item in deterministic
+    )
+    assert all(item["send_to_answer_agent"] is False for item in deterministic)
+    assert all(item["evidence_chunk_ids"] == [] for item in deterministic)
     assert all(item["identity_conflict"] is True for item in deterministic)
     assert all(item["provider_invocation_count"] == 0 for item in deterministic)
     assert all(item["calls"] == [] for item in deterministic)
@@ -3142,6 +3227,64 @@ def test_explicit_query_selection_does_not_require_full_run_confirmation(capsys)
     assert "minimum_calls_without_cache=2" in capsys.readouterr().out
 
 
+def test_answer_type_selection_preserves_input_order_and_intersects_query_ids():
+    handoffs = [
+        _RUNNER.CandidateHandoff(
+            Query("q1", "question", ["multiple_choice"]),
+            (CandidatePaper("p1", 1),),
+        ),
+        _RUNNER.CandidateHandoff(
+            Query("q2", "question", ["table"]),
+            (CandidatePaper("p2", 1),),
+        ),
+        _RUNNER.CandidateHandoff(
+            Query("q3", "question", ["table"]),
+            (CandidatePaper("p3", 1),),
+        ),
+    ]
+
+    selected = _RUNNER._select_handoffs(
+        handoffs,
+        ["q3", "q2"],
+        answer_type="table",
+    )
+
+    assert [item.query.query_id for item in selected] == ["q2", "q3"]
+    with pytest.raises(ValueError, match="selected no inputs"):
+        _RUNNER._select_handoffs(
+            handoffs,
+            ["q1"],
+            answer_type="table",
+        )
+
+
+def test_answer_type_selection_does_not_require_full_run_confirmation(capsys):
+    handoffs = [
+        _RUNNER.CandidateHandoff(
+            Query("q1", "question", ["table"]),
+            (CandidatePaper("p1", 1),),
+        )
+    ]
+    args = SimpleNamespace(
+        stage="answer",
+        paper_id=None,
+        query_id=[],
+        answer_type="table",
+        confirm_full_run=False,
+    )
+
+    _RUNNER._print_and_confirm_run_plan(args, handoffs)
+
+    assert "queries=1" in capsys.readouterr().out
+
+
+def test_parser_documents_answer_type_branch_filter():
+    help_text = " ".join(_RUNNER.build_parser().format_help().split())
+
+    assert "--answer-type" in help_text
+    assert "isolates the table branch" in help_text
+
+
 def test_materialize_ignores_stale_answer_payload_until_it_is_recomputed(tmp_path):
     run_dir, handoff, reader, _ = _checkpointed_run(tmp_path)
     answer_path = run_dir / "q1" / "answer.json"
@@ -3216,33 +3359,9 @@ def test_runner_checkpoints_each_pair_and_recovers_answer_submission_gap(tmp_pat
         ],
     )
     judgment = {
-        "paper_role": "target_owner",
-        "label": "direct_answer",
-        "answerable_from_this_paper": True,
-        "satisfied_constraints": ["reported value"],
-        "missing_constraints": [],
-        "blocking_mismatches": [],
-        "visual": {"required": False, "status": "not_needed"},
-        "evidence": [
-            {
-                "chunk_id": "p1#1",
-                "purpose": "answer",
-                "quote_or_value": "42",
-            }
-        ],
-        "candidate_answer": {
-            "units": [
-                {
-                    "name": "reported value",
-                    "value": "42",
-                    "value_kind": "reported",
-                    "matched_option_labels": [],
-                }
-            ],
-            "rows": [],
-        },
-        "confidence": 1.0,
-        "reason": "direct statement",
+        "is_relevant_to_answer": True,
+        "has_usable_answer_evidence": True,
+        "evidence_chunk_ids": ["p1#1"],
     }
     answer = {
         "status": "ready",
@@ -3338,8 +3457,16 @@ def test_runner_checkpoints_each_pair_and_recovers_answer_submission_gap(tmp_pat
     ]
     assert len(judgments) == 1
     assert judgments[0]["paper_id"] == "p1"
+    assert judgments[0]["is_relevant_to_answer"] is True
+    assert judgments[0]["has_usable_answer_evidence"] is True
+    assert judgments[0]["send_to_answer_agent"] is True
+    assert judgments[0]["evidence_chunk_ids"] == ["p1#1"]
     trace = json.loads((run_dir / "reading_traces.jsonl").read_text())
-    assert trace["relevance_judgments"][0]["relevant"] is True
+    assert trace["relevance_judgments"][0]["is_relevant_to_answer"] is True
+    assert trace["relevance_judgments"][0]["has_usable_answer_evidence"] is True
+    assert trace["relevance_judgments"][0]["send_to_answer_agent"] is True
+    assert trace["relevance_judgments"][0]["evidence_chunk_ids"] == ["p1#1"]
+    assert trace["submission"]["gold_papers"] == [{"paper_id": "p1"}]
     assert trace["submission"]["answer"] == {"freeform": {"text": "42"}}
     assert json.loads((run_dir / "submission.jsonl").read_text())["query_id"] == "q1"
     answer_attempts = [

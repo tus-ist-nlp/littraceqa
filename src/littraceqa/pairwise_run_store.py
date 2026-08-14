@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from littraceqa.aoai_pairwise_reader import (
+    FIXED_SELECTED_CHECKPOINT_KIND,
+    FIXED_SELECTED_PAPER_POLICY,
     PairwiseAOAIReader,
     resolve_named_owner,
 )
@@ -480,10 +482,108 @@ def validate_judgment_checkpoint(
             )
         if judgment.get("cache_key") != expected_key:
             stale_ids.append(candidate.paper_id)
+            continue
+        if not _current_judgment_invariants_hold(
+            candidate=candidate,
+            records=records,
+            judgment=judgment,
+            expected_checkpoint_kind=(
+                FIXED_SELECTED_CHECKPOINT_KIND
+                if getattr(reader, "paper_set_policy", None)
+                == FIXED_SELECTED_PAPER_POLICY
+                else None
+            ),
+        ):
+            stale_ids.append(candidate.paper_id)
     return JudgmentCheckpointStatus(
         missing_paper_ids=missing_ids,
         stale_paper_ids=tuple(stale_ids),
     )
+
+
+def _current_judgment_invariants_hold(
+    *,
+    candidate: CandidatePaper,
+    records: list[dict[str, Any]],
+    judgment: dict[str, Any],
+    expected_checkpoint_kind: str | None = None,
+) -> bool:
+    """Fail closed on edited or internally inconsistent current checkpoints."""
+
+    if judgment.get("paper_id") != candidate.paper_id:
+        return False
+    relevant = judgment.get("is_relevant_to_answer")
+    usable = judgment.get("has_usable_answer_evidence")
+    send = judgment.get("send_to_answer_agent")
+    if not all(isinstance(value, bool) for value in (relevant, usable, send)):
+        return False
+    chunk_ids = judgment.get("evidence_chunk_ids")
+    if (
+        not isinstance(chunk_ids, list)
+        or any(not isinstance(value, str) or not value for value in chunk_ids)
+        or len(chunk_ids) != len(set(chunk_ids))
+    ):
+        return False
+    if send is not bool(relevant and usable and chunk_ids):
+        return False
+    if usable is not send:
+        return False
+    checkpoint_kind = judgment.get("checkpoint_kind")
+    if checkpoint_kind != expected_checkpoint_kind:
+        return False
+    fixed_selected = checkpoint_kind == FIXED_SELECTED_CHECKPOINT_KIND
+    if fixed_selected and relevant is not True:
+        return False
+
+    record_ids = {
+        str(record.get("chunk_id") or "")
+        for record in records
+        if str(record.get("chunk_id") or "")
+    }
+    context_ids = judgment.get("context_chunk_ids")
+    if not isinstance(context_ids, list) or any(
+        not isinstance(value, str) for value in context_ids
+    ):
+        return False
+    if not set(chunk_ids).issubset(record_ids.intersection(context_ids)):
+        return False
+
+    evidence = judgment.get("evidence")
+    if not isinstance(evidence, list) or any(
+        not isinstance(item, dict) for item in evidence
+    ):
+        return False
+    expanded_ids = [str(item.get("chunk_id") or "") for item in evidence]
+    if expanded_ids != chunk_ids:
+        return False
+    if fixed_selected:
+        extracted_facts = judgment.get("extracted_facts")
+        if not isinstance(extracted_facts, list) or any(
+            not isinstance(item, dict)
+            or set(item) != {"chunk_id", "purpose", "fact", "source_excerpt"}
+            or not str(item.get("chunk_id") or "")
+            or not str(item.get("fact") or "")
+            for item in extracted_facts
+        ):
+            return False
+        extracted_ids = {
+            str(item["chunk_id"]) for item in extracted_facts
+        }
+        if extracted_ids != set(chunk_ids):
+            return False
+
+    attached_ids = judgment.get("attached_image_chunk_ids")
+    attached_count = judgment.get("attached_image_count")
+    if (
+        not isinstance(attached_ids, list)
+        or any(not isinstance(value, str) for value in attached_ids)
+        or isinstance(attached_count, bool)
+        or not isinstance(attached_count, int)
+        or attached_count < 0
+        or not set(attached_ids).issubset(set(context_ids))
+    ):
+        return False
+    return True
 
 
 def _candidate_trace_payload(candidate: CandidatePaper) -> dict[str, Any]:
@@ -557,10 +657,68 @@ def _submission_from_answer_checkpoint(
     answer_record: dict[str, Any],
     *,
     require_evidence: bool = True,
+    authoritative_paper_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     prediction = _prediction_from_checkpoint(
         answer_record.get("prediction"), query_id=query.query_id
     )
+    submission_ids = answer_record.get("submission_paper_ids")
+    stage1_relevant_ids = answer_record.get("stage1_relevant_paper_ids")
+    fixed_selected = answer_record.get("paper_set_policy") == "fixed_selected"
+    authoritative_ids = submission_ids if submission_ids is not None else stage1_relevant_ids
+    if (
+        not isinstance(authoritative_ids, list)
+        or any(
+            not isinstance(paper_id, str) or not paper_id
+            for paper_id in authoritative_ids
+        )
+        or len(authoritative_ids) != len(set(authoritative_ids))
+    ):
+        raise ValueError(
+            f"{query.query_id}: answer checkpoint has invalid authoritative "
+            "submission paper IDs"
+        )
+    if fixed_selected and submission_ids is None:
+        raise ValueError(
+            f"{query.query_id}: fixed-selected answer checkpoint has no "
+            "submission_paper_ids"
+        )
+    if fixed_selected:
+        if authoritative_paper_ids is None:
+            raise ValueError(
+                f"{query.query_id}: fixed-selected checkpoint validation requires "
+                "the externally selected candidate papers"
+            )
+        selected_ids = list(authoritative_paper_ids)
+        if authoritative_ids != selected_ids:
+            raise ValueError(
+                f"{query.query_id}: answer checkpoint papers do not match the "
+                "externally selected candidate papers"
+            )
+    prediction_relevant_ids = [
+        str(item.get("paper_id") or "") for item in prediction.gold_papers
+    ]
+    if prediction_relevant_ids != authoritative_ids:
+        raise ValueError(
+            f"{query.query_id}: answer checkpoint authoritative papers do not "
+            "match prediction.gold_papers"
+        )
+    accepted_ids = answer_record.get("accepted_paper_ids")
+    if (
+        not isinstance(accepted_ids, list)
+        or any(not isinstance(paper_id, str) or not paper_id for paper_id in accepted_ids)
+        or (
+            fixed_selected
+            and not set(accepted_ids).issubset(set(authoritative_ids))
+        )
+        or (
+            not fixed_selected
+            and not set(authoritative_ids).issubset(set(accepted_ids))
+        )
+    ):
+        raise ValueError(
+            f"{query.query_id}: answer checkpoint has invalid Stage-2 handoff papers"
+        )
     return prediction_to_submission(
         query, prediction, require_evidence=require_evidence
     )
@@ -572,6 +730,7 @@ def ensure_submission_from_answer_checkpoint(
     submission_path: Path,
     *,
     require_evidence: bool = True,
+    authoritative_paper_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Validate or atomically restore a submission from a current answer.
 
@@ -595,6 +754,7 @@ def ensure_submission_from_answer_checkpoint(
         query,
         answer_record,
         require_evidence=require_evidence,
+        authoritative_paper_ids=authoritative_paper_ids,
     )
     if submission_path.exists():
         submission = json.loads(submission_path.read_text(encoding="utf-8"))
@@ -720,6 +880,9 @@ def materialize_run_outputs(
                 answer_record,
                 paths.submission,
                 require_evidence=require_evidence,
+                authoritative_paper_ids=(
+                    candidate.paper_id for candidate in handoff.candidate_papers
+                ),
             )
             trace["submission"] = submission
             submissions.append(submission)

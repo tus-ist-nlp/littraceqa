@@ -20,18 +20,25 @@ from typing import Any
 from littraceqa.candidate_handoff import (
     CandidatePaper,
     candidate_papers_from_record,
+    load_candidate_handoffs,
     production_query_from_record,
     read_jsonl,
 )
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.pairwise_prompts import (
     ANSWER_PROMPT_VERSION,
+    FIXED_SELECTED_ANSWER_PROMPT_VERSION,
     JUDGMENT_PROMPT_VERSION,
+    JUDGMENT_QUESTION_TYPE_VERSION,
     PAIRWISE_SYSTEM_PROMPT,
+    SELECTED_EVIDENCE_PROMPT_VERSION,
     answer_response_shape,
     example_manifest,
+    judgment_question_type,
     render_answer_prompt,
     render_judgment_prompt,
+    render_selected_evidence_prompt,
+    selected_evidence_example_manifest,
 )
 
 
@@ -55,9 +62,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render Stage 1, Stage 2, or both",
     )
     parser.add_argument(
+        "--paper-set-policy",
+        choices=("pairwise_candidates", "fixed_selected"),
+        default="pairwise_candidates",
+        help=(
+            "Render ordinary candidate judgment or externally selected-paper "
+            "evidence extraction."
+        ),
+    )
+    parser.add_argument(
         "--candidates",
         default=None,
         help="Optional sanitized query_id + candidate_papers JSONL",
+    )
+    parser.add_argument(
+        "--paper-metadata",
+        default=None,
+        help=(
+            "Optional canonical paper metadata JSONL. When provided with a "
+            "candidate sidecar, use the production handoff loader exactly."
+        ),
     )
     parser.add_argument(
         "--paper-id",
@@ -105,7 +129,11 @@ def build_preview(args: argparse.Namespace) -> dict[str, Any]:
 
     query, query_position = _load_query(args.queries, args.query_id)
     candidate, candidate_source = _load_candidate(
-        args.candidates, query.query_id, args.paper_id
+        args.candidates,
+        query.query_id,
+        args.paper_id,
+        queries_path=args.queries,
+        paper_metadata_path=args.paper_metadata,
     )
     query_payload = query.to_dict()
     candidate_payload = _candidate_payload(candidate)
@@ -122,7 +150,13 @@ def build_preview(args: argparse.Namespace) -> dict[str, Any]:
         # the preview conservative even when every visible chunk header is counted;
         # the production reader supplies authoritative selection metadata instead.
         preview_chunk_count = max(1, len(re.findall(r"(?m)^\[chunk ", paper_text)))
-        prompt = render_judgment_prompt(
+        fixed_selected = args.paper_set_policy == "fixed_selected"
+        renderer = (
+            render_selected_evidence_prompt
+            if fixed_selected
+            else render_judgment_prompt
+        )
+        prompt = renderer(
             query=query,
             query_payload=query_payload,
             candidate_payload=candidate_payload,
@@ -135,13 +169,26 @@ def build_preview(args: argparse.Namespace) -> dict[str, Any]:
             paper_text=paper_text,
             image_legend=image_legend,
         )
-        prompts.append(_prompt_record("judgment", JUDGMENT_PROMPT_VERSION, prompt))
+        prompts.append(
+            _prompt_record(
+                "judgment",
+                SELECTED_EVIDENCE_PROMPT_VERSION
+                if fixed_selected
+                else JUDGMENT_PROMPT_VERSION,
+                prompt,
+            )
+        )
 
     if args.stage in {"answer", "all"}:
         accepted_summary = (
             _load_json_collection(args.accepted_summary_file)
             if args.accepted_summary_file
-            else [_sample_accepted_summary(candidate)]
+            else [
+                _sample_accepted_summary(
+                    candidate,
+                    fixed_selected=args.paper_set_policy == "fixed_selected",
+                )
+            ]
         )
         evidence_text = (
             _required_nonempty_text(args.evidence_file, "answer evidence")
@@ -157,8 +204,17 @@ def build_preview(args: argparse.Namespace) -> dict[str, Any]:
             answer_shape=answer_response_shape(query),
             max_evidence=args.max_evidence,
             max_evidence_per_paper=args.max_evidence_per_paper,
+            paper_set_policy=args.paper_set_policy,
         )
-        prompts.append(_prompt_record("answer", ANSWER_PROMPT_VERSION, prompt))
+        prompts.append(
+            _prompt_record(
+                "answer",
+                FIXED_SELECTED_ANSWER_PROMPT_VERSION
+                if args.paper_set_policy == "fixed_selected"
+                else ANSWER_PROMPT_VERSION,
+                prompt,
+            )
+        )
 
     return {
         "schema_version": 1,
@@ -171,7 +227,17 @@ def build_preview(args: argparse.Namespace) -> dict[str, Any]:
         "synthetic_answer_context": (
             args.accepted_summary_file is None or args.evidence_file is None
         ),
-        "few_shot_examples": example_manifest(query),
+        "paper_set_policy": args.paper_set_policy,
+        "few_shot_examples": {
+            **example_manifest(query),
+            "judgment": (
+                selected_evidence_example_manifest(query)
+                if args.paper_set_policy == "fixed_selected"
+                else example_manifest(query)["judgment"]
+            ),
+        },
+        "judgment_question_type": judgment_question_type(query),
+        "judgment_question_type_version": JUDGMENT_QUESTION_TYPE_VERSION,
         "prompts": prompts,
     }
 
@@ -258,6 +324,9 @@ def _load_candidate(
     path: str | Path | None,
     query_id: str,
     paper_id: str | None,
+    *,
+    queries_path: str | Path | None = None,
+    paper_metadata_path: str | Path | None = None,
 ) -> tuple[CandidatePaper, str]:
     if path is None:
         return (
@@ -271,13 +340,27 @@ def _load_candidate(
             "synthetic",
         )
 
-    records = read_jsonl(path)
-    matches = [record for record in records if record.get("query_id") == query_id]
-    if not matches:
-        raise ValueError(f"candidate sidecar has no query_id {query_id!r}: {path}")
-    if len(matches) > 1:
-        raise ValueError(f"duplicate candidate query_id in {path}: {query_id}")
-    candidates = candidate_papers_from_record(matches[0])
+    if paper_metadata_path is not None:
+        if queries_path is None:
+            raise ValueError("paper metadata requires the organizer query input")
+        matching_handoffs = [
+            handoff
+            for handoff in load_candidate_handoffs(
+                queries_path, path, paper_metadata_path
+            )
+            if handoff.query.query_id == query_id
+        ]
+        if len(matching_handoffs) != 1:
+            raise ValueError(f"query_id is absent or duplicated: {query_id}")
+        candidates = matching_handoffs[0].candidate_papers
+    else:
+        records = read_jsonl(path)
+        matches = [record for record in records if record.get("query_id") == query_id]
+        if not matches:
+            raise ValueError(f"candidate sidecar has no query_id {query_id!r}: {path}")
+        if len(matches) > 1:
+            raise ValueError(f"duplicate candidate query_id in {path}: {query_id}")
+        candidates = candidate_papers_from_record(matches[0])
     if paper_id is None:
         return candidates[0], "sidecar"
     for candidate in candidates:
@@ -331,17 +414,18 @@ def _sample_paper_text(paper_id: str) -> str:
     )
 
 
-def _sample_accepted_summary(candidate: CandidatePaper) -> dict[str, Any]:
-    return {
+def _sample_accepted_summary(
+    candidate: CandidatePaper,
+    *,
+    fixed_selected: bool = False,
+) -> dict[str, Any]:
+    summary = {
         "paper_id": candidate.paper_id,
         "title": candidate.title,
         "rank": candidate.rank,
-        "label": "direct_answer",
-        "stage1_label": "direct_answer",
-        "answer_pool_reason": "synthetic_preview",
-        "paper_role": "target_owner",
-        "missing_constraints": [],
-        "blocking_mismatches": [],
+        "is_relevant_to_answer": True,
+        "has_usable_answer_evidence": True,
+        "send_to_answer_agent": True,
         "evidence": [
             {
                 "chunk_id": f"{candidate.paper_id}#preview",
@@ -350,8 +434,22 @@ def _sample_accepted_summary(candidate: CandidatePaper) -> dict[str, Any]:
                 "purpose": "answer",
             }
         ],
-        "visual": {"required": False, "status": "not_needed"},
     }
+    if fixed_selected:
+        summary.update(
+            {
+                "checkpoint_kind": "fixed_selected_evidence",
+                "extracted_facts": [
+                    {
+                        "chunk_id": f"{candidate.paper_id}#preview",
+                        "purpose": "answer_value",
+                        "fact": "Synthetic preview fact.",
+                        "source_excerpt": "Synthetic preview paper text.",
+                    }
+                ],
+            }
+        )
+    return summary
 
 
 def _sample_evidence_text(paper_id: str) -> str:

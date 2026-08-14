@@ -7,6 +7,9 @@ import pytest
 from littraceqa.answer_derivation import (
     DerivationValidationError,
     is_aggregate_citation_count_query,
+    is_axis_extent_lookup_query,
+    is_mean_aggregation_query,
+    requires_extremum_operation,
     validate_answer_semantics,
     validate_table_rows,
 )
@@ -136,6 +139,138 @@ def test_compare_rejects_incorrect_boolean_before_answer_binding() -> None:
             ),
             answer={"freeform": {"text": "No"}},
         )
+
+
+def _same_performance_derivation() -> tuple[Query, dict[str, Any], dict[str, Any]]:
+    query = Query(
+        "same_performance",
+        "On which task do System Cedar and System Flint achieve the same performance?",
+        ["freeform", "multiple_choice"],
+        options={"A": "Task A", "B": "Task B", "C": "Task C"},
+    )
+    facts = [
+        _fact("cedar_a", 61),
+        _fact("flint_a", 58),
+        _fact("cedar_b", 73),
+        _fact("flint_b", 73),
+        _fact("cedar_c", 80),
+        _fact("flint_c", 76),
+    ]
+    operation = {
+        "id": "same_task",
+        "kind": "select_where",
+        "fact_ids": [fact["id"] for fact in facts],
+        "comparisons": [
+            {
+                "label": "Task A",
+                "left_fact_id": "cedar_a",
+                "right_fact_id": "flint_a",
+                "left": 61,
+                "right": 58,
+            },
+            {
+                "label": "Task B",
+                "left_fact_id": "cedar_b",
+                "right_fact_id": "flint_b",
+                "left": 73,
+                "right": 73,
+            },
+            {
+                "label": "Task C",
+                "left_fact_id": "cedar_c",
+                "right_fact_id": "flint_c",
+                "left": 80,
+                "right": 76,
+            },
+        ],
+        "operator": "==",
+        "result": "Task B",
+        "answer_binding": _binding(
+            "answer.multiple_choice", "Task B", "Task B"
+        ),
+    }
+    derivation = _derivation(
+        facts,
+        [operation],
+        "Task B",
+        answer_bindings=[
+            {
+                "answer_path": "answer.freeform.text",
+                "source_type": "operation",
+                "source_id": "same_task",
+                "answer_fragment": "Task B",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "operation",
+                "source_id": "same_task",
+                "answer_fragment": "Task B",
+            },
+        ],
+    )
+    answer = {
+        "freeform": {"text": "Task B"},
+        "multiple_choice": {"label": "B", "selected_option_text": "Task B"},
+    }
+    return query, derivation, answer
+
+
+def test_select_where_binds_unique_matching_label_not_boolean_predicate() -> None:
+    query, derivation, answer = _same_performance_derivation()
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer=answer,
+    )
+
+    operation = validated["operations"][0]
+    assert operation["kind"] == "select_where"
+    assert operation["result"] == "Task B"
+
+
+def test_select_where_rejects_non_unique_matching_labels() -> None:
+    query, derivation, answer = _same_performance_derivation()
+    fact = next(item for item in derivation["facts"] if item["id"] == "flint_c")
+    fact["value"] = 80
+    comparison = derivation["operations"][0]["comparisons"][2]
+    comparison["right"] = 80
+
+    with pytest.raises(DerivationValidationError, match="exactly one matching label"):
+        validate_answer_semantics(query, derivation=derivation, answer=answer)
+
+
+def test_select_where_rejects_comparison_operand_not_copied_from_fact() -> None:
+    query, derivation, answer = _same_performance_derivation()
+    derivation["operations"][0]["comparisons"][1]["right"] = 72
+
+    with pytest.raises(
+        DerivationValidationError, match="do not match referenced fact values"
+    ):
+        validate_answer_semantics(query, derivation=derivation, answer=answer)
+
+
+def test_labeled_equality_selection_requires_equality_operator() -> None:
+    query, derivation, answer = _same_performance_derivation()
+    operation = derivation["operations"][0]
+    # <= still has exactly one deterministic winner (Task B), so operation
+    # validation succeeds before the query-level equality contract rejects it.
+    operation["operator"] = "<="
+
+    with pytest.raises(
+        DerivationValidationError, match="labeled equality selection"
+    ):
+        validate_answer_semantics(query, derivation=derivation, answer=answer)
+
+
+def test_select_where_rejects_reused_operand_fact_across_rows() -> None:
+    query, derivation, answer = _same_performance_derivation()
+    comparison = derivation["operations"][0]["comparisons"][2]
+    comparison["left_fact_id"] = "cedar_a"
+    comparison["left"] = 61
+
+    with pytest.raises(DerivationValidationError, match="exactly once"):
+        validate_answer_semantics(query, derivation=derivation, answer=answer)
 
 
 def test_operation_rejects_invented_operands_not_present_in_facts() -> None:
@@ -609,6 +744,378 @@ def test_divide_requires_explicit_rounding_or_exact_contract() -> None:
         answer={"freeform": {"text": "0.333"}},
     )
     assert validated["operations"][0]["result"] == "0.333"
+
+
+def _mean_operation(
+    *,
+    fact_ids: list[str],
+    operands: list[Any],
+    result: Any,
+    exact: bool = True,
+) -> dict[str, Any]:
+    operation: dict[str, Any] = {
+        "id": "task_mean",
+        "kind": "mean",
+        "fact_ids": fact_ids,
+        "operands": operands,
+        "result": result,
+        "answer_binding": _binding(
+            "answer.multiple_choice", result, str(result)
+        ),
+    }
+    if exact:
+        operation["exact"] = True
+    return operation
+
+
+def test_mean_uses_distinct_source_facts_and_exact_terminating_result() -> None:
+    query = Query(
+        "mean_scores",
+        "What is the arithmetic mean of Cedar's three reported task scores?",
+        ["multiple_choice"],
+        options={"A": "5.8", "B": "6.2", "C": "6.4"},
+    )
+    facts = [_fact("one", 4.2), _fact("two", 6.6), _fact("three", 8.4)]
+    operation = _mean_operation(
+        fact_ids=["one", "two", "three"],
+        operands=[4.2, 6.6, 8.4],
+        result=6.4,
+    )
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(facts, [operation], "6.4"),
+        answer={
+            "multiple_choice": {
+                "label": "C",
+                "selected_option_text": "6.4",
+            }
+        },
+    )
+
+    assert validated["operations"][0]["kind"] == "mean"
+    assert validated["operations"][0]["result"] == 6.4
+
+
+def test_mean_requires_rounding_for_nonterminating_result() -> None:
+    query = Query(
+        "rounded_mean",
+        "What is the average of the three reported values?",
+        ["multiple_choice"],
+        options={"A": "1.66", "B": "1.67"},
+    )
+    facts = [_fact("one", 1), _fact("two", 2), _fact("three", 2)]
+    operation = _mean_operation(
+        fact_ids=["one", "two", "three"],
+        operands=[1, 2, 2],
+        result="1.67",
+    )
+
+    with pytest.raises(DerivationValidationError, match="exact mean is non-terminating"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "1.67"),
+            answer={
+                "multiple_choice": {
+                    "label": "B",
+                    "selected_option_text": "1.67",
+                }
+            },
+        )
+
+    operation.pop("exact")
+    operation["rounding"] = {"decimal_places": 2, "mode": "half_up"}
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(facts, [operation], "1.67"),
+        answer={
+            "multiple_choice": {
+                "label": "B",
+                "selected_option_text": "1.67",
+            }
+        },
+    )
+    assert validated["operations"][0]["result"] == "1.67"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    [
+        ({"fact_ids": ["one"]}, "at least two distinct sourced numeric facts"),
+        ({"operands": [4.2, 8.4, 6.6]}, "do not match referenced fact values"),
+        ({"result": 6.3}, "deterministic mean gives 6.4"),
+        ({"exact": True, "rounding": {"decimal_places": 1, "mode": "half_up"}},
+         "either exact=true or rounding"),
+    ],
+)
+def test_mean_rejects_incomplete_or_inconsistent_contract(
+    mutation: dict[str, Any], error: str
+) -> None:
+    query = Query(
+        "mean_scores",
+        "What is the average of the three reported task scores?",
+        ["multiple_choice"],
+        options={"C": "6.4"},
+    )
+    facts = [_fact("one", 4.2), _fact("two", 6.6), _fact("three", 8.4)]
+    operation = _mean_operation(
+        fact_ids=["one", "two", "three"],
+        operands=[4.2, 6.6, 8.4],
+        result=6.4,
+    )
+    operation.update(mutation)
+
+    with pytest.raises(DerivationValidationError, match=error):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "6.4"),
+            answer={
+                "multiple_choice": {
+                    "label": "C",
+                    "selected_option_text": "6.4",
+                }
+            },
+        )
+
+
+def test_mean_operation_is_query_gated_and_direct_reported_mean_is_allowed() -> None:
+    non_mean_query = Query(
+        "reported_score",
+        "What score does Cedar report?",
+        ["multiple_choice"],
+        options={"C": "6.4"},
+    )
+    facts = [_fact("one", 4.2), _fact("two", 8.6)]
+    operation = _mean_operation(
+        fact_ids=["one", "two"], operands=[4.2, 8.6], result=6.4
+    )
+    with pytest.raises(DerivationValidationError, match="requires mean/average wording"):
+        validate_answer_semantics(
+            non_mean_query,
+            derivation=_derivation(facts, [operation], "6.4"),
+            answer={
+                "multiple_choice": {
+                    "label": "C",
+                    "selected_option_text": "6.4",
+                }
+            },
+        )
+
+    mean_query = Query(
+        "reported_mean",
+        "What average does the paper directly report?",
+        ["freeform"],
+    )
+    validated = validate_answer_semantics(
+        mean_query,
+        derivation=_derivation([_fact("reported_mean", 6.4)], [], "6.4"),
+        answer={"freeform": {"text": "6.4"}},
+    )
+    assert validated["operations"] == []
+
+    with pytest.raises(DerivationValidationError, match="arithmetic mean"):
+        validate_answer_semantics(
+            mean_query,
+            derivation=_derivation(
+                [_fact("invented_mean", 6.4, value_kind="text")], [], "6.4"
+            ),
+            answer={"freeform": {"text": "6.4"}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("What is the average of the three values?", True),
+        ("What is the mean value across the three tasks?", True),
+        ("What mean squared error does Cedar report?", False),
+        ("What average precision does Cedar report?", False),
+    ],
+)
+def test_mean_aggregation_query_detection_avoids_named_metrics(
+    question: str, expected: bool
+) -> None:
+    assert is_mean_aggregation_query(Query("mean_gate", question, ["freeform"])) is expected
+
+
+def _percent_change_operation(
+    *,
+    old: Any,
+    new: Any,
+    result: Any,
+    direction: str,
+    exact: bool = True,
+) -> dict[str, Any]:
+    operation: dict[str, Any] = {
+        "id": "relative_change",
+        "kind": "percent_change",
+        "fact_ids": ["old", "new"],
+        "old_fact_id": "old",
+        "new_fact_id": "new",
+        "old": old,
+        "new": new,
+        "direction": direction,
+        "scale": 100,
+        "result": result,
+        "answer_binding": _binding(
+            "answer.freeform.text", result, f"{result}%"
+        ),
+    }
+    if exact:
+        operation["exact"] = True
+    return operation
+
+
+def test_percent_change_exact_decrease_uses_old_as_denominator() -> None:
+    query = Query(
+        "percent_decrease",
+        "By what percentage did the error decrease from 120 to 90?",
+        ["freeform"],
+    )
+    facts = [_fact("old", 120), _fact("new", 90)]
+    operation = _percent_change_operation(
+        old=120,
+        new=90,
+        result=25,
+        direction="decrease",
+    )
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(facts, [operation], "25%"),
+        answer={"freeform": {"text": "25%"}},
+    )
+
+    assert validated["operations"][0]["result"] == 25
+
+
+def test_percent_change_exact_increase_uses_explicit_fact_roles() -> None:
+    query = Query(
+        "percent_increase",
+        "What is the relative increase from the baseline to the refined value?",
+        ["freeform"],
+    )
+    facts = [_fact("old", 80), _fact("new", 100)]
+    operation = _percent_change_operation(
+        old=80,
+        new=100,
+        result=25,
+        direction="increase",
+    )
+    # fact_ids are an unordered dependency inventory; the explicit role fields
+    # determine which sourced value is the denominator.
+    operation["fact_ids"] = ["new", "old"]
+    operation["answer_binding"]["answer_fragment"] = "25 percent"
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(facts, [operation], "25 percent"),
+        answer={"freeform": {"text": "25 percent"}},
+    )
+
+    assert validated["operations"][0]["direction"] == "increase"
+
+
+def test_percent_change_requires_deterministic_rounding_when_nonterminating() -> None:
+    query = Query(
+        "rounded_percent_decrease",
+        "What is the percentage decrease from 30 to 20?",
+        ["freeform"],
+    )
+    facts = [_fact("old", 30), _fact("new", 20)]
+    operation = _percent_change_operation(
+        old=30,
+        new=20,
+        result="33.3",
+        direction="decrease",
+        exact=False,
+    )
+
+    with pytest.raises(DerivationValidationError, match="requires exact=true or a rounding"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "33.3%"),
+            answer={"freeform": {"text": "33.3%"}},
+        )
+
+    operation["rounding"] = {"decimal_places": 1, "mode": "half_up"}
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(facts, [operation], "33.3%"),
+        answer={"freeform": {"text": "33.3%"}},
+    )
+    assert validated["operations"][0]["result"] == "33.3"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    [
+        ({"new": 89}, "old/new do not match"),
+        ({"direction": "increase"}, "contradicts new < old"),
+        ({"scale": 1}, "scale must equal 100"),
+        ({"old_fact_id": "new"}, "must be distinct"),
+    ],
+)
+def test_percent_change_rejects_ungrounded_or_ambiguous_formula(
+    mutation: dict[str, Any], error: str
+) -> None:
+    query = Query(
+        "percent_decrease",
+        "By what percentage did the error decrease?",
+        ["freeform"],
+    )
+    facts = [_fact("old", 120), _fact("new", 90)]
+    operation = _percent_change_operation(
+        old=120,
+        new=90,
+        result=25,
+        direction="decrease",
+    )
+    operation.update(mutation)
+
+    with pytest.raises(DerivationValidationError, match=error):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "25%"),
+            answer={"freeform": {"text": "25%"}},
+        )
+
+
+def test_percent_change_rejects_zero_origin_denominator() -> None:
+    query = Query(
+        "percent_increase",
+        "What is the percentage increase from zero to ten?",
+        ["freeform"],
+    )
+    facts = [_fact("old", 0), _fact("new", 10)]
+    operation = _percent_change_operation(
+        old=0,
+        new=10,
+        result=100,
+        direction="increase",
+    )
+
+    with pytest.raises(DerivationValidationError, match="denominator must be non-zero"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation(facts, [operation], "100%"),
+            answer={"freeform": {"text": "100%"}},
+        )
+
+
+def test_percentage_change_query_cannot_bypass_grounded_operation() -> None:
+    query = Query(
+        "percent_decrease",
+        "What is the percentage decrease from the original to the refined score?",
+        ["freeform"],
+    )
+
+    with pytest.raises(DerivationValidationError, match="percentage change"):
+        validate_answer_semantics(
+            query,
+            derivation=_derivation([_fact("reported", 25)], [], "25%"),
+            answer={"freeform": {"text": "25%"}},
+        )
 
 
 def test_divide_rounding_mode_and_exact_terminating_result() -> None:
@@ -1915,6 +2422,180 @@ def test_extreme_query_cannot_bypass_argmax_with_winner_fact() -> None:
         )
 
 
+def test_highest_visible_axis_extent_is_a_visual_lookup_not_argmax() -> None:
+    selected_text = "population distance axis peaks near 70; SpeechSet error = 0.412"
+    query = Query(
+        "compound_axis_lookup",
+        (
+            "In the human-baseline color analysis, roughly what is the highest "
+            "population distance value on the horizontal axis, and in the "
+            "synthetic-audio study, what error does the multimodal model achieve "
+            "on SpeechSet?"
+        ),
+        ["multiple_choice"],
+        options={
+            "A": "population distance axis peaks near 50; SpeechSet error = 0.517",
+            "B": selected_text,
+        },
+    )
+    facts = [
+        _fact("axis_extent", 70, value_kind="visual"),
+        _fact("table_metric", 0.412, value_kind="reported"),
+    ]
+    derivation = _derivation(
+        facts,
+        [],
+        selected_text,
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "axis_extent",
+                "answer_fragment": "70",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "table_metric",
+                "answer_fragment": "0.412",
+            },
+        ],
+    )
+
+    assert is_axis_extent_lookup_query(query) is True
+    assert requires_extremum_operation(query) is False
+    validated = validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer={
+            "multiple_choice": {
+                "label": "B",
+                "selected_option_text": selected_text,
+            }
+        },
+    )
+    assert validated["operations"] == []
+    assert [fact["value_kind"] for fact in validated["facts"]] == [
+        "visual",
+        "reported",
+    ]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Roughly what is the maximum labeled tick on the vertical axis?",
+        "What is the highest x-axis value?",
+        "Approximately what was the largest visible y axis limit?",
+    ],
+)
+def test_axis_extent_detector_handles_generic_surface_forms(question: str) -> None:
+    query = Query("axis_surface", question, ["freeform"])
+    assert is_axis_extent_lookup_query(query) is True
+    assert requires_extremum_operation(query) is False
+
+
+def test_axis_extent_exception_does_not_waive_another_real_extremum_clause() -> None:
+    query = Query(
+        "axis_and_winner",
+        (
+            "What is the highest x-axis value, and which method has the best "
+            "score across all systems?"
+        ),
+        ["multiple_choice"],
+        options={"A": "axis 70; Cedar", "B": "axis 70; Flint"},
+    )
+    derivation = _derivation(
+        [
+            _fact("axis_extent", 70, value_kind="visual"),
+            _fact("winner", "Flint", value_kind="text"),
+        ],
+        [],
+        "axis 70; Flint",
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "axis_extent",
+                "answer_fragment": "70",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "winner",
+                "answer_fragment": "Flint",
+            },
+        ],
+    )
+
+    assert is_axis_extent_lookup_query(query) is True
+    assert requires_extremum_operation(query) is True
+    with pytest.raises(DerivationValidationError, match="argmax/argmin"):
+        validate_answer_semantics(
+            query,
+            derivation=derivation,
+            answer={
+                "multiple_choice": {
+                    "label": "B",
+                    "selected_option_text": "axis 70; Flint",
+                }
+            },
+        )
+
+
+def test_explicitly_reported_compound_optimum_can_bind_without_argmax() -> None:
+    selected_text = "gamma=0.98 optimal; gamma>1.0 harms performance"
+    query = Query(
+        "reported_optimum",
+        (
+            "In the Cedar paper, what optimal temporal decay factor gamma "
+            "achieves the best performance across three base models, and what "
+            "happens when gamma exceeds 1.0?"
+        ),
+        ["multiple_choice"],
+        options={
+            "A": "gamma=0.97 optimal; gamma>1.0 harms performance",
+            "C": selected_text,
+        },
+    )
+    facts = [
+        _fact("optimum", "gamma=0.98", value_kind="reported"),
+        _fact("effect", "harms performance", value_kind="text"),
+    ]
+    derivation = _derivation(
+        facts,
+        [],
+        selected_text,
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "optimum",
+                "answer_fragment": "gamma=0.98",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "effect",
+                "answer_fragment": "harms performance",
+            },
+        ],
+    )
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=derivation,
+        answer={
+            "multiple_choice": {
+                "label": "C",
+                "selected_option_text": selected_text,
+            }
+        },
+    )
+
+    assert validated["operations"] == []
+
+
 def test_explicit_only_filter_allows_grounded_singleton_argmax() -> None:
     query = Query(
         "filtered_maximum",
@@ -2024,3 +2705,107 @@ def test_filtered_extremum_cannot_bypass_comparison_with_reported_name() -> None
                 }
             },
         )
+
+
+def test_numeric_fact_binding_accepts_equivalent_number_word_in_mc_option() -> None:
+    query = Query(
+        "count_words",
+        "How many properties and neighbors are used?",
+        ["multiple_choice"],
+        options={
+            "A": "Four properties and three neighbors",
+            "B": "Five properties and five neighbors",
+        },
+    )
+    answer = {
+        "multiple_choice": {
+            "label": "B",
+            "selected_option_text": "Five properties and five neighbors",
+        }
+    }
+    derivation = _derivation(
+        [_fact("properties", 5), _fact("neighbors", 5)],
+        [],
+        "Five properties and five neighbors",
+        answer_bindings=[
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "properties",
+                "answer_fragment": "Five properties",
+            },
+            {
+                "answer_path": "answer.multiple_choice",
+                "source_type": "fact",
+                "source_id": "neighbors",
+                "answer_fragment": "five neighbors",
+            },
+        ],
+    )
+
+    validated = validate_answer_semantics(query, derivation=derivation, answer=answer)
+
+    assert len(validated["answer_bindings"]) == 2
+
+
+def test_inequality_binding_accepts_two_values_joined_by_contrast() -> None:
+    query = Query(
+        "citation_years",
+        "Do the two papers use the same author-year citation?",
+        ["multiple_choice"],
+        options={
+            "A": "Blei et al. (2003) in both papers",
+            "B": "Blei et al. (2009) in paper A but Blei et al. (2003) in paper B",
+        },
+    )
+    fragment = (
+        "Blei et al. (2009) in paper A but Blei et al. (2003) in paper B"
+    )
+    operation = {
+        "id": "different_years",
+        "kind": "compare",
+        "fact_ids": ["paper_a", "paper_b"],
+        "left": 2009,
+        "operator": "!=",
+        "right": 2003,
+        "result": True,
+        "answer_binding": _binding("answer.multiple_choice", True, fragment),
+    }
+    answer = {
+        "multiple_choice": {
+            "label": "B",
+            "selected_option_text": fragment,
+        }
+    }
+
+    validated = validate_answer_semantics(
+        query,
+        derivation=_derivation(
+            [_fact("paper_a", 2009), _fact("paper_b", 2003)],
+            [operation],
+            fragment,
+            answer_bindings=[
+                {
+                    "answer_path": "answer.multiple_choice",
+                    "source_type": "fact",
+                    "source_id": "paper_a",
+                    "answer_fragment": "Blei et al. (2009)",
+                },
+                {
+                    "answer_path": "answer.multiple_choice",
+                    "source_type": "fact",
+                    "source_id": "paper_b",
+                    "answer_fragment": "Blei et al. (2003)",
+                },
+                {
+                    "answer_path": "answer.multiple_choice",
+                    "source_type": "operation",
+                    "source_id": "different_years",
+                    "answer_fragment": fragment,
+                },
+            ],
+        ),
+        answer=answer,
+    )
+
+    assert validated["operations"][0]["result"] is True

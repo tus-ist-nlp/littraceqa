@@ -61,6 +61,10 @@ This path reads a separate, fixed candidate-paper ranking and the student's
 MinerU corpus. It does not run DI, retrieval, reranking, or re-search. Use the
 small reading-only environment:
 
+The design rationale, RAG reading abstraction, validation/test distribution
+audit, reproducibility protocol, and paper-ready method draft are documented in
+[`docs/littraceqa_rag_reader_method.md`](docs/littraceqa_rag_reader_method.md).
+
 ```bash
 uv sync --extra pairwise_reader --group dev
 ```
@@ -128,34 +132,77 @@ For every question, the reader:
 1. resolves only a unique, literal canonical title that grammatically owns a
    named paper-local figure/table/equation/reference; mismatching candidates are
    checkpointed as deterministic zero-call distractors, while every other pair
-   is hydrated from MinerU and receives one base AOAI relevance call; fuzzy
-   title matches and titles that merely co-occur in citations or comparisons
+   is hydrated from MinerU and receives one base AOAI three-field judgment call;
+   fuzzy title matches and titles that merely co-occur in citations or comparisons
    never activate this destructive gate;
-2. checks target-paper ownership, hard settings, visual availability, exact
-   chunk IDs, and internal consistency before accepting a paper; a claim of visual
-   inspection is rejected unless the source image was actually attached;
-3. gives only accepted original chunks and bounded neighbours to AOAI to build
-   the answer;
+2. asks Stage 1 for two separate Boolean judgments—whether the paper belongs in
+   the answer-relevant paper set and whether the supplied context contains usable
+   answer evidence—plus the smallest exact chunk-ID set; Python validates the
+   three-field response and rejects invented or cross-paper IDs;
+3. builds the submitted relevant-paper set from the first judgment, but hands a
+   paper to Stage 2 only when both judgments are true and at least one cited chunk
+   is valid; visual handoff additionally requires a cited image that was actually
+   attached; the Stage-2 context starts from those validated IDs, and any
+   deterministic same-paper visual sibling or official-locator rescue chunk is
+   logged separately as Python-supplied context;
 4. binds every calculation input to named source facts, then deterministically
    recomputes arithmetic, rounded/exact division, counts, argmax/argmin, Yes/No
    comparisons, option label/text mapping, table columns/types, and evidence
    support; every operation is also bound to its final answer fragment, so one
    of several counts cannot silently disagree with the selected option;
-5. keeps the broader `paper_relevance` set separate from the minimal chunks
-   directly supporting the selected answer.
+5. keeps the broader Stage-1 relevant-paper set, the narrower Stage-2 handoff
+   pool, and the minimal chunks directly supporting the selected answer separate.
 
 Stage 1 never splits a paper into several AOAI requests. A long paper is
 deterministically compacted into one bounded paper context, with at most 10
 selected images, and every pair not eliminated by the narrow named-owner gate
 receives one base judgment call.
-The final rendered Stage-1 prompt, including few-shot instructions and query
-metadata, is guarded at 240,000 characters; the paper context is reduced again
-locally if necessary, without another AOAI request.
+The final rendered Stage-1 prompt normally contains three examples selected by
+the rule-based four-way question type: one common negative plus one usable and
+one not-usable example for `visual`, `citation`, `calculation`, or `other`.
+Queries that require a literal term inside a primary/main Figure receive one
+additional hard-negative example that separates Figure pixels/caption from a
+paper title, surrounding prose, and merely related tree-search terminology.
+Including those examples and query metadata, the prompt is guarded at 240,000
+characters; the paper context is reduced again locally if necessary, without
+another AOAI request.
 Every completed paper judgment is checkpointed. JSON repair, an image-policy
 text-only fallback, and provider retry can add requests only on failure; they
 are not normal paper partitions. API errors,
 invalid JSON, invented IDs, absent required images, inconsistent calculations,
 and invalid official locators never become silent guesses.
+
+Stage-1 checkpoints retain both the model's raw Boolean decisions (`model_*`)
+and Python's effective routing decisions. Python forces a uniquely resolved
+literal owner to A=true, suppresses B when effective A is false or no valid ID
+remains, and exposes the resulting `send_to_answer_agent` flag. This makes model
+errors distinguishable from deterministic ownership and safety corrections.
+
+### Reading an externally selected paper set
+
+When retrieval is owned by another component and its paper IDs are already the
+final paper set, use `configs/agent_style/aoai_selected_paper_reader.yaml`.  In
+this mode a sidecar row may contain canonical paper IDs only:
+
+```json
+{"query_id":"ltqa_...","candidate_papers":["acl2025_00001","neurips2025_00123"]}
+```
+
+`--paper-metadata` rehydrates title, venue, and year.  The loader still requires
+exact query coverage and rejects answer, evidence, and development-only fields.
+The reader passes the supplied paper IDs to `gold_papers` unchanged; neither
+AOAI extraction nor the final answer call may add, remove, rank, or reject one.
+For each selected paper, the first call extracts minimal source-linked facts and
+chunk IDs.  The second call receives those facts plus deterministic same-paper
+fallback context, constructs the answer, and chooses minimal submission
+evidence.  Multi-paper open-ended tables must emit a grounded row for every
+selected paper, while explicit row-inventory questions may report a truly
+ungrounded named row in `completeness.missing` rather than inventing it.
+
+This policy separates retrieval quality from reading quality: paper F1 is the
+upstream system's result, while this reader is responsible for evidence
+localization, table/figure coordinates, calculations, multiple-choice mapping,
+and answer serialization.
 
 Every provider adapter invocation also has a durable two-phase audit in
 `<run-dir>/<query_id>/provider_attempts.jsonl`. The coordinator fsyncs a unique
@@ -258,14 +305,16 @@ configuration-name compatibility alias. It now uses the same one-call
 text-plus-selected-images judgment as the primary config; it no longer performs
 a text call followed by a second visual-refinement call.
 
-`max_answer_papers` limits how many Stage-1 accepted papers Stage 2 may review;
-`max_evidence` separately limits the distinct evidence chunks in the final
-submission. Keeping these limits separate lets Stage 2 remove false-positive
-candidates without silently truncating its review queue.
+`max_answer_papers` limits how many validated Stage-1 handoff papers Stage 2 may
+review; these are papers for which both Boolean judgments are true and usable
+chunk IDs survived validation. `max_evidence` separately limits the distinct
+evidence chunks in the final submission. The broader Stage-1 relevant-paper set
+is not truncated by this Stage-2 review limit.
 
 The production reader also separates output-token reservations by semantic
-stage. Candidate judgments use `judgment_max_completion_tokens: 1024`; the
-final answer explicitly keeps 12,000 tokens for structured-table repairs. The
+stage. Candidate judgments return three-field JSON and reserve
+`judgment_max_completion_tokens: 1024`; the final answer explicitly keeps
+12,000 tokens for structured-table repairs. The
 Azure rate limiter includes the requested output ceiling when it estimates TPM,
 even when the actual Stage-1 JSON is much shorter, so one shared 12,000-token
 ceiling creates avoidable throttling. The client timeout is 60 seconds: normal
@@ -289,6 +338,61 @@ refuses to start unless `--confirm-full-run` is present:
 uv run python scripts/run_aoai_pairwise_reader.py <same arguments> \
   --workers 100 --resume --confirm-full-run
 ```
+
+### Table-only regeneration and source adjudication
+
+Once a complete run has trustworthy multiple-choice answers, papers, and
+evidence, isolate later answer experiments to released table queries with
+`--answer-type table`. Create the first candidate in a fresh run directory with
+`--stage all`; under the fixed-selected config this processes only released
+table queries and emits a valid 21-row table-only candidate:
+
+```bash
+uv run python scripts/run_aoai_pairwise_reader.py <same arguments> \
+  --reader configs/agent_style/aoai_selected_paper_reader.yaml \
+  --run-dir runs/table_sample_01 \
+  --answer-type table --stage all
+```
+
+To reuse those current-code Stage-1 judgments, copy the entire completed
+directory to each new sample directory, including its manifest and per-query
+checkpoints, then rerun only Stage 2 there with
+`--stage answer --resume --force`. Never make two samples write to the same run
+directory. Generate independent candidates in distinct directories, then
+compare full 71-row submissions (or table-only 21-row JSONL files) without
+permitting a candidate to change papers, evidence, multiple-choice answers,
+freeform answers, non-table records, or official query order:
+
+```bash
+uv run python scripts/adjudicate_table_answers.py review \
+  --inputs artifacts/official_release/<revision>/data/test.jsonl \
+  --base runs/frozen_base/submission.jsonl \
+  --candidate sample_01=runs/table_sample_01/submission.jsonl \
+  --candidate sample_02=runs/table_sample_02/submission.jsonl \
+  --output-dir runs/table_review
+```
+
+Inspect every candidate table against the cited PDF or extracted source. Copy
+`table_decisions.template.json` to a decision file and, for all 21 table
+queries, record the selected candidate, `source_checked=true`, a non-empty
+reason, and at least one official-shaped locator already present in the frozen
+evidence set. Promotion is fail-closed and replaces only `answer.table`:
+
+```bash
+uv run python scripts/adjudicate_table_answers.py compose \
+  --inputs artifacts/official_release/<revision>/data/test.jsonl \
+  --base runs/frozen_base/submission.jsonl \
+  --candidate sample_01=runs/table_sample_01/submission.jsonl \
+  --candidate sample_02=runs/table_sample_02/submission.jsonl \
+  --decisions runs/table_review/table_decisions.json \
+  --output runs/table_review/submission.jsonl
+```
+
+The review seals the inputs, base, candidates, query order, and table schemas
+with SHA-256. Composition rejects changed artifacts and writes an audit manifest
+proving that all papers/evidence and all non-table answer components remained
+unchanged. This workflow records human source adjudication; it does not claim
+that setting `source_checked=true` automatically verifies scientific content.
 
 `--workers 100` is the initial concurrency ceiling, not 100 independent input
 files. The runner keeps the original JSONL intact, round-robins every
@@ -375,9 +479,10 @@ uv run python scripts/analyze_aoai_reading.py \
   --output-dir runs/aoai_validation/error_analysis
 ```
 
-This separates candidate misses, relevance false negatives/positives, evidence
-localization, table/figure/citation/equation reading, multi-paper integration,
-answer reasoning, serialization, and dataset inconsistencies. It also evaluates
+This separates candidate misses, Stage-1 A relevance errors, Stage-1 B handoff
+errors, evidence localization, table/figure/citation/equation reading,
+multi-paper integration, answer reasoning, serialization, and dataset
+inconsistencies. It also evaluates
 papers that own gold evidence separately from official `gold_papers`, which may
 contain multiple-choice distractor papers.
 

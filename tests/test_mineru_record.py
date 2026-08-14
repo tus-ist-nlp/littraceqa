@@ -8,8 +8,11 @@ import littraceqa.mineru_record as mineru_record
 from littraceqa.mineru_record import (
     ImageValidationError,
     coarse_locator,
+    query_aware_prediction_locator,
     readable_image_path,
     record_source_type,
+    recover_split_caption_table_records,
+    split_caption_table_locator_overrides,
     submission_evidence_eligible,
     validate_image_file,
 )
@@ -113,6 +116,140 @@ def test_table_and_figure_accept_section_fallback_but_require_visible_object_id(
 def test_boolean_and_zero_pages_are_not_valid_submission_locators():
     assert submission_evidence_eligible(_record("text_span", page=True)) is False
     assert submission_evidence_eligible(_record("text_span", page=0)) is False
+
+
+def test_query_aware_prediction_locator_recovers_later_merged_table_caption():
+    record = _record(
+        "table",
+        page=6,
+        table_id="Table 3",
+        title="500x C ompressor: Generalized Prompt Compression",
+    )
+    record["text"] = """[ACL 2025] 500x C ompressor
+Table 3: In-domain QA results on ArxivQA. F1 deltas compare 500xCompressor and ICAE.
+Table 4: Cross-domain QA results on NaturalQuestions (NaturalQ), RACE, and TriviaQA.
+| Dataset | NaturalQ | RACE |
+| Ours500→1 | 41.36 | 21.37 |
+| ICAE500→1 | 26.65 | 14.24 |
+| Absolute delta | 14.70 | 7.12 |
+"""
+
+    locator = query_aware_prediction_locator(
+        record,
+        "How much does 500xCompressor outperform ICAE on the NaturalQ "
+        "benchmark under the 500-to-1 setting?",
+    )
+
+    assert coarse_locator(record) == {"page": 6, "table_id": "Table 3"}
+    assert locator == {"page": 6, "table_id": "Table 4"}
+
+
+def test_query_aware_prediction_locator_does_not_change_single_caption_record():
+    record = _record("table", page=3, table_id="Table 2")
+    record["text"] = "Table 2: NaturalQ results.\n| Method | F1 |\n| M | 42 |"
+
+    assert query_aware_prediction_locator(record, "What is NaturalQ F1?") == {
+        "page": 3,
+        "table_id": "Table 2",
+    }
+
+
+def test_query_aware_prediction_locator_keeps_ambiguous_merged_metadata_id():
+    record = _record("table", page=3, table_id="Table 2")
+    record["text"] = """Table 2: Results for AlphaSet.
+| Method | F1 | A | 40 |
+Table 3: Results for BetaSet.
+| Method | F1 | B | 41 |
+"""
+
+    assert query_aware_prediction_locator(
+        record, "Compare AlphaSet and BetaSet."
+    ) == {"page": 3, "table_id": "Table 2"}
+
+
+def test_query_aware_prediction_locator_recovers_explicit_merged_figure_id():
+    record = _record("figure", page=4, figure_id="Figure 2")
+    record["text"] = """Figure 2: Training overview.
+Figure 3: NaturalQ accuracy by model size.
+"""
+
+    assert query_aware_prediction_locator(
+        record, "What trend is visible in Figure 3?"
+    ) == {"page": 4, "figure_id": "Figure 3"}
+
+
+def test_query_aware_prediction_locator_requires_metadata_to_match_a_caption():
+    record = _record("table", page=3, table_id="Table 9")
+    record["text"] = """Table 2: AlphaSet results.
+Table 3: NaturalQ results.
+"""
+
+    assert query_aware_prediction_locator(record, "What is NaturalQ F1?") == {
+        "page": 3,
+        "table_id": "Table 9",
+    }
+
+
+def test_adjacent_split_captions_recover_previous_and_current_table_ids():
+    previous = _record("table", page=17, table_id=None)
+    previous["chunk_id"] = "p1#tab13-body"
+    previous["text"] = """[NAACL 2025] Track-SQL
+| Dataset | Total time(s) |
+| --- | --- |
+| SParC | 240.348±1.45 |
+| CoSQL | 214.456±2.56 |
+"""
+    current = _record("table", page=17, table_id="Table 13")
+    current["chunk_id"] = "p1#tab14-body"
+    current["text"] = """[NAACL 2025] Track-SQL
+Table 13: Inference time performance of the Track-SQL framework.
+Table 14: Memory Costs of Training and Inference in the Track-SQL Framework.
+| Metric | SESE(Inference) |
+| --- | --- |
+| Graphics Memory(GB) | 2.235 |
+"""
+
+    recovered = recover_split_caption_table_records([previous, current])
+
+    assert split_caption_table_locator_overrides([previous, current]) == {
+        "p1#tab13-body": "Table 13",
+        "p1#tab14-body": "Table 14",
+    }
+    assert coarse_locator(recovered[0]) == {"page": 17, "table_id": "Table 13"}
+    assert coarse_locator(recovered[1]) == {"page": 17, "table_id": "Table 14"}
+    assert all(submission_evidence_eligible(record) for record in recovered)
+    assert previous["metadata"]["table_id"] is None
+    assert current["metadata"]["table_id"] == "Table 13"
+
+
+def test_adjacent_split_caption_recovery_fails_closed_on_structural_mismatch():
+    previous = _record("table", page=17, table_id=None)
+    previous["chunk_id"] = "p1#previous"
+    previous["text"] = "| Dataset | Value |\n| --- | --- |\n| A | 1 |"
+    current = _record("table", page=18, table_id="Table 13")
+    current["chunk_id"] = "p1#current"
+    current["text"] = """Table 13: Prior table.
+Table 14: Current table.
+| Dataset | Value |
+| --- | --- |
+| B | 2 |
+"""
+
+    assert split_caption_table_locator_overrides([previous, current]) == {}
+
+    current["metadata"]["page"] = 17
+    current["metadata"]["table_id"] = "Table 12"
+    assert split_caption_table_locator_overrides([previous, current]) == {}
+
+    current["metadata"]["table_id"] = "Table 13"
+    current["text"] = """Unrelated prose before the caption.
+Table 13: Prior table.
+Table 14: Current table.
+| Dataset | Value |
+| --- | --- |
+| B | 2 |
+"""
+    assert split_caption_table_locator_overrides([previous, current]) == {}
 
 
 def test_readable_image_path_requires_an_existing_table_or_figure_image(tmp_path):
