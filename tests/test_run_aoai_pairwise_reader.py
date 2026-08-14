@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import importlib.util
 import json
 import subprocess
@@ -386,6 +387,53 @@ def test_evidence_policy_is_part_of_resume_manifest(tmp_path):
     assert optional["reader"]["evidence_policy"] == "optional"
     assert optional["reader"]["require_evidence"] is False
     assert required != optional
+
+
+def test_answer_type_filter_is_part_of_resume_manifest(tmp_path):
+    chunks = tmp_path / "chunks.jsonl"
+    _write_jsonl(
+        chunks,
+        [
+            {
+                "paper_id": "p1",
+                "chunk_id": "p1#1",
+                "chunk_type": "text_span",
+                "text": "text",
+                "metadata": {"page": 1},
+            }
+        ],
+    )
+    input_paths = {}
+    for name in ("queries", "candidates", "paper_metadata", "reader"):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("{}\n", encoding="utf-8")
+        input_paths[name] = path
+    base_args = [
+        "--queries",
+        str(input_paths["queries"]),
+        "--candidates",
+        str(input_paths["candidates"]),
+        "--paper-metadata",
+        str(input_paths["paper_metadata"]),
+        "--chunks",
+        str(chunks),
+        "--reader",
+        str(input_paths["reader"]),
+        "--run-dir",
+        str(tmp_path / "run"),
+    ]
+    parser = _RUNNER.build_parser()
+    all_answers_args = parser.parse_args(base_args)
+    table_args = parser.parse_args([*base_args, "--answer-type", "table"])
+    store = _RUNNER.ChunkStore(chunks)
+    config = {"llm": {"name": "fake", "params": {}}, "params": {}}
+
+    all_answers = _RUNNER.build_manifest(all_answers_args, config, store)
+    table_only = _RUNNER.build_manifest(table_args, config, store)
+
+    assert all_answers["reader"]["answer_type_filter"] is None
+    assert table_only["reader"]["answer_type_filter"] == "table"
+    assert all_answers != table_only
 
 
 def test_missing_visual_override_is_rejected_outside_judge_stage(tmp_path):
@@ -3140,6 +3188,154 @@ def test_explicit_query_selection_does_not_require_full_run_confirmation(capsys)
     _RUNNER._print_and_confirm_run_plan(args, handoffs)
 
     assert "minimum_calls_without_cache=2" in capsys.readouterr().out
+
+
+def test_answer_type_selection_preserves_input_order_and_intersects_query_ids():
+    handoffs = [
+        _RUNNER.CandidateHandoff(
+            Query("q1", "question", ["multiple_choice"]),
+            (CandidatePaper("p1", 1),),
+        ),
+        _RUNNER.CandidateHandoff(
+            Query("q2", "question", ["table"]),
+            (CandidatePaper("p2", 1),),
+        ),
+        _RUNNER.CandidateHandoff(
+            Query("q3", "question", ["table"]),
+            (CandidatePaper("p3", 1),),
+        ),
+    ]
+
+    selected = _RUNNER._select_handoffs(
+        handoffs,
+        ["q3", "q2"],
+        answer_type="table",
+    )
+
+    assert [item.query.query_id for item in selected] == ["q2", "q3"]
+    with pytest.raises(ValueError, match="selected no inputs"):
+        _RUNNER._select_handoffs(
+            handoffs,
+            ["q1"],
+            answer_type="table",
+        )
+
+
+def test_answer_type_selection_does_not_require_full_run_confirmation(capsys):
+    handoffs = [
+        _RUNNER.CandidateHandoff(
+            Query("q1", "question", ["table"]),
+            (CandidatePaper("p1", 1),),
+        )
+    ]
+    args = SimpleNamespace(
+        stage="answer",
+        paper_id=None,
+        query_id=[],
+        answer_type="table",
+        confirm_full_run=False,
+    )
+
+    _RUNNER._print_and_confirm_run_plan(args, handoffs)
+
+    assert "queries=1" in capsys.readouterr().out
+
+
+def test_parser_documents_answer_type_branch_filter():
+    help_text = " ".join(_RUNNER.build_parser().format_help().split())
+
+    assert "--answer-type" in help_text
+    assert "isolates the table branch" in help_text
+
+
+def test_main_routes_only_table_handoffs_to_execution(
+    monkeypatch, tmp_path: Path
+) -> None:
+    handoffs = [
+        _RUNNER.CandidateHandoff(
+            Query("q_mc", "question", ["multiple_choice"]),
+            (CandidatePaper("p_mc", 1),),
+        ),
+        _RUNNER.CandidateHandoff(
+            Query("q_table", "question", ["table"]),
+            (CandidatePaper("p_table", 1),),
+        ),
+    ]
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_aoai_pairwise_reader.py",
+            "--queries",
+            "queries.jsonl",
+            "--candidates",
+            "candidates.jsonl",
+            "--paper-metadata",
+            "metadata.jsonl",
+            "--chunks",
+            "chunks.jsonl",
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--answer-type",
+            "table",
+        ],
+    )
+    monkeypatch.setattr(
+        _RUNNER,
+        "load_config",
+        lambda _path: {"llm": {"name": "fake", "params": {}}, "params": {}},
+    )
+    monkeypatch.setattr(
+        _RUNNER,
+        "load_candidate_handoffs",
+        lambda *_args, **_kwargs: handoffs,
+    )
+    monkeypatch.setattr(_RUNNER, "resolve_image_root", lambda *_args: (None, "none"))
+    monkeypatch.setattr(_RUNNER, "build_llm", lambda _config: object())
+    monkeypatch.setattr(_RUNNER, "ChunkStore", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        _RUNNER,
+        "read_jsonl",
+        lambda _path: [{"paper_id": "p_mc"}, {"paper_id": "p_table"}],
+    )
+    monkeypatch.setattr(
+        _RUNNER,
+        "inspect_corpus",
+        lambda selected, *_args, **_kwargs: (
+            {
+                "queries": len(selected),
+                "candidate_entries": sum(
+                    len(item.candidate_papers) for item in selected
+                ),
+                "image_paths": {"existing": 0, "unique_declared": 0},
+                "visual_image_required_queries": [],
+                "queries_without_required_visual_images": [],
+                "warnings": [],
+            },
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        _RUNNER,
+        "_named_owner_audit",
+        lambda *_args, **_kwargs: {"deterministic_owner_rejections": 0},
+    )
+    monkeypatch.setattr(_RUNNER, "run_directory_lock", lambda _path: nullcontext())
+    captured = {}
+
+    def capture_execution(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(_RUNNER, "execute_locked_run", capture_execution)
+
+    _RUNNER.main()
+
+    assert [
+        item.query.query_id for item in captured["all_handoffs"]
+    ] == ["q_mc", "q_table"]
+    assert [
+        item.query.query_id for item in captured["selected_handoffs"]
+    ] == ["q_table"]
 
 
 def test_materialize_ignores_stale_answer_payload_until_it_is_recomputed(tmp_path):
