@@ -2472,6 +2472,89 @@ def test_stage_one_accepts_complete_candidate_row_for_table_query(tmp_path):
     ]
 
 
+def test_stage_one_accepts_grounded_units_for_cross_paper_partial_table(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+    query = Query(
+        query_id="synthetic_cross_paper_table",
+        question="Give each cited title as written by Paper One and Paper Two.",
+        answer_types=["table"],
+        table_schema=[
+            {"name": "cited_work", "type": "string", "is_row_key": True},
+            {"name": "paper_one_title", "type": "string", "is_row_key": False},
+            {"name": "paper_two_title", "type": "string", "is_row_key": False},
+        ],
+    )
+    payload = json.loads(_judgment("partial_answer", "p1#table"))
+    payload["candidate_answer"] = {
+        "units": [
+            {
+                "name": "Paper One title for the cited work",
+                "value": "Flow matching for generative modeling",
+                "value_kind": "text",
+                "matched_option_labels": [],
+            }
+        ],
+        "rows": [],
+    }
+
+    parsed = reader._parse_judgment(
+        query=query,
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=json.dumps(payload),
+        allowed_records=records,
+    )
+
+    assert parsed["candidate_answer"]["rows"] == []
+    assert parsed["candidate_answer"]["units"][0]["value"] == (
+        "Flow matching for generative modeling"
+    )
+
+
+def test_stage_one_rejects_units_only_direct_answer_for_table_query(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    reader = PairwiseAOAIReader(ChunkStore(corpus), FakeLLM())
+    records = {
+        record["chunk_id"]: record
+        for record in reader.chunk_store.load_paper("p1")
+    }
+    query = Query(
+        query_id="synthetic_direct_table",
+        question="List the method and base model.",
+        answer_types=["table"],
+        table_schema=[
+            {"name": "Method", "type": "string", "is_row_key": True},
+            {"name": "Base Model", "type": "string", "is_row_key": False},
+        ],
+    )
+    payload = json.loads(_judgment("direct_answer", "p1#table"))
+    payload["candidate_answer"] = {
+        "units": [
+            {
+                "name": "base model",
+                "value": "Canvas-2B",
+                "value_kind": "text",
+                "matched_option_labels": [],
+            }
+        ],
+        "rows": [],
+    }
+
+    with pytest.raises(ReadingResponseError, match="requires at least one complete"):
+        reader._parse_judgment(
+            query=query,
+            candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+            payload_text=json.dumps(payload),
+            allowed_records=records,
+        )
+
+
 def test_answer_evidence_cap_is_round_robin_across_papers(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     records = [

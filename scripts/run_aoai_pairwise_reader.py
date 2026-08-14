@@ -575,6 +575,7 @@ def build_manifest(
             ),
         },
         "reader": {
+            "answer_type_filter": getattr(args, "answer_type", None),
             "max_candidates": args.max_candidates,
             "evidence_policy": args.evidence_policy,
             "require_evidence": args.evidence_policy == "required",
@@ -675,6 +676,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--answer-type",
+        choices=("freeform", "multiple_choice", "table"),
+        default=None,
+        help=(
+            "Run only queries requesting this released answer type. For example, "
+            "--answer-type table isolates the table branch without hard-coding "
+            "query IDs. Repeated --query-id values may further narrow the set."
+        ),
+    )
+    parser.add_argument(
         "--paper-id",
         default=None,
         help="Rejudge one paper (requires one --query-id and --stage judge)",
@@ -720,8 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Confirm an unfiltered all-query AOAI run after its exact minimum "
             "query/pair/call summary is printed. This does not mean test_extra is "
             "required: the main challenge test has 71 questions and test_extra's "
-            "4,901 questions are optional. Runs with explicit --query-id values "
-            "do not require this flag."
+            "4,901 questions are optional. Runs filtered by explicit --query-id "
+            "values or --answer-type do not require this flag."
         ),
     )
     parser.add_argument(
@@ -737,7 +748,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Recompute selected query/paper; requires --query-id.",
+        help=(
+            "Recompute the selected query/paper or answer-type branch; requires "
+            "--query-id or --answer-type."
+        ),
     )
     return parser
 
@@ -873,7 +887,11 @@ def _print_and_confirm_run_plan(
                 "--confirm-optional-test-extra; the 4,901-question test_extra "
                 "split is optional and has a separate AOAI budget"
             )
-    if not args.query_id and not args.confirm_full_run:
+    if (
+        not args.query_id
+        and getattr(args, "answer_type", None) is None
+        and not args.confirm_full_run
+    ):
         raise SystemExit(
             "refusing an unfiltered all-query AOAI run without "
             "--confirm-full-run; review the run plan above, then pass the flag"
@@ -2108,10 +2126,12 @@ def run_answers_globally(
 
 
 def _select_handoffs(
-    all_handoffs: list[CandidateHandoff], query_ids: list[str]
+    all_handoffs: list[CandidateHandoff],
+    query_ids: list[str],
+    answer_type: str | None = None,
 ) -> list[CandidateHandoff]:
-    if not query_ids:
-        return all_handoffs
+    """Select an ordered subset by explicit ID and/or released answer type."""
+
     duplicates = sorted(
         query_id for query_id in set(query_ids) if query_ids.count(query_id) > 1
     )
@@ -2122,7 +2142,23 @@ def _select_handoffs(
     if missing:
         raise ValueError(f"unknown --query-id values: {missing}")
     requested = set(query_ids)
-    return [handoff for handoff in all_handoffs if handoff.query.query_id in requested]
+    selected = [
+        handoff
+        for handoff in all_handoffs
+        if (not requested or handoff.query.query_id in requested)
+        and (
+            answer_type is None
+            or answer_type in set(handoff.query.answer_types)
+        )
+    ]
+    if not selected:
+        filters: list[str] = []
+        if query_ids:
+            filters.append(f"query_ids={query_ids!r}")
+        if answer_type is not None:
+            filters.append(f"answer_type={answer_type!r}")
+        raise ValueError("query filters selected no inputs: " + ", ".join(filters))
+    return selected
 
 
 def execute_locked_run(
@@ -2268,8 +2304,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.max_candidates is not None and args.max_candidates < 1:
         raise SystemExit("--max-candidates must be positive")
-    if args.force and not args.query_id:
-        raise SystemExit("--force requires at least one --query-id")
+    if args.force and not (args.query_id or args.answer_type):
+        raise SystemExit("--force requires --query-id or --answer-type")
     if args.paper_id and (
         len(args.query_id) != 1 or args.stage != "judge"
     ):
@@ -2308,7 +2344,11 @@ def main() -> None:
         )
         for handoff in all_handoffs
     ]
-    selected_handoffs = _select_handoffs(all_handoffs, args.query_id)
+    selected_handoffs = _select_handoffs(
+        all_handoffs,
+        args.query_id,
+        args.answer_type,
+    )
     _print_and_confirm_run_plan(args, selected_handoffs)
 
     try:
