@@ -2051,7 +2051,49 @@ class PairwiseAOAIReader:
                 )
                 for index in selected_indices
             }
-            compacted = len(selected_indices) != len(records)
+            scoped_text_length = sum(
+                len(rendered_by_index[index]) for index in selected_indices
+            ) + max(0, len(selected_indices) - 1) * 2
+            if scoped_text_length > context_char_limit:
+                priority = sorted(
+                    selected_indices, key=lambda index: (-scores[index], index)
+                )
+                kept: dict[int, str] = {}
+                used_chars = 0
+                for position, index in enumerate(priority):
+                    separator_chars = 2 if kept else 0
+                    available = context_char_limit - used_chars - separator_chars
+                    if available <= 256:
+                        break
+                    remaining = len(priority) - position
+                    target = min(
+                        available,
+                        max(512, available // max(1, remaining)),
+                    )
+                    rendered = _bounded_formatted_record(
+                        self,
+                        records[index],
+                        focus=focus,
+                        max_chars=target,
+                        source_text=_without_corpus_title_prefix(
+                            str(records[index].get("text") or "")
+                        ),
+                    )
+                    if len(rendered) > available:
+                        continue
+                    kept[index] = rendered
+                    used_chars += separator_chars + len(rendered)
+                if not kept:
+                    raise ValueError(
+                        f"{query.query_id}/{candidate.paper_id}: figure context "
+                        "selection could not fit any chunk"
+                    )
+                selected_indices = sorted(kept)
+                rendered_by_index = kept
+            compacted = (
+                scoped_text_length > context_char_limit
+                or len(selected_indices) != len(records)
+            )
         elif scoped_metric_tables:
             # Coordinated benchmark-value questions are especially vulnerable
             # to long-paper dilution and near-name values in prose. Candidate
@@ -2488,6 +2530,11 @@ class PairwiseAOAIReader:
                 raise ReadingResponseError(
                     f"evidence_facts[{index}] may omit source_excerpt only for "
                     "an actually attached image"
+                )
+            elif purpose != "visual_fact":
+                raise ReadingResponseError(
+                    f"evidence_facts[{index}] may omit source_excerpt only when "
+                    "purpose is visual_fact"
                 )
             if purpose == "visual_fact" and not actually_attached_image:
                 raise ReadingResponseError(
@@ -3215,8 +3262,9 @@ class PairwiseAOAIReader:
                 "field is evidence_facts. Every item must contain exactly "
                 "chunk_id, purpose, fact, and source_excerpt. Copy chunk IDs "
                 "from the allowed list. Copy source_excerpt from the cited "
-                "chunk text; use an empty excerpt only for an actually attached "
-                "image. Do not decide paper relevance and do not answer the "
+                "chunk text; use an empty excerpt only with purpose=visual_fact "
+                "for an actually attached image. Do not decide paper relevance "
+                "and do not answer the "
                 "whole query. If no requested fact is visible, return "
                 '{"evidence_facts": []}.\n'
                 f"Validation error: {error}\n"
@@ -3464,6 +3512,18 @@ class PairwiseAOAIReader:
         candidate_list = list(candidates)
         candidate_by_id = {item.paper_id: item for item in candidate_list}
         fixed_selected = self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY
+        if (
+            fixed_selected
+            and "table" in query.answer_types
+            and len(candidate_list) > self.max_evidence
+        ):
+            raise ValueError(
+                f"{query.query_id}: fixed-selected table has "
+                f"{len(candidate_list)} selected papers but max_evidence="
+                f"{self.max_evidence}; max_evidence must be at least the selected "
+                "paper count because every selected paper requires a grounded "
+                "evidence chunk"
+            )
         relevant = (
             self._fixed_selected_answer_pool(query, candidate_list, judgments)
             if fixed_selected
@@ -5521,12 +5581,21 @@ class PairwiseAOAIReader:
             # paper-level run by judging the same selected context from text alone, and
             # make the degraded modality explicit in the checkpoint metadata.
             if semantic_phase.startswith("judgment"):
-                modality_result_instruction = (
-                    "Judge A independently from paper identity and text. If the "
-                    "requested answer evidence depends on an image, set "
-                    "has_usable_answer_evidence=false and evidence_chunk_ids=[] "
-                    "in the required three-field JSON."
-                )
+                if self.paper_set_policy == FIXED_SELECTED_PAPER_POLICY:
+                    modality_result_instruction = (
+                        "Extract text-grounded atomic facts only. Omit every fact "
+                        "that requires reading an image. Return exactly one JSON "
+                        "object whose only field is evidence_facts; if no requested "
+                        "text-grounded fact remains, return "
+                        '{"evidence_facts": []}.'
+                    )
+                else:
+                    modality_result_instruction = (
+                        "Judge A independently from paper identity and text. If the "
+                        "requested answer evidence depends on an image, set "
+                        "has_usable_answer_evidence=false and evidence_chunk_ids=[] "
+                        "in the required three-field JSON."
+                    )
             else:
                 modality_result_instruction = (
                     "If the requested answer depends on an image, return "

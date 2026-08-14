@@ -21,6 +21,19 @@ SPEC.loader.exec_module(MODULE)
 _write_new_jsonl = MODULE._write_new_jsonl
 build_oracle_paper_records = MODULE.build_oracle_paper_records
 
+OFFICIAL_VALIDATION_RELEASE = (
+    Path(__file__).resolve().parents[1]
+    / "artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845"
+)
+OFFICIAL_VALIDATION_FILES = tuple(
+    OFFICIAL_VALIDATION_RELEASE / "data" / name
+    for name in (
+        "validation.jsonl",
+        "validation_inputs.jsonl",
+        "paper_metadata.jsonl",
+    )
+)
+
 
 def _queries():
     return [
@@ -118,16 +131,16 @@ def test_oracle_writer_never_overwrites_existing_file(tmp_path):
     assert output.read_text(encoding="utf-8") == "keep\n"
 
 
+@pytest.mark.skipif(
+    not all(path.is_file() for path in OFFICIAL_VALIDATION_FILES),
+    reason="requires the external official-release validation artifacts",
+)
 def test_pinned_validation_oracle_projection_has_expected_safe_shape():
-    root = Path(__file__).resolve().parents[1]
-    release = (
-        root
-        / "artifacts/official_release/bd35dc14cf0483e0ffa51fa2a54d2689c13f9845"
-    )
+    validation, validation_inputs, paper_metadata = OFFICIAL_VALIDATION_FILES
     output = build_oracle_paper_records(
-        gold_records=read_jsonl(release / "data/validation.jsonl"),
-        query_records=read_jsonl(release / "data/validation_inputs.jsonl"),
-        metadata_records=read_jsonl(release / "data/paper_metadata.jsonl"),
+        gold_records=read_jsonl(validation),
+        query_records=read_jsonl(validation_inputs),
+        metadata_records=read_jsonl(paper_metadata),
     )
 
     assert len(output) == 55

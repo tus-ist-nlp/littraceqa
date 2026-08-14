@@ -22,5 +22,5 @@ params:
   answer_neighbor_chunks: 0
   max_answer_images: 10
   max_answer_papers: 50
-  max_evidence: 32
+  max_evidence: 50
   max_evidence_per_paper: 4

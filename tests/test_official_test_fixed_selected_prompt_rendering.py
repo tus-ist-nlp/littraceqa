@@ -4,6 +4,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import pytest
 import yaml
 
 from littraceqa.candidate_handoff import production_query_from_record
@@ -23,6 +24,10 @@ OFFICIAL_TEST = (
     / OFFICIAL_REVISION
     / "data"
     / "test.jsonl"
+)
+pytestmark = pytest.mark.skipif(
+    not OFFICIAL_TEST.is_file(),
+    reason="requires the external official-release test artifact",
 )
 FIXED_SELECTED_CONFIG = (
     ROOT / "configs" / "agent_style" / "aoai_selected_paper_reader.yaml"

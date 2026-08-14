@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+import littraceqa.table_adjudication as adjudication
 from littraceqa.table_adjudication import (
     AdjudicationError,
     compose_submission,
@@ -218,6 +220,38 @@ def test_review_refuses_to_overwrite_generated_artifacts(tmp_path: Path) -> None
         create_review(**kwargs)
 
 
+def test_review_interrupt_after_link_rolls_back_every_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    output_dir = tmp_path / "interrupted_review"
+    original_publish = adjudication._publish_staged_new
+    interrupted = False
+
+    def publish_then_interrupt(
+        temporary: Path, path: Path
+    ) -> tuple[int, int]:
+        nonlocal interrupted
+        identity = original_publish(temporary, path)
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("injected review interrupt")
+        return identity
+
+    monkeypatch.setattr(
+        adjudication, "_publish_staged_new", publish_then_interrupt
+    )
+    with pytest.raises(KeyboardInterrupt, match="injected review interrupt"):
+        create_review(
+            inputs_path=inputs,
+            base_path=base,
+            candidate_specs=[("full", full), ("table_only", table_only)],
+            output_dir=output_dir,
+        )
+
+    assert list(output_dir.glob("table_*")) == []
+
+
 def test_review_markdown_contains_untrusted_cells_without_breaking_markup(
     tmp_path: Path,
 ) -> None:
@@ -237,6 +271,36 @@ def test_review_markdown_contains_untrusted_cells_without_breaking_markup(
     assert "````json" in markdown
     assert "&#124;" in markdown
     assert "&lt;/code&gt;" in markdown
+
+
+def test_review_markdown_escapes_untrusted_query_metadata(tmp_path: Path) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    input_records = _inputs()
+    injected_id = "q_table\n\n### forged candidate"
+    injected_question = "Question text\n\n### forged candidate\n\n```json"
+    input_records[1]["query_id"] = injected_id
+    input_records[1]["question"] = injected_question
+    base_records = _base()
+    base_records[1]["query_id"] = injected_id
+    full_records = _full_candidate()
+    full_records[1]["query_id"] = injected_id
+    table_records = _table_only_candidate()
+    table_records[0]["query_id"] = injected_id
+    _write_jsonl(inputs, input_records, compact=True)
+    _write_jsonl(base, base_records, compact=True)
+    _write_jsonl(full, full_records, compact=True)
+    _write_jsonl(table_only, table_records, compact=True)
+
+    result = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "escaped_metadata",
+    )
+
+    markdown = Path(result["review_markdown"]).read_text(encoding="utf-8")
+    assert "## Query <code>&quot;q_table\\n\\n### forged candidate&quot;</code>" in markdown
+    assert "\n### forged candidate\n" not in markdown
 
 
 def test_compose_changes_only_selected_tables_and_preserves_non_table_bytes(
@@ -274,6 +338,419 @@ def test_compose_changes_only_selected_tables_and_preserves_non_table_bytes(
     audit = json.loads(Path(result["audit"]).read_text(encoding="utf-8"))
     assert audit["changed_query_ids"] == ["q_table", "q_both"]
     assert all(audit["freeze_checks"].values())
+
+
+def test_compose_all_base_is_byte_identical(tmp_path: Path) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    payload = json.loads(decisions.read_text(encoding="utf-8"))
+    for decision in payload["decisions"]:
+        decision["selected_candidate"] = "base"
+    decisions.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    output = tmp_path / "unchanged.jsonl"
+
+    result = compose_submission(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        decisions_path=decisions,
+        output_path=output,
+    )
+
+    assert output.read_bytes() == base.read_bytes()
+    assert result["changed_query_ids"] == []
+
+
+def test_compose_rejects_casefold_alias_between_output_and_audit(
+    tmp_path: Path,
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+
+    with pytest.raises(AdjudicationError, match="distinct new artifact"):
+        compose_submission(
+            inputs_path=inputs,
+            base_path=base,
+            candidate_specs=[("full", full), ("table_only", table_only)],
+            decisions_path=decisions,
+            output_path=tmp_path / "Result.JSONL",
+            audit_path=tmp_path / "result.jsonl",
+        )
+
+
+def test_compose_rejects_dangling_output_symlink(tmp_path: Path) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "linked.jsonl"
+    target = tmp_path / "unexpected.jsonl"
+    output.symlink_to(target)
+
+    with pytest.raises(AdjudicationError, match="output already exists"):
+        compose_submission(
+            inputs_path=inputs,
+            base_path=base,
+            candidate_specs=[("full", full), ("table_only", table_only)],
+            decisions_path=decisions,
+            output_path=output,
+        )
+    assert not target.exists()
+
+
+def test_compose_preserves_json_numeric_type_and_audit_hash(tmp_path: Path) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    candidate_records = _full_candidate()
+    candidate_records[1]["answer"]["table"] = {
+        "rows": [{"method": "Base", "score": 1}]
+    }
+    _write_jsonl(full, candidate_records, compact=True)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "typed.jsonl"
+
+    result = compose_submission(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        decisions_path=decisions,
+        output_path=output,
+    )
+
+    written = [json.loads(line) for line in output.read_text().splitlines()]
+    score = written[1]["answer"]["table"]["rows"][0]["score"]
+    assert score == 1
+    assert isinstance(score, int)
+    table = written[1]["answer"]["table"]
+    expected_hash = hashlib.sha256(
+        json.dumps(
+            table,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    audit = json.loads(Path(result["audit"]).read_text(encoding="utf-8"))
+    q_table_audit = next(
+        item for item in audit["decisions"] if item["query_id"] == "q_table"
+    )
+    assert q_table_audit["after_table_sha256"] == expected_hash
+
+
+def test_compose_hashes_the_exact_decision_bytes_it_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    original_bytes = decisions.read_bytes()
+    original_selected_table = adjudication._selected_table
+    mutated = False
+
+    def mutate_after_load(*args: object, **kwargs: object) -> dict:
+        nonlocal mutated
+        if not mutated:
+            decisions.write_text('{"mutated":true}\n', encoding="utf-8")
+            mutated = True
+        return original_selected_table(*args, **kwargs)
+
+    monkeypatch.setattr(adjudication, "_selected_table", mutate_after_load)
+    result = compose_submission(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        decisions_path=decisions,
+        output_path=tmp_path / "toctou.jsonl",
+    )
+
+    audit = json.loads(Path(result["audit"]).read_text(encoding="utf-8"))
+    assert audit["decisions_sha256"] == hashlib.sha256(original_bytes).hexdigest()
+
+
+def test_compose_publishes_audit_before_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "ordered.jsonl"
+    audit = tmp_path / "ordered.audit.json"
+    original_publish = adjudication._publish_staged_new
+    published: list[Path] = []
+
+    def observe_publish(temporary: Path, path: Path) -> tuple[int, int]:
+        if path == audit:
+            assert not output.exists()
+        if path == output:
+            assert audit.exists()
+        identity = original_publish(temporary, path)
+        published.append(path)
+        return identity
+
+    monkeypatch.setattr(adjudication, "_publish_staged_new", observe_publish)
+    result = compose_submission(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        decisions_path=decisions,
+        output_path=output,
+    )
+
+    assert output.exists()
+    assert Path(result["audit"]).exists()
+    assert published == [audit, output]
+
+
+def test_staging_failure_removes_private_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(adjudication.os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="injected fsync failure"):
+        adjudication._stage_bytes(tmp_path / "artifact.json", b"sensitive")
+
+    assert list(tmp_path.glob(".artifact.json.*.tmp")) == []
+
+
+def test_temporary_cleanup_failure_cannot_remove_published_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "cleanup.jsonl"
+    original_unlink = Path.unlink
+    injected = False
+
+    def fail_output_temp_once(
+        path: Path, missing_ok: bool = False
+    ) -> None:
+        nonlocal injected
+        if path.name.startswith(".cleanup.jsonl.") and not injected:
+            injected = True
+            raise OSError("injected temporary unlink failure")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_output_temp_once)
+    result = compose_submission(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        decisions_path=decisions,
+        output_path=output,
+    )
+
+    assert injected
+    assert output.exists()
+    assert Path(result["audit"]).exists()
+    for temporary in tmp_path.glob(".cleanup.jsonl.*.tmp"):
+        original_unlink(temporary)
+
+
+def test_output_directory_fsync_failure_cleans_both_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "fsync.jsonl"
+    audit = tmp_path / "fsync.audit.json"
+    original_fsync_parent = adjudication._fsync_parent_directory
+    failed_once = False
+
+    def fail_output_parent_fsync(path: Path) -> None:
+        nonlocal failed_once
+        if path == output and not failed_once:
+            failed_once = True
+            raise OSError("injected directory fsync failure")
+        original_fsync_parent(path)
+
+    monkeypatch.setattr(
+        adjudication, "_fsync_parent_directory", fail_output_parent_fsync
+    )
+    with pytest.raises(OSError, match="injected directory fsync failure"):
+        compose_submission(
+            inputs_path=inputs,
+            base_path=base,
+            candidate_specs=[("full", full), ("table_only", table_only)],
+            decisions_path=decisions,
+            output_path=output,
+            audit_path=audit,
+        )
+
+    assert not output.exists()
+    assert not audit.exists()
+
+
+def test_undurable_output_cleanup_retains_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "undurable.jsonl"
+    audit = tmp_path / "undurable.audit.json"
+    original_fsync_parent = adjudication._fsync_parent_directory
+
+    def fail_every_output_parent_fsync(path: Path) -> None:
+        if path == output:
+            raise OSError("injected directory fsync failure")
+        original_fsync_parent(path)
+
+    monkeypatch.setattr(
+        adjudication, "_fsync_parent_directory", fail_every_output_parent_fsync
+    )
+    with pytest.raises(AdjudicationError, match="retaining audit"):
+        compose_submission(
+            inputs_path=inputs,
+            base_path=base,
+            candidate_specs=[("full", full), ("table_only", table_only)],
+            decisions_path=decisions,
+            output_path=output,
+            audit_path=audit,
+        )
+
+    assert not output.exists()
+    assert audit.exists()
+
+
+def test_failed_output_cleanup_retains_its_published_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "retained.jsonl"
+    audit = tmp_path / "retained.audit.json"
+    original_fsync_parent = adjudication._fsync_parent_directory
+    original_unlink = Path.unlink
+
+    def fail_output_parent_fsync(path: Path) -> None:
+        if path == output:
+            raise OSError("injected directory fsync failure")
+        original_fsync_parent(path)
+
+    def fail_output_cleanup(path: Path, missing_ok: bool = False) -> None:
+        if path == output:
+            raise OSError("injected output cleanup failure")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(
+        adjudication, "_fsync_parent_directory", fail_output_parent_fsync
+    )
+    monkeypatch.setattr(Path, "unlink", fail_output_cleanup)
+    with pytest.raises(OSError, match="injected output cleanup failure"):
+        compose_submission(
+            inputs_path=inputs,
+            base_path=base,
+            candidate_specs=[("full", full), ("table_only", table_only)],
+            decisions_path=decisions,
+            output_path=output,
+            audit_path=audit,
+        )
+
+    assert output.exists()
+    assert audit.exists()
+    original_unlink(output)
+    original_unlink(audit)
+
+
+def test_interrupt_after_output_link_cleans_output_and_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, base, full, table_only = _artifacts(tmp_path)
+    review = create_review(
+        inputs_path=inputs,
+        base_path=base,
+        candidate_specs=[("full", full), ("table_only", table_only)],
+        output_dir=tmp_path / "review",
+    )
+    decisions = _complete_decisions(Path(review["decision_template"]))
+    output = tmp_path / "interrupted.jsonl"
+    audit = tmp_path / "interrupted.audit.json"
+    original_link = adjudication.os.link
+
+    def link_then_interrupt(
+        source: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> None:
+        original_link(
+            source,
+            destination,
+            follow_symlinks=follow_symlinks,
+        )
+        if Path(destination) == output:
+            raise KeyboardInterrupt("injected post-link interrupt")
+
+    monkeypatch.setattr(adjudication.os, "link", link_then_interrupt)
+    with pytest.raises(KeyboardInterrupt, match="injected post-link interrupt"):
+        compose_submission(
+            inputs_path=inputs,
+            base_path=base,
+            candidate_specs=[("full", full), ("table_only", table_only)],
+            decisions_path=decisions,
+            output_path=output,
+            audit_path=audit,
+        )
+
+    assert not output.exists()
+    assert not audit.exists()
 
 
 @pytest.mark.parametrize("missing", ["source_checked", "notes", "locator"])

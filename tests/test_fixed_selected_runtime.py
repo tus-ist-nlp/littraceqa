@@ -152,6 +152,15 @@ def test_fixed_selected_manifest_records_policy_and_disables_owner_filter(tmp_pa
     ) == (1, 2, 0, 3)
 
 
+def test_fixed_selected_production_config_can_cite_every_selected_paper() -> None:
+    config = RUNNER.load_config(
+        ROOT / "configs" / "agent_style" / "aoai_selected_paper_reader.yaml"
+    )
+    params = config["params"]
+
+    assert params["max_evidence"] >= params["max_answer_papers"]
+
+
 def test_fixed_selected_main_rejects_max_candidates_before_loading_or_provider(
     monkeypatch,
 ):

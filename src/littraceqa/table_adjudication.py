@@ -1,9 +1,8 @@
-"""Fail-closed adjudication and composition for table-only answer reruns.
+"""Fail-closed adjudication and composition for table-only answer candidates.
 
-The online test exposes aggregate feedback only.  This module therefore keeps
-candidate generation separate from promotion: it renders every table answer
-for source review, seals all inputs with hashes, and only composes decisions
-that carry an explicit source check.  Composition replaces
+This module keeps candidate generation separate from promotion: it renders
+every table answer for source review, seals all inputs with hashes, and only
+composes decisions that carry an explicit source check.  Composition replaces
 ``answer.table``—nothing else—from a selected candidate.
 """
 
@@ -15,9 +14,11 @@ import hashlib
 import html
 import json
 import math
+import os
 import re
 import sys
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,14 +133,26 @@ def _load_jsonl(path: Path) -> JsonlDocument:
 
 
 def _load_json(path: Path) -> Any:
+    payload, _ = _load_json_with_sha256(path)
+    return payload
+
+
+def _load_json_with_sha256(path: Path) -> tuple[Any, str]:
+    """Parse one JSON document and hash the exact bytes that were parsed."""
+
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except OSError as exc:
         raise AdjudicationError(f"cannot read JSON: {path}: {exc}") from exc
     try:
-        return json.loads(text, parse_constant=_reject_json_constant)
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AdjudicationError(f"{path}: JSON is not UTF-8") from exc
+    try:
+        parsed = json.loads(text, parse_constant=_reject_json_constant)
     except json.JSONDecodeError as exc:
         raise AdjudicationError(f"{path}: invalid JSON: {exc.msg}") from exc
+    return parsed, hashlib.sha256(raw).hexdigest()
 
 
 def _record_ids(document: JsonlDocument, label: str) -> tuple[str, ...]:
@@ -639,9 +652,11 @@ def _markdown_review(review: Record) -> str:
     for query in review["queries"]:
         lines.extend(
             [
-                f"## {query['query_id']}",
+                f"## Query {_markdown_inline_code(query['query_id'])}",
                 "",
-                str(query["question"]),
+                "Question:",
+                "",
+                *_markdown_json_block(query["question"]),
                 "",
                 "Schema:",
                 "",
@@ -690,29 +705,112 @@ def _markdown_review(review: Record) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _atomic_write(path: Path, payload: bytes) -> None:
-    path = path.resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        handle.write(payload)
-        temporary = Path(handle.name)
+def _absolute_unresolved(path: Path) -> Path:
+    """Return an absolute path without following a final symlink."""
+
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _portable_path_key(path: Path) -> str:
+    """Normalize a path conservatively for case-insensitive filesystems."""
+
+    absolute = _absolute_unresolved(path)
+    return unicodedata.normalize("NFC", str(absolute)).casefold()
+
+
+def _paths_may_alias(left: Path, right: Path) -> bool:
+    if _portable_path_key(left) == _portable_path_key(right):
+        return True
+    if _portable_path_key(left.resolve(strict=False)) == _portable_path_key(
+        right.resolve(strict=False)
+    ):
+        return True
     try:
-        temporary.replace(path)
+        return left.samefile(right)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _path_lexists(path: Path) -> bool:
+    return os.path.lexists(os.fspath(_absolute_unresolved(path)))
+
+
+def _cleanup_temporary(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        # A failed cleanup must not hide the original error or invalidate a
+        # successfully published artifact. A later housekeeping pass may remove
+        # the uniquely named private temporary file.
+        pass
+
+
+def _stage_bytes(path: Path, payload: bytes) -> Path:
+    path = _absolute_unresolved(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return temporary
+    except BaseException:
+        _cleanup_temporary(temporary)
+        raise
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    descriptor = os.open(_absolute_unresolved(path).parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
     finally:
-        temporary.unlink(missing_ok=True)
+        os.close(descriptor)
 
 
-def _write_json(path: Path, payload: Any) -> None:
-    encoded = (
+def _publish_staged_new(temporary: Path, path: Path) -> tuple[int, int]:
+    """Publish a staged file without ever replacing an existing artifact."""
+
+    path = _absolute_unresolved(path)
+    stat = temporary.lstat()
+    identity = stat.st_dev, stat.st_ino
+    try:
+        os.link(temporary, path, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise AdjudicationError(f"artifact already exists: {path}") from exc
+    return identity
+
+
+def _unlink_if_owned(path: Path, identity: tuple[int, int] | None) -> bool:
+    if identity is None:
+        return True
+    try:
+        stat = _absolute_unresolved(path).lstat()
+    except FileNotFoundError:
+        return True
+    if (stat.st_dev, stat.st_ino) == identity:
+        absolute = _absolute_unresolved(path)
+        absolute.unlink()
+        try:
+            _fsync_parent_directory(absolute)
+        except OSError:
+            return False
+    return True
+
+
+def _encoded_json(payload: Any) -> bytes:
+    return (
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     ).encode("utf-8")
-    _atomic_write(path, encoded)
 
 
 def create_review(
@@ -723,34 +821,72 @@ def create_review(
     output_dir: Path,
 ) -> Record:
     prepared = _prepare_sources(inputs_path, base_path, candidate_specs)
-    output_dir = output_dir.resolve()
+    output_dir = _absolute_unresolved(output_dir)
     review = _review_payload(prepared)
     template = _decision_template(prepared)
     review_json = output_dir / "table_review.json"
     review_markdown = output_dir / "table_review.md"
     decision_template = output_dir / "table_decisions.template.json"
     artifacts = (review_json, review_markdown, decision_template)
-    protected_paths = {
+    protected_paths = (
         prepared.inputs.path,
         prepared.base.path,
         *(candidate.document.path for candidate in prepared.candidates),
-    }
-    if any(path.resolve() in protected_paths for path in artifacts):
+    )
+    if any(
+        _paths_may_alias(path, protected)
+        for path in artifacts
+        for protected in protected_paths
+    ):
         raise AdjudicationError("review artifact path must not overwrite an input")
-    existing = [str(path) for path in artifacts if path.exists()]
+    if any(
+        _paths_may_alias(left, right)
+        for index, left in enumerate(artifacts)
+        for right in artifacts[index + 1 :]
+    ):
+        raise AdjudicationError("review artifact paths must be distinct")
+    existing = [str(path) for path in artifacts if _path_lexists(path)]
     if existing:
         raise AdjudicationError(
             "review artifact already exists; use a new output directory: "
             + ", ".join(existing)
         )
+    artifact_payloads = (
+        (review_json, _encoded_json(review)),
+        (review_markdown, _markdown_review(review).encode("utf-8")),
+        (decision_template, _encoded_json(template)),
+    )
+    staged: list[tuple[Path, Path, tuple[int, int]]] = []
     try:
-        _write_json(review_json, review)
-        _atomic_write(review_markdown, _markdown_review(review).encode("utf-8"))
-        _write_json(decision_template, template)
+        for path, payload in artifact_payloads:
+            temporary = _stage_bytes(path, payload)
+            stat = temporary.lstat()
+            staged.append((path, temporary, (stat.st_dev, stat.st_ino)))
     except BaseException:
-        for path in artifacts:
-            path.unlink(missing_ok=True)
+        for _path, temporary, _identity in staged:
+            _cleanup_temporary(temporary)
         raise
+    created: list[tuple[Path, tuple[int, int]]] = []
+    try:
+        for path, temporary, identity in staged:
+            # Register ownership before linking so even a post-link interrupt is
+            # rolled back using the staged inode identity.
+            created.append((path, identity))
+            _publish_staged_new(temporary, path)
+            _fsync_parent_directory(path)
+    except BaseException as original_error:
+        cleanup_error: BaseException | None = None
+        for path, identity in reversed(created):
+            try:
+                _unlink_if_owned(path, identity)
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+        if cleanup_error is not None:
+            raise cleanup_error from original_error
+        raise
+    finally:
+        for _path, temporary, _identity in staged:
+            _cleanup_temporary(temporary)
     return {
         "review_json": str(review_json),
         "review_markdown": str(review_markdown),
@@ -842,8 +978,10 @@ def _validate_review_locator(
             )
 
 
-def _load_decisions(path: Path, prepared: PreparedSources) -> list[Record]:
-    payload = _load_json(path)
+def _load_decisions(
+    path: Path, prepared: PreparedSources
+) -> tuple[list[Record], str]:
+    payload, payload_sha256 = _load_json_with_sha256(path)
     if not isinstance(payload, dict):
         raise AdjudicationError("decision file must contain one JSON object")
     required_keys = {
@@ -931,7 +1069,7 @@ def _load_decisions(path: Path, prepared: PreparedSources) -> list[Record]:
                 f"decision:{query_id}: every review locator must be present "
                 "in frozen evidence"
             )
-    return copy.deepcopy(decisions)
+    return copy.deepcopy(decisions), payload_sha256
 
 
 def _frozen_context(record: Record) -> Record:
@@ -984,24 +1122,26 @@ def compose_submission(
     audit_path: Path | None = None,
 ) -> Record:
     prepared = _prepare_sources(inputs_path, base_path, candidate_specs)
-    decisions = _load_decisions(decisions_path, prepared)
-    output_path = output_path.resolve()
-    protected_paths = {
+    decisions, decisions_sha256 = _load_decisions(decisions_path, prepared)
+    output_path = _absolute_unresolved(output_path)
+    protected_paths = (
         prepared.inputs.path,
         prepared.base.path,
         decisions_path.resolve(),
         *(candidate.document.path for candidate in prepared.candidates),
-    }
-    if output_path in protected_paths:
+    )
+    if any(_paths_may_alias(output_path, path) for path in protected_paths):
         raise AdjudicationError("output path must not overwrite an input artifact")
     if audit_path is None:
         audit_path = output_path.with_suffix(".audit.json")
-    audit_path = audit_path.resolve()
-    if audit_path in protected_paths or audit_path == output_path:
+    audit_path = _absolute_unresolved(audit_path)
+    if any(
+        _paths_may_alias(audit_path, path) for path in protected_paths
+    ) or _paths_may_alias(audit_path, output_path):
         raise AdjudicationError("audit path must be a distinct new artifact")
-    if output_path.exists():
+    if _path_lexists(output_path):
         raise AdjudicationError(f"output already exists: {output_path}")
-    if audit_path.exists():
+    if _path_lexists(audit_path):
         raise AdjudicationError(f"audit already exists: {audit_path}")
 
     decisions_by_id = {str(item["query_id"]): item for item in decisions}
@@ -1042,7 +1182,7 @@ def compose_submission(
             raise AssertionError(f"non-table record changed for {query_id}")
 
         raw_base_line = prepared.base.raw_lines[position]
-        if output_record == base_record:
+        if _canonical_json(output_record) == _canonical_json(base_record):
             raw_output_line = raw_base_line
         else:
             raw_output_line = json.dumps(
@@ -1069,10 +1209,15 @@ def compose_submission(
         if query_id not in prepared.table_ids and output_record != base_record:
             raise AssertionError(f"non-table record changed for {query_id}")
 
-    _atomic_write(output_path, b"".join(output_lines))
+    staged_output = _stage_bytes(output_path, b"".join(output_lines))
+    staged_audit: Path | None = None
+    output_identity: tuple[int, int] | None = None
+    audit_identity: tuple[int, int] | None = None
     try:
-        written = _load_jsonl(output_path)
-        if tuple(written.records) != tuple(output_records):
+        written = _load_jsonl(staged_output)
+        if tuple(_canonical_json(item) for item in written.records) != tuple(
+            _canonical_json(item) for item in output_records
+        ):
             raise AssertionError("written output does not round-trip semantically")
         if _record_ids(written, "output") != prepared.input_ids:
             raise AssertionError("written output query order changed")
@@ -1092,7 +1237,7 @@ def compose_submission(
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "inputs_sha256": prepared.inputs.sha256,
             "base_sha256": prepared.base.sha256,
-            "decisions_sha256": sha256_file(decisions_path.resolve()),
+            "decisions_sha256": decisions_sha256,
             "candidates": _source_contract(prepared),
             "query_order_sha256": prepared.query_order_sha256,
             "table_schema_sha256": prepared.table_schema_sha256,
@@ -1113,11 +1258,35 @@ def compose_submission(
             },
             "decisions": decision_audit,
         }
-        _write_json(audit_path, audit)
-    except BaseException:
-        output_path.unlink(missing_ok=True)
-        audit_path.unlink(missing_ok=True)
+        staged_audit = _stage_bytes(audit_path, _encoded_json(audit))
+        # The audit is durably published first. The output is the commit marker:
+        # whenever it is durable and visible, its corresponding audit is too.
+        audit_stat = staged_audit.lstat()
+        audit_identity = audit_stat.st_dev, audit_stat.st_ino
+        _publish_staged_new(staged_audit, audit_path)
+        _fsync_parent_directory(audit_path)
+        output_stat = staged_output.lstat()
+        output_identity = output_stat.st_dev, output_stat.st_ino
+        _publish_staged_new(staged_output, output_path)
+        _fsync_parent_directory(output_path)
+    except BaseException as original_error:
+        _cleanup_temporary(staged_output)
+        _cleanup_temporary(staged_audit)
+        try:
+            output_cleanup_durable = _unlink_if_owned(
+                output_path, output_identity
+            )
+        except BaseException as cleanup_error:
+            # If the output cannot be removed, retain its already-published audit.
+            raise cleanup_error from original_error
+        if not output_cleanup_durable:
+            raise AdjudicationError(
+                "output cleanup could not be durably confirmed; retaining audit"
+            ) from original_error
+        _unlink_if_owned(audit_path, audit_identity)
         raise
+    _cleanup_temporary(staged_output)
+    _cleanup_temporary(staged_audit)
     return {
         "output": str(output_path),
         "output_sha256": written.sha256,

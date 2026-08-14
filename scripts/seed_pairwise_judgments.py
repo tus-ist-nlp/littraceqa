@@ -53,6 +53,22 @@ def _atomic_copy(source: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _direct_query_directories(run: Path) -> list[Path]:
+    """Return real, immediate child directories in deterministic order."""
+
+    if not run.exists():
+        return []
+    if not run.is_dir():
+        raise NotADirectoryError(f"run path is not a directory: {run}")
+    query_directories: list[Path] = []
+    for child in run.iterdir():
+        if child.is_symlink():
+            raise ValueError(f"run directory contains a symlinked child: {child}")
+        if child.is_dir():
+            query_directories.append(child)
+    return sorted(query_directories, key=lambda path: path.name)
+
+
 def seed(source_run: Path, destination_run: Path) -> dict[str, Any]:
     source_run = source_run.resolve()
     destination_run = destination_run.resolve()
@@ -65,17 +81,27 @@ def seed(source_run: Path, destination_run: Path) -> dict[str, Any]:
         raise FileExistsError(
             "destination already has a manifest; seed only a new run directory"
         )
-    existing_payloads = [
-        path
-        for path in destination_run.glob("q_*/*")
-        if path.name != "candidate_judgments.jsonl"
-    ]
+    destination_query_directories = _direct_query_directories(destination_run)
+    existing_payloads = sorted(
+        (
+            path
+            for query_directory in destination_query_directories
+            for path in query_directory.iterdir()
+            if path.name != "candidate_judgments.jsonl"
+        ),
+        key=lambda path: str(path),
+    )
     if existing_payloads:
         raise FileExistsError(
             f"destination contains non-judgment run state: {existing_payloads[0]}"
         )
 
-    sources = sorted(source_run.glob("q_*/candidate_judgments.jsonl"))
+    sources = [
+        checkpoint
+        for query_directory in _direct_query_directories(source_run)
+        if (checkpoint := query_directory / "candidate_judgments.jsonl").is_file()
+        and not checkpoint.is_symlink()
+    ]
     if not sources:
         raise FileNotFoundError(f"no Stage-1 checkpoints found under {source_run}")
     copied: list[dict[str, Any]] = []

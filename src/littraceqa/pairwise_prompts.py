@@ -28,13 +28,13 @@ from littraceqa.query_requirements import (
 
 JUDGMENT_PROMPT_VERSION = "pairwise-paper-judge-v30-validation-name-free-examples"
 SELECTED_EVIDENCE_PROMPT_VERSION = (
-    "fixed-selected-evidence-v4-candidate-local-visual"
+    "fixed-selected-evidence-v5-visual-excerpt-contract"
 )
 ANSWER_PROMPT_VERSION = (
-    "accepted-evidence-answer-v46-gold-free-table-contract"
+    "accepted-evidence-answer-v47-multi-type-support-shape"
 )
 FIXED_SELECTED_ANSWER_PROMPT_VERSION = (
-    "fixed-selected-answer-v26-gold-free-table-contract"
+    "fixed-selected-answer-v27-multi-type-support-shape"
 )
 JUDGMENT_QUESTION_TYPE_VERSION = "question-only-four-way-v2-test-wording"
 PAIRWISE_SYSTEM_PROMPT = (
@@ -241,8 +241,8 @@ EXTRACTION RULES
    chunk_id may appear in several items when one table or paragraph directly
    supplies several distinct requested facts.
 7. source_excerpt must be copied from the visible text of that exact chunk. It
-   may be an empty string only when the fact requires reading an actually
-   attached image mapped to that chunk.
+   may be an empty string only when purpose is visual_fact and the fact requires
+   reading an actually attached image mapped to that chunk.
 8. For a Figure, plot, panel, diagram, or image-dependent table, cite the mapped
    image chunk only when that image is actually attached. Never claim to have
    inspected an unavailable image.
@@ -269,7 +269,7 @@ Return exactly one JSON object with exactly one field:
       "chunk_id": "exact visible chunk ID",
       "purpose": "answer_value|comparison_operand|eligibility_condition|table_row|visual_fact|citation_fact",
       "fact": "one concise atomic fact with its necessary condition",
-      "source_excerpt": "exact copied source text, or empty only for an actually attached image"
+      "source_excerpt": "exact copied source text, or empty only for visual_fact from an actually attached image"
     }
   ]
 }
@@ -1925,13 +1925,14 @@ def answer_response_shape(query: Query) -> dict[str, Any]:
                 "null": None,
             }.get(declared_type, "value matching schema type")
         answer["table"] = {"rows": [row]}
+    support_answer_paths: list[str] = []
     if "freeform" in query.answer_types:
-        support_answer_path = "answer.freeform.text"
-    elif "multiple_choice" in query.answer_types:
-        support_answer_path = "answer.multiple_choice"
-    elif "table" in query.answer_types:
-        support_answer_path = "answer.table.rows[0]"
-    else:
+        support_answer_paths.append("answer.freeform.text")
+    if "multiple_choice" in query.answer_types:
+        support_answer_paths.append("answer.multiple_choice")
+    if "table" in query.answer_types:
+        support_answer_paths.append("answer.table.rows[0]")
+    if not support_answer_paths:
         raise ValueError("query must request at least one supported answer type")
     return {
         "status": "ready",
@@ -1980,6 +1981,7 @@ def answer_response_shape(query: Query) -> dict[str, Any]:
                 "paper_id": "answer-support paper id",
                 "chunk_ids": ["same submitted direct id"],
             }
+            for support_answer_path in support_answer_paths
         ],
         "completeness": {"answered_parts": ["requested unit"], "missing": []},
     }

@@ -85,12 +85,34 @@ def test_non_table_question_has_no_inventory() -> None:
     ) == ()
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What are the scores for Cedar and Flint and Larch?",
+        "What are the scores for Cedar, Flint and Larch?",
+    ],
+)
+def test_three_item_non_oxford_inventory_keeps_each_row_independent(
+    question: str,
+) -> None:
+    query = _query(question)
+
+    assert explicit_table_row_items(query) == ("Cedar", "Flint", "Larch")
+    assert missing_explicit_table_items(
+        query,
+        [
+            {"Method": "Cedar", "Value": "1"},
+            {"Method": "Flint", "Value": "2"},
+        ],
+    ) == ("Larch",)
+
+
 def test_table_output_contract_is_schema_and_question_derived() -> None:
     query = _query("What are the scores for Cedar, Flint, and Larch?")
 
     contract = table_output_contract(query)
 
-    assert QUERY_REQUIREMENTS_VERSION == "gold-free-table-output-contract-v2"
+    assert QUERY_REQUIREMENTS_VERSION == "gold-free-table-output-contract-v3"
     assert contract == {
         "derived_from": ["question", "table_schema"],
         "row_key_policy": {
@@ -187,6 +209,32 @@ def test_condition_rows_match_descriptive_source_labels() -> None:
         {"Method": "DetAny3D (ours) w/ Cube RCNN", "Value": "31.61"},
     ]
     assert missing_explicit_table_items(query, rows) == ()
+
+
+@pytest.mark.parametrize(
+    "actual_label",
+    [
+        "DetAny3D (ours) w/ Cube RCNN 3D detections",
+        "DetAny3D (ours) w/ Cube RCNN 3D",
+    ],
+)
+def test_detection_dimension_mismatch_does_not_satisfy_requested_row(
+    actual_label: str,
+) -> None:
+    query = _query(
+        "What is the performance with ground-truth prompts and Cube R-CNN 2D detections?"
+    )
+    rows = [
+        {"Method": "DetAny3D (ours) w/ Ground Truth", "Value": "38.68"},
+        {
+            "Method": actual_label,
+            "Value": "31.61",
+        },
+    ]
+
+    assert missing_explicit_table_items(query, rows) == (
+        "Cube R-CNN 2D detections",
+    )
 
 
 def test_explicitly_missing_item_satisfies_completeness_contract() -> None:

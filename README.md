@@ -317,9 +317,10 @@ stage. Candidate judgments return three-field JSON and reserve
 12,000 tokens for structured-table repairs. The
 Azure rate limiter includes the requested output ceiling when it estimates TPM,
 even when the actual Stage-1 JSON is much shorter, so one shared 12,000-token
-ceiling creates avoidable throttling. The client timeout is 60 seconds: normal
-validation calls completed within 22 seconds in the measured run, while a dead
-connection otherwise occupied a worker for the former 180-second timeout.
+ceiling creates avoidable throttling. The primary and fixed-selected configs use
+a bounded 180-second client timeout for the largest evidence-rich answer
+contexts; the hybrid config uses a 60-second timeout. Normal validation calls
+completed within 22 seconds in the measured run.
 
 Resume the same question after interruption by adding `--resume`. To inspect or
 re-run one pair without touching other checkpoints:

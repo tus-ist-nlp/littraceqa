@@ -16,6 +16,7 @@ from littraceqa.pairwise_prompts import (
     PAIRWISE_SYSTEM_PROMPT,
     SELECTED_EVIDENCE_EXAMPLES,
     SELECTED_EVIDENCE_PROMPT_VERSION,
+    answer_response_shape,
     example_manifest,
     judgment_question_type,
     render_answer_prompt,
@@ -154,6 +155,15 @@ def _table_query() -> Query:
             {"name": "Passed", "type": "boolean", "is_row_key": False},
         ],
     )
+
+
+def test_answer_response_shape_includes_support_for_every_requested_answer_type():
+    shape = answer_response_shape(_figure_query())
+
+    assert {item["answer_path"] for item in shape["support"]} == {
+        "answer.freeform.text",
+        "answer.multiple_choice",
+    }
 
 
 def test_few_shot_selection_is_stable_bounded_and_query_aware():
@@ -1298,7 +1308,7 @@ def test_answer_render_includes_answer_shape_limits_and_actual_image_mapping():
     )
 
     assert ANSWER_PROMPT_VERSION == (
-        "accepted-evidence-answer-v46-gold-free-table-contract"
+        "accepted-evidence-answer-v47-multi-type-support-shape"
     )
     assert prompt.index("SYNTHETIC FEW-SHOT EXAMPLES") < prompt.index("LIVE TASK")
     assert '"Passed":false' in prompt
@@ -1427,11 +1437,12 @@ def test_fixed_selected_extractor_uses_atomic_fact_contract():
     )
 
     assert SELECTED_EVIDENCE_PROMPT_VERSION == (
-        "fixed-selected-evidence-v4-candidate-local-visual"
+        "fixed-selected-evidence-v5-visual-excerpt-contract"
     )
     assert "Do not\njudge whether it is relevant" in prompt
     assert '"evidence_facts"' in prompt
     assert '"is_relevant_to_answer"' not in prompt
+    assert "only when purpose is visual_fact" in prompt
     assert "Return only the required one-field JSON object." in prompt
     assert selected_evidence_example_manifest(query) == [
         "SE0_no_requested_fact",
@@ -1508,7 +1519,7 @@ def test_fixed_selected_answer_prompt_preserves_paper_set_and_arbitrary_rows():
     )
 
     assert FIXED_SELECTED_ANSWER_PROMPT_VERSION == (
-        "fixed-selected-answer-v26-gold-free-table-contract"
+        "fixed-selected-answer-v27-multi-type-support-shape"
     )
     assert "must not\nadd, remove, rank, or reject papers" in prompt
     assert "answer.table.rows[i] for every emitted row index i" in prompt

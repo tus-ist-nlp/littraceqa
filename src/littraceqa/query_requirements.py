@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from littraceqa.di_pipeline.contracts import Query
 
 
-QUERY_REQUIREMENTS_VERSION = "gold-free-table-output-contract-v2"
+QUERY_REQUIREMENTS_VERSION = "gold-free-table-output-contract-v3"
 
 
 _TRAILING_QUALIFIERS = (
@@ -223,10 +223,14 @@ def _split_coordinated_items(text: str) -> list[str]:
     parts.append(text[start:])
 
     if len(parts) == 1:
-        coordinated = re.split(r"\s+and\s+", parts[0], maxsplit=1, flags=re.I)
-        parts = coordinated if len(coordinated) == 2 else parts
+        coordinated = re.split(r"\s+and\s+", parts[0], flags=re.I)
+        parts = coordinated if len(coordinated) >= 2 else parts
     else:
-        parts[-1] = re.sub(r"^\s*and\s+", "", parts[-1], flags=re.I)
+        coordinated_tail = re.split(r"\s+and\s+", parts[-1], flags=re.I)
+        if len(coordinated_tail) >= 2:
+            parts = [*parts[:-1], *coordinated_tail]
+        else:
+            parts[-1] = re.sub(r"^\s*and\s+", "", parts[-1], flags=re.I)
 
     return [item.strip().strip(".?") for item in parts if item.strip().strip(".?")]
 
@@ -244,8 +248,25 @@ def _confident_inventory(items: list[str]) -> bool:
 
 
 def _semantic_row_match(required: str, actual: str) -> bool:
-    required_surface = _normalized_surface(required, strip_parenthetical=True)
-    actual_surface = _normalized_surface(actual, strip_parenthetical=False)
+    required_dimensions = _explicit_detection_dimensions(required)
+    actual_dimensions = _explicit_detection_dimensions(actual)
+    if (
+        required_dimensions
+        and actual_dimensions
+        and required_dimensions != actual_dimensions
+    ):
+        return False
+    relax_detection_dimension = bool(required_dimensions) != bool(actual_dimensions)
+    required_surface = _normalized_surface(
+        required,
+        strip_parenthetical=True,
+        strip_detection_dimension=relax_detection_dimension,
+    )
+    actual_surface = _normalized_surface(
+        actual,
+        strip_parenthetical=False,
+        strip_detection_dimension=relax_detection_dimension,
+    )
     if not required_surface or not actual_surface:
         return False
     if required_surface == actual_surface:
@@ -275,13 +296,27 @@ def _semantic_row_match(required: str, actual: str) -> bool:
     )
 
 
-def _normalized_surface(value: str, *, strip_parenthetical: bool) -> str:
+def _explicit_detection_dimensions(value: str) -> frozenset[str]:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return frozenset(
+        match.group(1)
+        for match in re.finditer(r"\b([23])d\b(?:\s+detections?)?", text)
+    )
+
+
+def _normalized_surface(
+    value: str,
+    *,
+    strip_parenthetical: bool,
+    strip_detection_dimension: bool = False,
+) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     text = _SOURCE_DECORATION_RE.sub(" ", text)
     if strip_parenthetical:
         text = re.sub(r"\([^()]*\)", " ", text)
     text = text.replace("ground-truth", "ground truth")
-    text = re.sub(r"\b[23]d\s+detections?\b", " detections ", text)
+    if strip_detection_dimension:
+        text = re.sub(r"\b[23]d\b(?:\s+detections?)?", " ", text)
     text = re.sub(r"\br\s*-?\s*cnn\b", "rcnn", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())

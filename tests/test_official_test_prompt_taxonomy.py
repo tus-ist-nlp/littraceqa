@@ -4,6 +4,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import pytest
+
 from littraceqa.corpus_preflight import requires_visual_image
 from littraceqa.di_pipeline.contracts import Query
 from littraceqa.pairwise_prompts import (
@@ -22,6 +24,10 @@ _OFFICIAL_TEST = (
     / _OFFICIAL_REVISION
     / "data"
     / "test.jsonl"
+)
+pytestmark = pytest.mark.skipif(
+    not _OFFICIAL_TEST.is_file(),
+    reason="requires the external official-release test artifact",
 )
 
 _EXPECTED_VISUAL_QUERY_IDS = {

@@ -2025,6 +2025,49 @@ def test_explicit_visual_scope_precedes_coordinated_table_scope(tmp_path):
     assert context["image_paths"] == [str(figure_path)]
 
 
+def test_oversized_explicit_figure_scope_is_compacted_within_limit(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    records = [
+        {
+            "paper_id": "p1",
+            "chunk_id": f"p1#figure-{index}",
+            "chunk_type": "figure",
+            "text": (
+                f"Figure {index}: primary framework view mentions MCTS. "
+                + f"figure-{index}-detail " * 500
+            ),
+            "metadata": {"page": index, "figure_id": f"Figure {index}"},
+        }
+        for index in range(1, 4)
+    ]
+    corpus.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), FakeLLM(), max_paper_context_chars=8_000
+    )
+    query = Query(
+        "q_large_figure_scope",
+        "Which paper explicitly mentions MCTS in its primary method figure?",
+        ["freeform"],
+    )
+
+    context = reader._paper_context(
+        query,
+        CandidatePaper("p1", 1, "Method Alpha", "ACL", 2025),
+        reader.chunk_store.load_paper("p1"),
+    )
+
+    assert len(context["text"]) <= 8_000
+    assert context["compacted"] is True
+    assert context["selected_chunk_ids"] == [
+        "p1#figure-1",
+        "p1#figure-2",
+        "p1#figure-3",
+    ]
+
+
 def test_oversized_scoped_table_does_not_reintroduce_corpus_title(tmp_path):
     corpus = tmp_path / "chunks.jsonl"
     long_table = (
@@ -3851,6 +3894,42 @@ def test_answer_context_paper_limit_is_separate_from_submission_evidence_cap(
     )
     with pytest.raises(ReadingResponseError, match="max_answer_papers=2"):
         too_small._answer_context(_query(), judgments)
+
+
+def test_fixed_selected_table_rejects_impossible_evidence_cap_before_provider(
+    tmp_path,
+):
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    llm = FakeLLM()
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus),
+        llm,
+        paper_set_policy="fixed_selected",
+        max_answer_papers=3,
+        max_evidence=2,
+    )
+    query = Query(
+        "q_fixed_table_cap",
+        "What value does each selected paper report?",
+        ["table"],
+        table_schema=[
+            {"name": "Paper", "type": "string", "is_row_key": True},
+            {"name": "Value", "type": "string", "is_row_key": False},
+        ],
+    )
+    candidates = [
+        CandidatePaper(f"p{index}", index, f"Paper {index}", "ACL", 2025)
+        for index in range(1, 4)
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=r"3 selected papers but max_evidence=2",
+    ):
+        reader.answer_from_judgments(query, candidates, [])
+
+    assert llm.calls == []
 
 
 def test_answer_context_hard_limit_includes_headers_and_separators(tmp_path):
@@ -6382,6 +6461,54 @@ def test_image_policy_rejection_falls_back_to_text_and_is_recorded(tmp_path):
     assert result["provider_invocation_count"] == 2
 
 
+def test_fixed_selected_image_policy_fallback_preserves_one_field_schema(tmp_path):
+    class ImagePolicyError(Exception):
+        status_code = 400
+        body: ClassVar[dict[str, str]] = {"code": "content_policy_violation"}
+
+    class PolicyRejectingLLM:
+        def __init__(self):
+            self.calls = []
+
+        def complete_with_metadata(self, prompt, image_paths=None):
+            self.calls.append({"prompt": prompt, "image_paths": image_paths})
+            if image_paths:
+                raise ImagePolicyError("content_policy_violation")
+            return {"text": json.dumps({"evidence_facts": []}), "usage": None}
+
+    corpus = tmp_path / "chunks.jsonl"
+    _write_corpus(corpus)
+    llm = PolicyRejectingLLM()
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus), llm, paper_set_policy="fixed_selected"
+    )
+
+    result = reader._complete(
+        "prompt",
+        ["blocked.jpg"],
+        semantic_phase="judgment_initial_full_context",
+    )
+    fallback_prompt = str(llm.calls[1]["prompt"])
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=result["text"],
+        allowed_records={
+            record["chunk_id"]: record
+            for record in reader.chunk_store.load_paper("p1")
+        },
+        attached_image_paths=[],
+        allow_legacy_schema=False,
+    )
+
+    assert "whose only field is evidence_facts" in fallback_prompt
+    assert '{"evidence_facts": []}' in fallback_prompt
+    assert "has_usable_answer_evidence=false" not in fallback_prompt
+    assert parsed["checkpoint_kind"] == "fixed_selected_evidence"
+    assert parsed["evidence_chunk_ids"] == []
+    assert result["provider_invocation_count"] == 2
+
+
 def test_prompt_filter_after_image_fallback_counts_each_provider_call(tmp_path):
     class ImagePolicyError(Exception):
         status_code = 400
@@ -6935,6 +7062,66 @@ def test_fixed_selected_visual_query_requires_attached_visual_fact(tmp_path):
             attached_image_paths=[str(image_path)],
             allow_legacy_schema=False,
         )
+
+
+def test_fixed_selected_image_only_fact_requires_visual_fact_purpose(tmp_path):
+    corpus = tmp_path / "chunks.jsonl"
+    image_path = _write_trusted_image(tmp_path, "p1", "table-1.png")
+    record = {
+        "paper_id": "p1",
+        "chunk_id": "p1#table-image",
+        "chunk_type": "table",
+        "text": "Table 1: Results for Method X.",
+        "metadata": {
+            "page": 1,
+            "table_id": "Table 1",
+            "image_path": str(image_path),
+        },
+    }
+    corpus.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    reader = PairwiseAOAIReader(
+        ChunkStore(corpus, image_root=_image_root(tmp_path)),
+        FakeLLM(),
+        paper_set_policy="fixed_selected",
+    )
+
+    with pytest.raises(
+        ReadingResponseError,
+        match="omit source_excerpt only when purpose is visual_fact",
+    ):
+        reader._parse_judgment(
+            query=_query(),
+            candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+            payload_text=_selected_evidence_response(
+                {
+                    "chunk_id": "p1#table-image",
+                    "purpose": "answer_value",
+                    "fact": "The pixels show Method X has value 99.",
+                    "source_excerpt": "",
+                }
+            ),
+            allowed_records={"p1#table-image": record},
+            attached_image_paths=[str(image_path)],
+            allow_legacy_schema=False,
+        )
+
+    parsed = reader._parse_judgment(
+        query=_query(),
+        candidate=CandidatePaper("p1", 1, "Paper One", "ACL", 2025),
+        payload_text=_selected_evidence_response(
+            {
+                "chunk_id": "p1#table-image",
+                "purpose": "visual_fact",
+                "fact": "The pixels show Method X has value 99.",
+                "source_excerpt": "",
+            }
+        ),
+        allowed_records={"p1#table-image": record},
+        attached_image_paths=[str(image_path)],
+        allow_legacy_schema=False,
+    )
+
+    assert parsed["visual"] == {"required": True, "status": "inspected"}
 
 
 def test_fixed_selected_extractor_rejects_cross_paper_chunk(tmp_path):

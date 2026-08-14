@@ -20,16 +20,16 @@ def _load_seed_function():
 seed = _load_seed_function()
 
 
-def _write_source(root: Path) -> Path:
+def _write_source(root: Path, *, query_id: str = "q_001") -> Path:
     source = root / "source"
     source.mkdir()
     (source / "manifest.json").write_text('{"run":"old"}\n', encoding="utf-8")
-    query = source / "q_001"
+    query = source / query_id
     query.mkdir()
     (query / "candidate_judgments.jsonl").write_text(
         json.dumps(
             {
-                "query_id": "q_001",
+                "query_id": query_id,
                 "paper_id": "paper_1",
                 "status": "complete",
                 "cache_key": "abc",
@@ -54,6 +54,35 @@ def test_seeds_only_stage1_and_records_provenance(tmp_path: Path) -> None:
     assert json.loads((destination / "seeded_judgments.json").read_text())[
         "source_manifest_sha256"
     ]
+
+
+def test_seeds_official_ltqa_query_directory(tmp_path: Path) -> None:
+    query_id = "ltqa_25546519dfb273c8"
+    source = _write_source(tmp_path, query_id=query_id)
+    destination = tmp_path / "destination"
+
+    result = seed(source, destination)
+
+    assert result["queries"] == 1
+    assert result["files"][0]["query_id"] == query_id
+    assert (destination / query_id / "candidate_judgments.jsonl").is_file()
+    assert not (destination / query_id / "answer.json").exists()
+
+
+def test_refuses_stale_state_in_official_query_directory(tmp_path: Path) -> None:
+    query_id = "ltqa_25546519dfb273c8"
+    source = _write_source(tmp_path, query_id=query_id)
+    destination = tmp_path / "destination"
+    query = destination / query_id
+    query.mkdir(parents=True)
+    stale_answer = query / "answer.json"
+    stale_answer.write_text('{"stale":true}\n', encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="non-judgment run state"):
+        seed(source, destination)
+
+    assert stale_answer.read_text(encoding="utf-8") == '{"stale":true}\n'
+    assert not (query / "candidate_judgments.jsonl").exists()
 
 
 def test_refuses_destination_with_manifest(tmp_path: Path) -> None:
