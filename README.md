@@ -61,8 +61,8 @@ This path reads a separate, fixed candidate-paper ranking and the student's
 MinerU corpus. It does not run DI, retrieval, reranking, or re-search. Use the
 small reading-only environment:
 
-The design rationale, RAG reading abstraction, validation/test distribution
-audit, reproducibility protocol, and paper-ready method draft are documented in
+The system architecture, RAG reading abstraction, reproducibility protocol,
+limitations, and paper-ready method draft are documented in
 [`docs/littraceqa_rag_reader_method.md`](docs/littraceqa_rag_reader_method.md).
 
 ```bash
