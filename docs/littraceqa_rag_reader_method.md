@@ -66,6 +66,11 @@ Model-returned paper IDs and chunk IDs must exist, belong to the current paper,
 and be visible in the supplied context. A claimed visual observation is valid
 only when the corresponding image was attached to that call.
 
+For cross-paper tables, a paper may support only one cell fragment of a row
+whose remaining cells are owned by another paper. Stage 1 preserves such
+fragments as named, grounded units without fabricating a complete row; Stage 2
+joins only the accepted source records when constructing the final table.
+
 Every successful judgment is checkpointed before the coordinator proceeds.
 Malformed JSON, invented identifiers, missing required images, and provider
 errors remain explicit failures or repair attempts; they are never converted

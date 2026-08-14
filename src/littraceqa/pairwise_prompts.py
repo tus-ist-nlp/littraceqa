@@ -17,7 +17,7 @@ from littraceqa.corpus_preflight import requires_visual_image
 from littraceqa.di_pipeline.contracts import Query
 
 JUDGMENT_PROMPT_VERSION = (
-    "pairwise-paper-judge-v21-grammatical-owner-spatial-counts"
+    "pairwise-paper-judge-v22-cross-paper-table-fragments"
 )
 ANSWER_PROMPT_VERSION = (
     "accepted-evidence-answer-v27-minimal-freeform-spatial-counts"
@@ -159,6 +159,12 @@ IMPORTANT
   the reported operand in candidate_answer.units and cite its answer chunk.
   Use mention_only only when the candidate merely names the method/topic and
   reports no requested operand under the required setting.
+- A table may place values from different papers in different columns of the
+  same final row. When this paper directly supplies only its own requested cell
+  fragment, return partial_answer with a non-empty candidate_answer.units list
+  and rows=[]. Do not invent, guess, or write placeholders for cells owned by
+  another paper. Use candidate_answer.rows only for rows whose every schema cell
+  is directly supported by this paper.
 - A relevant label requires at least one exact visible chunk_id. Never cite a
   chunk absent from the selected context or belonging to another paper.
 - Emit each evidence chunk_id at most once. If one chunk proves both an owner or

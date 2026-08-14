@@ -764,7 +764,7 @@ def test_judgment_render_places_examples_before_live_data_and_marks_no_images():
     )
 
     assert JUDGMENT_PROMPT_VERSION == (
-        "pairwise-paper-judge-v21-grammatical-owner-spatial-counts"
+        "pairwise-paper-judge-v22-cross-paper-table-fragments"
     )
     assert prompt.index("SYNTHETIC FEW-SHOT EXAMPLES") < prompt.index("LIVE TASK")
     assert prompt.index("LIVE TASK") < prompt.index("LIVE_PAPER_SENTINEL")

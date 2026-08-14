@@ -2270,10 +2270,9 @@ class PairwiseAOAIReader:
                 )
         if label in {"direct_answer", "partial_answer"} and "table" in query.answer_types:
             rows = candidate_answer.get("rows")
-            if not isinstance(rows, list) or not rows:
+            if not isinstance(rows, list):
                 raise ReadingResponseError(
-                    f"{label} for a table query requires at least one complete "
-                    "candidate_answer row"
+                    "candidate_answer.rows must be a list for a table query"
                 )
             required_columns = [
                 str(column.get("name") or "")
@@ -2297,6 +2296,30 @@ class PairwiseAOAIReader:
                         f"candidate_answer.rows[{row_index}] has missing or blank "
                         f"required cells: {missing_or_blank}"
                     )
+            if not rows:
+                units = candidate_answer.get("units")
+                if label == "direct_answer" or not isinstance(units, list) or not units:
+                    raise ReadingResponseError(
+                        f"{label} for a table query requires at least one complete "
+                        "candidate_answer row; a cross-paper partial_answer may "
+                        "instead provide non-empty candidate_answer.units"
+                    )
+                for unit_index, unit in enumerate(units):
+                    if not isinstance(unit, dict):
+                        raise ReadingResponseError(
+                            f"candidate_answer.units[{unit_index}] must be an object"
+                        )
+                    if not str(unit.get("name") or "").strip():
+                        raise ReadingResponseError(
+                            f"candidate_answer.units[{unit_index}] requires a name"
+                        )
+                    unit_value = unit.get("value")
+                    if unit_value is None or (
+                        isinstance(unit_value, str) and not unit_value.strip()
+                    ):
+                        raise ReadingResponseError(
+                            f"candidate_answer.units[{unit_index}] requires a value"
+                        )
         return {
             "paper_role": paper_role,
             "label": label,
@@ -2345,8 +2368,12 @@ class PairwiseAOAIReader:
             "option. In a multi-paper or multi-operand query, one directly reported "
             "requested operand is partial_answer even if another paper's operand is "
             "missing; mention_only is only for a name/topic mention with no requested "
-            "operand. Keep an authoritative wrong-owner candidate irrelevant rather "
-            "than applying this partial-answer fallback. Parse coordinated clauses "
+            "operand. For a cross-paper table whose final row combines columns from "
+            "different papers, preserve this paper's reported cell fragments in "
+            "non-empty candidate_answer.units and use rows=[]; never invent placeholder "
+            "values for another paper's columns. Keep an authoritative wrong-owner "
+            "candidate irrelevant rather than applying this partial-answer fallback. "
+            "Parse coordinated clauses "
             "independently: a dataset modifier inside the first clause does not "
             "automatically constrain the next clause, and an unqualified best FID "
             "uses the minimum across all otherwise eligible visible rows. "
