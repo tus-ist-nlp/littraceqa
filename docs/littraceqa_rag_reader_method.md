@@ -81,7 +81,7 @@ flowchart LR
 
 ### 4.2 論文集合
 
-候補論文はquery本文と分離したsidecarで受け渡す。各要素はpaper ID、rank、title、venue、yearを持つ。loaderは重複paper、欠落query、余分なquery、不連続rank、正解情報を含むフィールドを拒否する。
+候補論文はquery本文と分離したsidecarで受け渡す。paper IDを必須とし、rankは明示値または配列順から付与する。title、venue、yearは任意であり、利用可能なpaper metadataから補完できる。loaderは重複paper、欠落query、余分なquery、不連続rank、およびtop-levelの正解・開発専用フィールドを拒否する。
 
 外部選定モードでは、渡されたpaper ID集合をauthoritativeな入力として扱う。読解器はこの集合を追加、削除、再順位付けしない。この構成により、検索器の性能と読解器の性能を独立に分析できる。
 
@@ -99,7 +99,7 @@ MinerU出力を、次のsource typeへ正規化する。
 - equation/algorithm
 - citation context
 
-各recordはpaper ID、chunk ID、本文、pageまたはsection、object ID、必要に応じて画像pathを持つ。長い論文は質問との語彙的一致、source type、caption、object ID、周辺文脈に基づいて決定論的に圧縮する。1つの論文を通常処理で複数のLLM requestへ分割せず、1つのbounded paper contextとしてStage 1へ渡す。
+各recordはpaper ID、chunk ID、本文を持ち、source typeと抽出状況に応じてpage、section、object ID、画像pathをmetadataとして保持する。長い論文は質問との語彙的一致、source type、caption、object ID、周辺文脈に基づいて決定論的に圧縮する。1つの論文を通常処理で複数のLLM requestへ分割せず、1つのbounded paper contextとしてStage 1へ渡す。
 
 ## 6. Stage 1：論文単位読解
 
