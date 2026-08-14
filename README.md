@@ -61,6 +61,11 @@ This path reads a separate, fixed candidate-paper ranking and the student's
 MinerU corpus. It does not run DI, retrieval, reranking, or re-search. Use the
 small reading-only environment:
 
+The reader architecture is described in
+[`docs/littraceqa_rag_reader_method.md`](docs/littraceqa_rag_reader_method.md);
+the optional source-review workflow is documented separately in
+[`docs/table_verification_protocol.md`](docs/table_verification_protocol.md).
+
 ```bash
 uv sync --extra pairwise_reader --group dev
 ```
@@ -289,6 +294,54 @@ refuses to start unless `--confirm-full-run` is present:
 uv run python scripts/run_aoai_pairwise_reader.py <same arguments> \
   --workers 100 --resume --confirm-full-run
 ```
+
+### Table-only regeneration and source review
+
+Use the released answer type instead of a query-ID list to rerun only table
+questions. Each sample must use its own run directory:
+
+```bash
+uv run python scripts/run_aoai_pairwise_reader.py \
+  --queries "$QUERIES" \
+  --candidates "$CANDIDATES" \
+  --paper-metadata "$PAPER_METADATA" \
+  --chunks "$CHUNKS" \
+  --run-dir runs/table_sample_01 \
+  --answer-type table --stage all
+```
+
+After producing two or more independent candidates, generate a sealed review
+bundle. Candidates may be complete submissions or table-only JSONL files:
+
+```bash
+uv run python scripts/adjudicate_table_answers.py review \
+  --inputs /path/to/inputs.jsonl \
+  --base runs/frozen_base/submission.jsonl \
+  --candidate sample_01=runs/table_sample_01/submission.jsonl \
+  --candidate sample_02=runs/table_sample_02/submission.jsonl \
+  --output-dir runs/table_review
+```
+
+Copy `table_decisions.template.json`, then record one source-checked decision
+for every table query. Each decision names a candidate, includes review notes,
+and cites one or more locators already present in the frozen evidence. Compose
+the reviewed result with:
+
+```bash
+uv run python scripts/adjudicate_table_answers.py compose \
+  --inputs /path/to/inputs.jsonl \
+  --base runs/frozen_base/submission.jsonl \
+  --candidate sample_01=runs/table_sample_01/submission.jsonl \
+  --candidate sample_02=runs/table_sample_02/submission.jsonl \
+  --decisions runs/table_review/table_decisions.json \
+  --output runs/table_review/submission.jsonl \
+  --audit runs/table_review/submission.audit.json
+```
+
+Review artifacts seal the inputs, base, candidates, query order, and schemas by
+SHA-256. Composition may replace only `answer.table`; papers, evidence,
+multiple-choice/freeform answers, and non-table records remain unchanged. The
+source review is an explicit human verification step, not an automated claim.
 
 `--workers 100` is the initial concurrency ceiling, not 100 independent input
 files. The runner keeps the original JSONL intact, round-robins every
