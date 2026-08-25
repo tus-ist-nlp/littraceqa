@@ -1,0 +1,26 @@
+索引ロード中...
+ロード完了 398秒
+
+===== 属性フィルタ発火 =====
+  制約: venue=NAACL year=2025 (空=False)
+  各索引からの取得件数 fetch_k = 34,560
+Split strings:   0%|          | 0/1 [00:00<?, ?it/s]                                                    BM25S Retrieve:   0%|          | 0/1 [00:00<?, ?it/s]                                                       [bm25s] search    0.1秒 (34,560件) / filter   0.0秒 -> 1,000件
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:09<00:28,  9.34s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:29<00:31, 15.76s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:47<00:16, 16.90s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:49<00:00, 10.99s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:49<00:00, 12.44s/it]
+  [faiss_qwen3] search   91.1秒 (34,560件) / filter   0.0秒 -> 1,000件
+  [fuse] 0.0秒 -> 1,000チャンク / 255論文
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:07<00:29,  7.45s/it]Loading checkpoint shards:  40%|████      | 2/5 [00:15<00:22,  7.57s/it]Loading checkpoint shards:  60%|██████    | 3/5 [00:22<00:15,  7.66s/it]Loading checkpoint shards:  80%|████████  | 4/5 [00:28<00:06,  6.92s/it]Loading checkpoint shards: 100%|██████████| 5/5 [00:31<00:00,  5.28s/it]Loading checkpoint shards: 100%|██████████| 5/5 [00:31<00:00,  6.21s/it]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.55it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.83it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:00,  2.01it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.28it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.76it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.34it/s]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.72it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.91it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:00,  2.01it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.27it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.78it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.38it/s]
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+  [rerank] 63.7秒 -> 20件
+
+===== 発火しない =====
+  制約: venue=None year=None (空=True)
+  各索引からの取得件数 fetch_k = 1,000
+Split strings:   0%|          | 0/1 [00:00<?, ?it/s]                                                    BM25S Retrieve:   0%|          | 0/1 [00:00<?, ?it/s]                                                       [bm25s] search    0.1秒 (1,000件) / filter   0.0秒 -> 1,000件
+  [faiss_qwen3] search    1.5秒 (1,000件) / filter   0.0秒 -> 1,000件
+  [fuse] 0.0秒 -> 1,000チャンク / 509論文
+  [rerank] 22.9秒 -> 20件
+

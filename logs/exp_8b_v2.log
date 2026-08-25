@@ -1,0 +1,67 @@
+既存の索引を読み込み中...
+読み込み完了
+本番と同じ4フィールド（query_id/question/answer_types/table_schema）で走らせます
+55 件の質問に対して検索中...
+Split strings:   0%|          | 0/1 [00:00<?, ?it/s]                                                    BM25S Retrieve:   0%|          | 0/1 [00:00<?, ?it/s]BM25S Retrieve: 100%|██████████| 1/1 [00:00<00:00,  4.22it/s]                                                             Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:09<00:28,  9.60s/it]Loading checkpoint shards:  50%|█████     | 2/4 [00:19<00:19,  9.51s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:37<00:13, 13.79s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:38<00:00,  8.64s/it]Loading checkpoint shards: 100%|██████████| 4/4 [00:38<00:00,  9.67s/it]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:07<00:29,  7.50s/it]Loading checkpoint shards:  40%|████      | 2/5 [00:15<00:22,  7.61s/it]Loading checkpoint shards:  60%|██████    | 3/5 [00:23<00:15,  7.94s/it]Loading checkpoint shards:  80%|████████  | 4/5 [00:29<00:07,  7.18s/it]Loading checkpoint shards: 100%|██████████| 5/5 [00:32<00:00,  5.50s/it]Loading checkpoint shards: 100%|██████████| 5/5 [00:32<00:00,  6.41s/it]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.38it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.65it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:01,  1.82it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:02<00:00,  2.09it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.68it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.19it/s]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.62it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.80it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:01,  1.86it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:02<00:00,  2.07it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.59it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.21it/s]
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/_inductor/compile_fx.py:322: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+Traceback (most recent call last):
+  File "/home/iseakira/littraceqa/scripts/run_search.py", line 525, in <module>
+    main()
+    ~~~~^^
+  File "/home/iseakira/littraceqa/scripts/run_search.py", line 488, in main
+    pred = agent.run(query)
+  File "/home/iseakira/littraceqa/src/littraceqa/di_pipeline/agent/reading.py", line 87, in run
+    for result in self.retriever.retrieve(
+                  ~~~~~~~~~~~~~~~~~~~~~~~^
+        subquery, self.top_k, **retrieve_kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ):
+    ^
+  File "/home/iseakira/littraceqa/src/littraceqa/di_pipeline/retrieve/hybrid.py", line 74, in retrieve
+    return self.reranker.rerank(query, fused, top_k)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/iseakira/littraceqa/src/littraceqa/di_pipeline/retrieve/reranker.py", line 283, in rerank
+    scores = self._score_all(query, texts)
+  File "/home/iseakira/littraceqa/src/littraceqa/di_pipeline/retrieve/reranker.py", line 332, in _score_all
+    future.result()
+    ~~~~~~~~~~~~~^^
+  File "/home/iseakira/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/lib/python3.13/concurrent/futures/_base.py", line 453, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/home/iseakira/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/lib/python3.13/concurrent/futures/_base.py", line 402, in __get_result
+    raise self._exception
+  File "/home/iseakira/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/iseakira/littraceqa/src/littraceqa/di_pipeline/retrieve/reranker.py", line 322, in run
+    self._score_on(device, query, [texts[i] for i in batch]), batch
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/iseakira/littraceqa/src/littraceqa/di_pipeline/retrieve/reranker.py", line 377, in _score_on
+    logits = model(**padded).logits[:, -1, :]
+             ~~~~~^^^^^^^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/_dynamo/eval_frame.py", line 472, in __call__
+    return super().__call__(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/fx/_symbolic_trace.py", line 864, in module_call_wrapper
+    return self.call_module(mod, forward, args, kwargs)
+           ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/fx/experimental/proxy_tensor.py", line 1352, in call_module
+    return forward(*args, **kwargs)
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/fx/_symbolic_trace.py", line 857, in forward
+    return _orig_module_call(mod, *args, **kwargs)
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/_dynamo/eval_frame.py", line 989, in compile_wrapper
+    raise RuntimeError(
+    ...<2 lines>...
+    )
+RuntimeError: Detected that you are using FX to symbolically trace a dynamo-optimized function. This is not supported at the moment.

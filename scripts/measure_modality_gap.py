@@ -12,7 +12,7 @@ reading（読み取り）ができていないからか」を切り分けるた�
     uv run python scripts/measure_modality_gap.py \\
       --paths configs/paths/default.yaml \\
       --process configs/process_style/mineru.yaml \\
-      --search configs/search_style/abstract_specter2_body_qwen3.yaml \\
+      --search configs/search_style/bm25_specter2_body_qwen3/qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
       --gold data/validation.jsonl \\
       --output results_modality.md
@@ -108,7 +108,7 @@ def render_report(stats: dict[str, dict], meta: dict) -> str:
     lines.append(f"- paths: {meta['paths']}")
     lines.append(f"- process: {meta['process']}")
     lines.append(f"- search: {meta['search']}")
-    lines.append(f"- agent: {meta['agent']} (top_k={meta['top_k']})")
+    lines.append(f"- agent: {meta['agent']} (retrieve_top_k={meta['retrieve_top_k']})")
     lines.append(f"- gold: {meta['gold']} ({meta['n_queries']} 件)")
     lines.append("")
     lines.append("| source_type | n | hit | hit率 | no_page_locator |")
@@ -176,12 +176,12 @@ def main() -> None:
             sys.exit(1)
     print("読み込み完了")
 
-    top_k = cfg["agent"].get("params", {}).get("top_k", 20)
+    retrieve_top_k = cfg["agent"].get("params", {}).get("retrieve_top_k", 20)
     gold_records = read_jsonl(Path(args.gold))
 
-    print(f"{len(gold_records)} 件の gold に対してモダリティ別 hit率を計測中 (top_k={top_k})...")
+    print(f"{len(gold_records)} 件の gold に対してモダリティ別 hit率を計測中 (retrieve_top_k={retrieve_top_k})...")
     stats = compute_modality_hit_rates(
-        gold_records, retrieve_fn=lambda question: retriever.retrieve(question, top_k)
+        gold_records, retrieve_fn=lambda question: retriever.retrieve(question, retrieve_top_k)
     )
 
     meta = {
@@ -190,7 +190,7 @@ def main() -> None:
         "process": args.process,
         "search": args.search,
         "agent": args.agent,
-        "top_k": top_k,
+        "retrieve_top_k": retrieve_top_k,
         "gold": args.gold,
         "n_queries": len(gold_records),
     }

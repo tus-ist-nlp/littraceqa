@@ -21,14 +21,21 @@ requirements.txt
 # Downloaded PDF cache (scripts/download_pdfs.py default --output)
 pdfs/
 
-# 実行ログ（索引構築・検索の進捗。巨大かつ再現可能なので追跡しない）
-logs/
-# 予測結果（実験の生成物。results/experiments.jsonl に config とスコアが残るので再現可能）
-predictions*.jsonl
-# 実行ごとのレポート（生成物。results/experiments.jsonl があれば再現可能）
-report/
-# 実験ログ（各自のローカルな実行記録。チーム共有はしない）
-results/
+# 実行ログも**このブランチでは追跡する**（走行時間・OOM・中断の記録が残っている）。
+# `paper-final` / `paper-repro` では従来どおり除外する。
+# 予測結果・--dump-runs のサブクエリ単位の検索結果も、**このブランチでは追跡する**
+# （下の runs_*.jsonl も同じ）。論文でクエジ単位の分析——gold が何位に来たか、
+# どのサブクエリが効いたか、evidence を出せたか——を書くには、集計値では足りず
+# 1クエリ1行の生データが要る。合計28MB、最大は runs_fat.jsonl の 10MB。
+# `paper-final` / `paper-repro` では従来どおり除外する。
+# 実行ごとのレポート / 実験ログ / 設計メモは、**このブランチでは追跡する**。
+# 論文（EMNLP 2026 投稿）の書き増しに使う一次資料で、ここに無いと clone した状態から
+# 新しい表を作れないため（CLAUDE.md と yaml コメントに残っているのは選定に効いた値だけで、
+# @1/@70 の列・single/multi の内訳・クエリ別の内訳は report/ と results/ にしかない）。
+# `paper-final` / `paper-repro` では従来どおり除外する。
+# LLM によるデータセット品質監査の結果も**このブランチでは追跡する**。
+# 再生成には LLM 呼び出しが要るうえ、「gold の24%に evidence が紐づいていない」という
+# 論文の ecr 節の根拠がここにある。`paper-final` / `paper-repro` では除外する。
 
 # Local pipeline outputs
 archives/

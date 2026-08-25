@@ -1,0 +1,75 @@
+# reading_expand_rrf/verdict_anchor.yaml + 2つだけ変更（夜間のオフライン検証の結論）。
+#
+#   1. `max_steps: 3 -> 2`                        （反復を1周減らす）
+#   2. `paper_score_skip_chunk_types: [table]`     （表を論文の代表スコアに使わない）
+#
+# 検証は `docs/offline_findings_spec.md`。土台は `runs_fat.jsonl` から復元した全長A。
+#
+#   構成                          multi@5  multi@10  multi@20  全体@5  全体@10  全体@20
+#   verdict_anchor（基準）          0.674    0.844     0.914     0.810   0.918    0.955
+#   表除外のみ                      0.715    0.868     0.940     0.831   0.930    0.968
+#   max_steps=2 のみ               0.735    0.865     0.931     0.860   0.929    0.964
+#   **両方**                       0.758    0.894     0.940     0.872   0.944    0.968
+#
+# **クエリを4分割（前半/後半/奇数/偶数）× multi/全体 × @5/@10/@20/@50 = 32セルで
+# 悪化ゼロ**（改善18・同値14）。表除外だけだと2セル悪化するので**組で入れる**。
+#
+# ## なぜ表を代表スコアから外すのか
+#
+# `to_gold_papers(agg="max")` は論文を「最高スコアのチャンク1つ」で代表させる。
+# 表チャンクは数値と短いラベルが密なので BM25 も reranker も語の重なりだけで高い
+# スコアを出し、**論文が質問の主題でなくても表1枚で代表スコアが跳ね上がる**。
+#
+# 重みを掛ける形（代表 = max(表以外, w × 表)）で w を振ると **0.85 以下が完全に同値**
+# （0.8 / 0.5 / 0.1 / 0.0 が1桁まで一致）。閾値ではなく規則そのものが効いているので、
+# 「使わない」という真偽値で書ける——**自由パラメータが無いので過学習しない**。
+#
+# **表が根拠のクエリが最も伸びる**（`primary_evidence_type` 別の ecr@10）:
+#
+#   table 0.926 -> 0.985 / equation 0.714 -> 0.762 / figure・text_span は不変
+#
+# 表が根拠の質問では**無関係な論文の表も数値が一致して高スコアになる**ため正解論文が
+# 埋もれていた、という機序どおりの出方。
+#
+# **表チャンクは読解にはそのまま渡る**（落とすのは代表スコアの計算だけ）。
+# gold の primary_evidence_type は table が17件で最多なので evidence では絶対に落とせない。
+# むしろ読解には見せたほうがよく、表を見せたときの確認率は 71%（見せないと 51%）。
+# `figure` / `equation_algorithm` を一緒に外すと**悪化する**ので `table` だけ。
+#
+# ## なぜ反復を1周減らすのか
+#
+# step1/2 の**632本**のサブクエリが新たに検索プールへ入れた gold は
+# **根拠あり3本・ピア1本**だけ。CLAUDE.md の leave-one-out（step1 は 0/305）と一致する。
+# 減らすことで**検索327回（全812回の40%）と LLM 呼び出し2回/該当クエリ**が消える。
+# 比較は verdict も揃えた（max_steps=2 なら step1 時点の `selected` を使う）。
+#
+# ## ここから先は動かさない
+#
+# `combine_rrf_k` / `neighbors` / `related_weight` / `related_offset` / `retrieve_top_k` /
+# `pool_prune_to` は、A の並びが変わったあとに振り直しても現行値が最適だった。
+# **全55件だけ見ると `neighbors: 50`（multi@5 0.784）や `related_weight: 1.5`（0.807）が
+# 良く見えるが、4分割すると32セル中14セルで悪化する**（典型的な過学習）。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 100
+  anchors: 1
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 10
+  anchor_from: verdict
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 2                            # ← 差分 1/2（3 -> 2）
+  paper_score_skip_chunk_types: [table]    # ← 差分 2/2
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

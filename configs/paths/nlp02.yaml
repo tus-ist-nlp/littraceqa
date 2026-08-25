@@ -1,0 +1,4 @@
+pdf_dir: /data/iseakira/pdfs/pdfs
+chunks_dir: /data/iseakira/pdfs/chunks
+index_dir: /data/iseakira/pdfs/index
+paper_metadata: data/paper_metadata.jsonl

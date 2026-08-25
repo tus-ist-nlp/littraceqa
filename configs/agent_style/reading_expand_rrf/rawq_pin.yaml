@@ -1,0 +1,74 @@
+# notable.yaml + `rawq_pin: 1` の1行だけ。
+#
+# **元の質問そのものを step0 に5本目のサブクエリとして足し、その検索が返した
+# 論文1位をランキングA の先頭に固定する。**
+#
+# `_decompose()` が作る4本のサブクエリは元の質問の**語の組み合わせ**を保たないので、
+# 融合すると1位が薄まる。生の質問1本で引くほうが @1 は高い
+# （`eval_retrieval.py` の LLM なし実測で ecr@1 0.637 vs フル走行 0.605）。
+#
+# **プールに足すだけでは1桁も動かない。** `subquery_merge: max` は chunk 単位で
+# 最高スコアを残すだけなので、生質問が引くチャンクはすでにどれかのサブクエリが
+# 同等以上のスコアで持っている。実測でも候補列は 34/55 件で並びが変わるのに
+# **cr / ecr は全 k で小数4桁まで不変**だった。だから明示的に固定する。
+#
+# **固定先は統合の前（ランキングA の先頭）。** 統合後の候補列に置くだけだと @1 しか
+# 動かないが、A の先頭に置くと `_anchor_papers()` 経由で**ランキングB の起点も
+# 生質問1位に変わる**ので @5 以降にも効く（土台 notable の ecr@5:
+# 統合後 0.8465 / A の先頭 0.8556、土台 0.8419）。
+#
+# 土台7本のオフライン実測（total_ecr の差分。詳細は docs/offline_findings_spec.md）:
+#
+#     土台                @1       @5       @10      @20      @50   土台の@1
+#     notable          +0.032   +0.014   +0.011   +0.006    0.000    0.605
+#     steps2_notable   +0.036   +0.015   +0.006   -0.006    0.000    0.601
+#     fat(08-03)       +0.041   +0.026   -0.006   -0.005    0.000    0.596
+#     k100_cand50       0.000   +0.015   +0.017   +0.006   +0.006    0.637
+#     fat(候補列)       +0.005   +0.023    0.000   +0.005   -0.005    0.632
+#     chunk_cand50     -0.032   +0.009   -0.003   +0.006   +0.006    0.669
+#     b_merged         -0.020   +0.009   -0.005    0.000   -0.005    0.657
+#
+# **@5 は7土台すべてで改善**（+0.009〜+0.026）。ここが本体で、
+# **@5 は外部チームに離されている位置**でもある。@10 / @20 は符号が割れるのでノイズ。
+#
+# ⚠ **@1 は土台次第。** 生質問1本の ecr@1 は 0.637 で固定なので、**土台自身の @1 が
+# それを上回っていると負ける**（上表の右端と符号が一致する）。この yaml の土台
+# （notable, @1 0.605）では勝つが、`cand50` 系のように @1 が 0.66 を超える構成に
+# 足してはいけない。
+#
+# **2本以上を固定しない**（notable の ecr@5: N=1 で 0.8556 / N=2 で 0.8247 /
+# N=3 で 0.7975）。生質問の2位・3位まで信じる根拠は無い。
+#
+# コストは step0 の検索が1本増えるだけで LLM 呼び出しは増えない。足した run は
+# 普通のサブクエリとして `chunks` に積まれるので、**生質問が引いたチャンクも
+# evidence に出せる**。
+#
+# ⚠ **オフライン厳密ではない。** 固定そのものは `_build_prediction()` の中だけで
+# 効く（ループ内の `_candidate_papers()` は触らない）が、**足した生質問の run が
+# プールに入るぶん読解 LLM が読む候補が変わる**ので、verdict と evidence は
+# フル走行では動く。上の数字は「サブクエリを固定した条件下」の値なので下限として読む。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 100
+  anchors: 1
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 10
+  anchor_from: verdict
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  paper_score_skip_chunk_types: [table]
+  rawq_pin: 1                              # ← notable との唯一の差分
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

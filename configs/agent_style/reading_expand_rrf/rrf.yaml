@@ -1,0 +1,62 @@
+# reading + 論文→論文の関連ランキングを、検索ランキングと RRF 統合する。
+#
+# reading_expand_insert/fused.yaml との違いは取り込み方。あちらは関連論文を「上位K本だけ
+# 決まった位置に差し込む」位置挿入で、こちらはランキングそのものを順位融合する。
+#
+#   * ランキングA（質問→論文）: 検索。BM25 + 埋め込み → RRF → reranker
+#   * ランキングB（論文→論文）: SPECTER2 + 書誌結合 + 全文MLT を RRF 融合。
+#     **reranker には通さない**——reranker は「質問に答えるか」で判定するので、
+#     質問文が名指ししないピア gold を必ず下げる。B をそこに晒さないのが眼目。
+#
+#   score(p) = w_A / (k + rank_A) + w_B / (k + related_offset + rank_B)
+#
+# 位置挿入では作れなかった「A にも B にも居る論文の加点」が効く。スコアで混ぜて壊れた
+# （cr@20 0.822 -> 0.773）のは reranker の絶対スコアと展開の仮スコアを足していたからで、
+# RRF は順位しか見ないのでその問題が起きない。
+#
+# オフライン検証（predictions_8b_chunk_cand50.jsonl 土台、55件フル、
+# scripts/replay_expansion.py）:
+#
+#                    cr@20  ecr@20  single@20  multi@20  cr@50  ecr@50  multi@50
+#   展開なし            0.789  0.868    1.000     0.601   0.832   0.889    0.681
+#   specter2 のみ      0.816  0.870    1.000     0.650   0.908   0.945    0.825
+#   書誌結合 のみ         0.829  0.880    1.000     0.675   0.876   0.921    0.764
+#   全文MLT のみ        0.857  0.910    1.000     0.728   0.898   0.950    0.807
+#   specter2+書誌結合   0.859  0.901    1.000     0.732   0.912   0.950    0.833
+#   3ソース（この設定）    0.879  0.926    1.000     0.770   0.917   0.956    0.842
+#
+# 土台の候補が50本しか残っていない都合で、ここでのランキングA は50位までしか
+# 復元できない。本走行では打ち切り前の全長を使うので、この数字は下限として読む。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  # 3ソースとも「違う gold」を拾うので併用する。候補圏外 gold 37本の回収は
+  # specter2 15 / 書誌結合 11 / 全文MLT 16 で、MLT だけが拾えたのが2本。
+  # 単体で一番強いのは全文MLT だが、3つ揃えたときが最良（上の表）。
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }   # 共有1本だけのペアは汎用引用で繋がるので切る
+    # anchor の title+abstract で構築済みの bm25s_paper 索引を引く全文 more-like-this。
+    # LLM 呼び出しゼロ・追加の索引構築ゼロ。
+    - { name: bm25_mlt, query_chars: 1200 }
+  # 統合では既存候補と重なる分も加点の源になるので、位置挿入の 20 より深く取る。
+  neighbors: 50
+  anchors: 1
+  rrf_k: 60            # ソース間の融合（ランキングB の中）
+  combine: rrf         # ランキングA と B の統合
+  combine_rrf_k: 60
+  # **素の RRF（重み1.0・下駄なし）が最良。** 重みを下げると B 単独の論文が A の裾より
+  # 下に落ちて統合の意味が消え（w=0.5 で cr@20 0.817 / ecr@20 0.874）、上げると B が
+  # 候補列を占領する（w=2.0 で 0.830 / 0.868）。related_offset も 0 が最良で、15 だと
+  # 0.839 / 0.895 まで下がる（位置挿入 insert_at:15 の深さを再現する値だが、
+  # 順位融合では下駄ではなく「A にも B にも居る」加点が差し込みの役を担う）。
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

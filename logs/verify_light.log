@@ -1,0 +1,50 @@
+プール: 1000チャンク / 86論文 (1論文あたり平均11.6チャンク)
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.62it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.69it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:01,  1.88it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:02<00:00,  2.16it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.88it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.33it/s]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.79it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.90it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:01,  1.92it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.20it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.93it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.42it/s]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.88it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  2.00it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:00,  2.08it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.33it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:01<00:00,  3.08it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:01<00:00,  2.55it/s]
+
+[現行 (chunks3, max_tok2048)]
+  代表テキスト: 中央661tok  p90 1021  max 2048
+  バッチ: 39個  サイズ中央2  最大5
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+  ★ 1rerank 8.5秒  VRAM18.0GB  -> 55問x9retrieve の上限 1.2時間
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.96it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.95it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:00,  2.04it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.29it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:01<00:00,  3.04it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:01<00:00,  2.52it/s]
+Traceback (most recent call last):
+  File "/tmp/claude-1009/-home-iseakira-littraceqa/6e8ebd51-4a21-4b06-967e-05ad45016649/scratchpad/verify_light.py", line 33, in <module>
+    rr._ensure_loaded()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/home/iseakira/littraceqa/src/littraceqa/di_pipeline/retrieve/reranker.py", line 258, in _ensure_loaded
+    .to(device)
+     ~~^^^^^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/transformers/modeling_utils.py", line 4343, in to
+    return super().to(*args, **kwargs)
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1384, in to
+    return self._apply(convert)
+           ~~~~~~~~~~~^^^^^^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 934, in _apply
+    module._apply(fn)
+    ~~~~~~~~~~~~~^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 934, in _apply
+    module._apply(fn)
+    ~~~~~~~~~~~~~^^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 934, in _apply
+    module._apply(fn)
+    ~~~~~~~~~~~~~^^^^
+  [Previous line repeated 2 more times]
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 965, in _apply
+    param_applied = fn(param)
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1370, in convert
+    return t.to(
+           ~~~~^
+        device,
+        ^^^^^^^
+        dtype if t.is_floating_point() or t.is_complex() else None,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        non_blocking,
+        ^^^^^^^^^^^^^
+    )
+    ^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 96.00 MiB. GPU 1 has a total capacity of 23.56 GiB of which 39.69 MiB is free. Including non-PyTorch memory, this process has 23.51 GiB memory in use. Of the allocated memory 23.17 GiB is allocated by PyTorch, and 17.98 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
