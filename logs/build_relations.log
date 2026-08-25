@@ -1,0 +1,5 @@
+走査中: /data2/iseakira/pdfs/chunks/mineru_chunks.jsonl
+1153.7秒 -> /data2/iseakira/pdfs/index/mineru/relations/mentions.pkl
+一意な識別子 41,078 / 名指しをした論文 10,129 / 名指しされた論文 4,409 / 辺 16,075
+1論文あたりの名指し数: 中央 1 / 最大 21 / 平均 1.6
+ハブとして捨てた名前 50件以上（>20本）: ICLR(3897), EMNLP(3271), ControlNet(814), METEOR(559), modification(533), DataGen(530), Diffusion2(489), HTML(419), FLUX(352), groundingdino(343), ONLY(303), AgentS(272), reasoningrec(262), ShareGPT4V(262), SAM2(252)

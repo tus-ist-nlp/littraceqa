@@ -1,0 +1,42 @@
+# reading_expand_rrf/rrf.yaml の候補幅を 20 -> 50 に広げただけの版。
+# 統合ロジック（ランキングA/B の RRF）は一切変えていないので、差分は
+# 「LLM が読む本数」と「候補列の長さ」だけ。
+#
+# 組み合わせる search_style は per_index_k / pool_k を 1000 にしてある
+# bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter.yaml（k100 版ではない）。
+# reranker に渡るプールを深くしないと、retrieve_top_k を 50 に広げても
+# 中身が浅いまま伸びない。
+#
+# この組み合わせの「展開なし版」は predictions_8b_chunk_cand50.jsonl（同 search
+# + reading_normal/cand50.yaml）で、その候補列に scripts/replay_expansion.py で
+# RRF 統合を載せたオフライン値は下記。本走行は打ち切り前の全長を
+# ランキングA に使うので、これは下限として読む。
+#
+#              cr@20  ecr@20  multi@20  cr@50  ecr@50  multi@50
+#   展開なし      0.789  0.868    0.601   0.832   0.889    0.681
+#   RRF 統合     0.879  0.926    0.770   0.917   0.956    0.842
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  # 3ソースとも「違う gold」を拾うので併用する。候補圏外 gold 37本の回収は
+  # specter2 15 / 書誌結合 11 / 全文MLT 16 で、MLT だけが拾えたのが2本。
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }   # 共有1本だけのペアは汎用引用で繋がるので切る
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 50
+  anchors: 1
+  rrf_k: 60            # ソース間の融合（ランキングB の中）
+  combine: rrf         # ランキングA と B の統合
+  combine_rrf_k: 60
+  # 素の RRF（重み1.0・下駄なし）が最良。reading_expand_rrf/rrf.yaml の実測どおり。
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  retrieve_top_k: 50
+  max_candidates: 50
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10

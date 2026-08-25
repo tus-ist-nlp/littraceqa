@@ -1,0 +1,49 @@
+# 検索エージェントを使わない構成の素の版。**LLM を1回も呼ばない。**
+#
+# `scripts/eval_retrieval.py --agent` に渡して使う。このスクリプトは
+# **候補列の並べ替えだけで完結する部分**（A/B の RRF 統合＝論文→論文展開と
+# `paper_score_skip_chunk_types`）しか載せないので、サブクエリ分解・反復検索・
+# 読解（evidence）は一切走らない。
+#
+#     uv run python scripts/eval_retrieval.py \
+#       --paths configs/paths/default.yaml \
+#       --process configs/process_style/mineru.yaml \
+#       --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter_k100.yaml \
+#       --agent configs/agent_style/agentless/agentless.yaml --ks 1,5,10,20,50
+#
+# **`notable.yaml` から `anchor_from: verdict` を外しただけ**——起点にする
+# 「読解 LLM が確認した論文」が存在しないので、書いてあっても候補1位に落ちる。
+# 黙って落ちるより、使わないことを設定に書いておく。
+#
+# 実測（2026-08-10、55件、上記の search_style）:
+#
+#     k     recall@k  evidence_recall@k  precision@k  hit_rate@k
+#     1       0.5566        0.6369          0.9273      0.9273
+#     5       0.7005        0.7747          0.3055      0.9636
+#     10      0.8298        0.8889          0.1945      1.0000
+#     20      0.9182        0.9576          0.1164      1.0000
+#     50      0.9591        0.9788          0.0498      1.0000
+#
+# フル走行（`reading_expand_rrf/notable`）との差は **@20 以降でほぼゼロ**
+# （ecr@20 0.958 vs 0.961、cr@50 は 0.9591 で完全一致）、**@1 はこちらが上**
+# （ecr@1 0.637 vs 0.605）、**@5 だけ -0.067**（0.775 vs 0.842）。
+# @5 の差の出所はサブクエリ4本の融合と `anchor_from: verdict` の2つで、
+# 後者を LLM 抜きで埋めるのが同フォルダの `score_anchor.yaml`。
+#
+# ⚠ **evidence は出せない。** 読解を走らせないので `evidence_chunk_ids` が無い。
+# 候補列（論文の順位）までを渡す構成として使う。
+name: reading
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 100
+  anchors: 1
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 10
+  related_weight: 1.0
+  related_offset: 0
+params:
+  paper_score_skip_chunk_types: [table]

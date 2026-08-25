@@ -1,0 +1,65 @@
+# **現状ベスト（reading_expand_rrf/rrf.yaml）からの差分は `grounded_refine` の1つだけ。**
+#
+# 目的は「未検証キーの切り分け」。2026-08-06 の全部盛り走行
+# （chunk_attrfilter_blend + reading_expand_rrf/stacked, ecr@20 0.905）は
+# ベスト（chunk_attrfilter_k100 + rrf, ecr@20 0.924）に全 k で負けたが、
+# 差分が agent 側4キー + search 側 rerank_blend の5つ同時だったので犯人を特定できない。
+#
+# うち3キーは runs_fat.jsonl の再生（scripts/replay_merge.py, 55件フル）で潰した:
+#
+#              ecr@5   ecr@10  ecr@20  ecr@50   候補列が変わった件数
+#   キーなし     0.745   0.806   0.850   0.895      —
+#   subquery_merge=rrf  0.734   0.815   0.852   0.873    55/55
+#   adaptive_depth      0.745   0.806   0.850   0.885    50/55
+#   両方（loop/stacked） 0.687   0.829   0.853   0.891    55/55
+#
+#   * `adaptive_depth` は 50/55 件で候補列を動かしておきながら ecr@5 / ecr@20 が
+#     基準と小数点3桁まで一致する。並びは変えるが gold の位置は1本も変えない。
+#   * `subquery_merge: rrf` は @20 が誤差幅（+0.2pt）で @50 が -2.2pt。
+#   * 2つ足すと ecr@5 が 0.687 まで落ちる（どちらの単独値よりも悪い＝相互作用）。
+#   * `title_protect` は単独で実測ゼロ（CLAUDE.md）。名指し28本が 28/28 gold・
+#     誤検出0という抽出精度なのに指標が動かないのは、28本全部が既に候補1〜4位に居るため。
+#
+# 残る未検証は `grounded_refine`（agent 側）と `rerank_blend`（search 側）の2つだけ。
+# **`grounded_refine` はサブクエリ自体が変わるので再生できない**——ここだけは
+# フル走行が要る。だから他の3キーは入れない（特に `subquery_merge` は上表のとおり
+# @50 を下げるので、足すと grounded_refine の寄与が読めなくなる）。
+#
+# `rerank_blend` のほうは search 側なので、この agent yaml をそのまま
+# chunk_attrfilter_k100_blend.yaml と組んで別に1本回す（そちらも差分1つになる）。
+#
+# 期待している効き方は 反復ループの grounded_refine のコメントのとおり:
+# `_refine()` はコーパスの反応を一度も見ておらず、材料が読解 LLM の `missing` だけ
+# なので、EasySpec を分光解析ソフトと誤解したまま暴走したり表記ゆれの総当たりに
+# 流れたりしていた。候補上位10本の `[venue year] title` と、上位に1本も残らなかった
+# サブクエリの名指しを渡す。**追加の LLM 呼び出しはゼロ**（プロンプトが太るだけ）。
+#
+# 組み合わせ: configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/chunk_attrfilter_k100.yaml
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  # 以下 expansion ブロックは reading_expand_rrf/rrf.yaml と完全に同一。
+  # 3ソースとも「違う gold」を拾うので併用する。候補圏外 gold 37本の回収は
+  # specter2 15 / 書誌結合 11 / 全文MLT 16 で、MLT だけが拾えたのが2本。
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }   # 共有1本だけのペアは汎用引用で繋がるので切る
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 50
+  anchors: 1
+  rrf_k: 60            # ソース間の融合（ランキングB の中）
+  combine: rrf         # ランキングA と B の統合
+  combine_rrf_k: 60
+  related_weight: 1.0  # 素の RRF（重み1.0・下駄なし）が最良
+  related_offset: 0
+params:
+  max_steps: 3
+  retrieve_top_k: 20
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10
+  # ここだけが rrf.yaml との差分。
+  grounded_refine: true
+  grounded_refine_top_n: 10

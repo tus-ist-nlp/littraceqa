@@ -1,0 +1,11 @@
+998論文で 3GPU 検証 (compile自動オフ・予算2048)
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.83it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  2.03it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:00,  2.05it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.23it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.88it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.45it/s]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.96it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:00<00:01,  2.07it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:00,  2.08it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.31it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:01<00:00,  3.05it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:01<00:00,  2.56it/s]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.85it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.99it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:00,  2.03it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:01<00:00,  2.19it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.91it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.45it/s]
+3GPUロード成功。クラッシュせず rerank を試す...
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+OK: 56.6秒 = 57ms/論文  VRAMピーク19.0GB
+  -> 55問x最大9retrieve の上限 7.8時間（早期打ち切りで実際はこれ以下）
+  返り値 20件、先頭 acl2025_02791

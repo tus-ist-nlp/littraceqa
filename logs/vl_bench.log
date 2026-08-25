@@ -1,0 +1,10 @@
+サンプル画像 64 枚
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/749 [00:00<?, ?it/s]Loading weights:   0%|          | 1/749 [00:00<01:29,  8.34it/s]Loading weights:   9%|▉         | 69/749 [00:00<00:01, 345.67it/s]Loading weights:  15%|█▍        | 110/749 [00:00<00:01, 364.18it/s]Loading weights:  20%|█▉        | 147/749 [00:00<00:01, 361.88it/s]Loading weights:  25%|██▍       | 187/749 [00:00<00:01, 367.35it/s]Loading weights:  30%|███       | 225/749 [00:00<00:01, 368.44it/s]Loading weights:  36%|███▌      | 267/749 [00:00<00:01, 365.89it/s]Loading weights:  42%|████▏     | 311/749 [00:00<00:01, 371.33it/s]Loading weights:  47%|████▋     | 352/749 [00:00<00:01, 382.21it/s]Loading weights:  52%|█████▏    | 391/749 [00:01<00:00, 363.49it/s]Loading weights:  97%|█████████▋| 724/749 [00:01<00:00, 1201.59it/s]Loading weights: 100%|██████████| 749/749 [00:01<00:00, 615.42it/s] 
+Default prompt name is set to 'default'. This prompt will be applied to all inference calls, except if a `prompt` or `prompt_name` parameter is provided.
+モデルロード: 11.5秒
+/tmp/claude-1009/-home-iseakira-littraceqa/fae28463-2a36-47fa-8868-da19670a6ca7/scratchpad/vl_bench.py:22: FutureWarning: The `get_sentence_embedding_dimension` method has been renamed to `get_embedding_dimension`.
+  print(f"  VRAM: {torch.cuda.memory_allocated(2)/1e9:.1f}GB / 次元: {model.get_sentence_embedding_dimension()}")
+  VRAM: 16.3GB / 次元: 4096
+  batch_size=4: 32枚 6.5秒 -> 4.9 枚/秒 / shape=(32, 4096) / ピークVRAM 18.0GB
+  batch_size=8: 32枚 6.2秒 -> 5.2 枚/秒 / shape=(32, 4096) / ピークVRAM 19.5GB

@@ -1,0 +1,10 @@
+プール: 1000チャンク / 14論文 / 平均995文字/チャンク
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  20%|██        | 1/5 [00:00<00:02,  1.80it/s]Loading checkpoint shards:  40%|████      | 2/5 [00:01<00:01,  1.73it/s]Loading checkpoint shards:  60%|██████    | 3/5 [00:01<00:01,  1.77it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:02<00:00,  1.99it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.60it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:02<00:00,  2.19it/s]
+You're using a Qwen2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/_inductor/compile_fx.py:322: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+代表テキスト: 14件 / 中央2989字 / p95 3533字 / max 3533字
+ウォームアップ(20チャンク,compile込み): 82.5秒
+★ 1回のrerank(1000チャンク=14論文): 107.3秒
+  = 1論文あたり 7667ms
+  agentは1問で最大9回retrieve -> 1問 16.1分 -> 55問 14.8時間

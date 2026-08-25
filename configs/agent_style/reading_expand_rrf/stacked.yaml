@@ -1,0 +1,94 @@
+# **いま足せるものを全部足した構成。** 同フォルダの rrf.yaml（現状のベスト）に
+# 反復ループの3キーと名指し保護を重ねる。
+#
+#   expansion  : 論文→論文の関連ランキングを検索ランキングと RRF 統合（論文単位）
+#   subquery_merge / grounded_refine / adaptive_depth : 反復ループの拡張（チャンク単位）
+#   title_protect : 統合後の候補列で、質問が名指しした論文を引き上げる
+#
+# レイヤが違うので同居できる（expansion はトップレベルのブロック、残りは params の
+# 任意キー）。実行順は _build_prediction のとおり:
+#
+#   _merged_results(subquery_merge) -> _rescore_pool(オフ) -> _combine_rrf(expansion)
+#   -> _apply_title_protect
+#
+# **title_protect は単独では実測ゼロだった**（55件中26件で発火し名指し28本は
+# 28/28 gold、誤検出0本。それでも指標が動かないのは28本すべてが既に候補1〜4位に
+# 居るため）。ここに入れてあるのは、**_combine_rrf がその順位を動かしうる**から。
+# ランキングB（論文→論文）は質問文を見ないので、名指しされた論文が
+# 「A にも B にも居るピア論文」に押し下げられる余地がある。保護は統合の**後**に
+# 効く（reading.py の _apply_title_protect の呼び出し位置）ので、その取りこぼしだけを
+# 拾う。発火しても順位が変わらなければコストは辞書ロード1回だけ（関係グラフと
+# 同じキャッシュを共有するので追加の走査は無い）。
+#
+# **pool_rescore は入れていない**（同じ理由 と同じ理由。
+# _rescore_pool がプールの並びを置き換えるので subquery_merge と食い合う）。
+#
+# **この組み合わせの実測はまだ無い。** 単独の数字（CLAUDE.md）は
+# expansion 3ソース RRF 統合で cr@20 0.879 / ecr@20 0.926 / multi@20 0.770 だが、
+# 足し合わせが加算的に効く保証は無い。expansion 部分だけなら
+# scripts/replay_expansion.py で、ループ側は scripts/replay_merge.py で先に振れる
+# （grounded_refine だけはサブクエリ自体が変わるので本走行が要る）。
+#
+# 候補幅を50にした版が要るなら retrieve_top_k / max_candidates を 50 にして、
+# per_index_k / pool_k = 1000 の search_style と組む（reading_expand_rrf/cand50.yaml と同じ）。
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+expansion:
+  # 3ソースとも「違う gold」を拾うので併用する。候補圏外 gold 37本の回収は
+  # specter2 15 / 書誌結合 11 / 全文MLT 16 で、MLT だけが拾えたのが2本。
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }   # 共有1本だけのペアは汎用引用で繋がるので切る
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 50
+  anchors: 1
+  rrf_k: 60            # ソース間の融合（ランキングB の中）
+
+  combine: rrf         # ランキングA と B の統合
+  combine_rrf_k: 60
+  # 素の RRF（重み1.0・下駄なし）が最良。reading_expand_rrf/rrf.yaml の実測どおり。
+  related_weight: 1.0
+  related_offset: 0
+params:
+  max_steps: 3
+  # **受け取る量は100件。** reranker の推論件数は search_style の pool_k で決まって
+  # いるので、ここを増やしても推論は1件も増えない（捨てていた分を拾うだけ）。
+  # 20 だと候補列が 50 枠に届かない: runs_fat.jsonl の実測で、全サブクエリを
+  # 統合しても中央54論文・**55件中24件（44%）が50本に足りない**。50 で10件、
+  # 100 なら4件まで減る。サブクエリ固定の再生でも @50 が効いた
+  # （cr@50 0.794 -> 0.808 -> 0.823 / ecr@50 0.873 -> 0.885 -> 0.895）。
+  # max_candidates は上げない。retrieve_top_k と違って**LLM が読む本数**で、
+  # 候補列（_build_prediction は merged から作る）には直接効かないうえ、
+  # 実測で悪化した: topk50(cand20) -> cand50 で paper_precision 0.782 -> 0.755 /
+  # evidence_f1 0.221 -> 0.158、paper_recall は +0.4pt しか増えない。
+  retrieve_top_k: 100
+  max_candidates: 20
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10
+  subquery_merge: rrf
+  subquery_rrf_k: 60
+  grounded_refine: true
+  grounded_refine_top_n: 10
+  adaptive_depth:
+    # **deep_k を retrieve_top_k と揃える。** adaptive_depth が有効なときは
+    # retrieve_top_k が読まれず deep_k が retriever に渡る（reading.py の _retrieve）
+    # ので、ここが 40 のままだと上で 100 にした意味が消える。
+    #
+    # この状態の adaptive_depth はほぼ素通しになる。実測（replay_merge, 55件）で
+    # gap_threshold 0.15 では shallow に落ちるのが **55件中2件**しかなく、
+    # 指標は deep_k=100 固定と完全に同一（ecr@20 0.850 / ecr@50 0.895）。
+    # 0.05 まで下げても14件で、@20 は動かない。落差は分岐の材料になっていない。
+    # deep_k を 40 に戻すと単に浅くなって @50 が落ちる（ecr@50 0.895 -> 0.885）。
+    enabled: true
+    probe_rank: 4
+    gap_threshold: 0.15
+    shallow_k: 10
+    deep_k: 100
+  title_protect:
+    enabled: true
+    max_papers: 4     # 引き上げる上限
+    promote_to: 10    # 引き上げ先の順位（1始まり）
+  pool_rescore: false
+  pool_prune_to: null

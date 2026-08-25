@@ -1,0 +1,18 @@
+
+Number of files: 2 (reg: 2)
+Number of created files: 2 (reg: 2)
+Number of deleted files: 0
+Number of regular files transferred: 2
+Total file size: 45,869,741,657 bytes
+Total transferred file size: 45,869,741,657 bytes
+Literal data: 45,869,741,657 bytes
+Matched data: 0 bytes
+File list size: 90
+File list generation time: 0.001 seconds
+File list transfer time: 0.000 seconds
+Total bytes sent: 62
+Total bytes received: 45,880,940,500
+
+sent 62 bytes  received 45,880,940,500 bytes  23,877,668.78 bytes/sec
+total size is 45,869,741,657  speedup is 1.00
+RSYNC_EXIT=0

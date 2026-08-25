@@ -1,0 +1,10 @@
+998論文で測定
+
+Traceback (most recent call last):
+  File "/tmp/claude-1009/-home-iseakira-littraceqa/6e8ebd51-4a21-4b06-967e-05ad45016649/scratchpad/profile3.py", line 20, in <module>
+    torch.cuda.reset_peak_memory_stats(3)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/home/iseakira/littraceqa/.venv/lib/python3.13/site-packages/torch/cuda/memory.py", line 376, in reset_peak_memory_stats
+    return torch._C._cuda_resetPeakMemoryStats(device)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+RuntimeError: Invalid device argument : did you call init?

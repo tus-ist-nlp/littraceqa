@@ -1,0 +1,54 @@
+# k100_paperrrf + Seed Expansion。**いま足せるものを両方足した版。**
+# 単独版は k100_paperrrf.yaml / k100_seed.yaml で、まずそちらを個別に測ってから
+# ここへ来ること（同時に入れると効果の切り分けができない）。
+#
+# 2つは同じ場所で噛み合う: Seed Expansion の「初回 × 拡張」の融合は
+# `self.fuser` に委ねてあるので、fuser が paper_rrf なら**その融合も論文単位**になる
+# （外部チームの推奨構成と同じ形）。
+per_index_k: 100
+pool_k: 200
+
+attribute_filter:
+  enabled: true
+  safety: 1.5
+  max_fetch_k: 3000
+  min_results: 10
+
+seed_expansion:
+  enabled: true
+  query_chars: 512
+
+indexers:
+  - name: bm25s
+    params: {}
+
+  - name: bm25s_paper
+    params: {}
+
+  - name: faiss_qwen3
+    index_name: faiss_qwen3_8b
+    params:
+      model: Qwen/Qwen3-Embedding-8B
+      devices: "cuda:0"
+      fp16: true
+      max_tokens: 8192
+      doc_prefix: "passage: "
+      query_prefix: "query: "
+      batch_size: 8
+
+fuser:
+  name: paper_rrf
+  params:
+    k: 60
+    chunks_per_paper: 3
+    weights: { bm25s: 1.0, bm25s_paper: 1.0, faiss_qwen3: 1.0 }
+
+reranker:
+  name: qwen3
+  params:
+    model: Qwen/Qwen3-Reranker-8B
+    devices: "cuda:1,cuda:2"
+    fp16: true
+    max_batch_tokens: 2048
+    batch_size: 4
+    max_tokens: 2048

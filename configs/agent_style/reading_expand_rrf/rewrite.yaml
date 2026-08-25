@@ -1,0 +1,88 @@
+# reading_expand_rrf/rrf.yaml + **検索結果に接地したクエリ書き換え**。
+# 仕様は docs/search_agent2_spec.md、実装は agent/rewrite.py。
+#
+# rrf.yaml との差分は3つだけ:
+#   1. `rewrite` ブロック（step1 以降、_refine() を書き換えに置き換える）
+#   2. `subquery_dedup` ブロック（本数を固定せず「中身が重ならない数」にする）
+#   3. `expansion.anchors` を 1 -> 3
+#
+# **なぜ _refine() を置き換えるのか。** _refine() の材料は読解 LLM の `missing`
+# だけで、コーパスが何を返したかを一度も見ない。その結果サブクエリが
+# ひとつの語彙ファミリーの言い換えに収束する。runs_fat.jsonl の leave-one-out
+# 実測では **step1 の305本は1本抜いても ecr@50 の gold が減らない（0/305）**
+# （step2 は 1/327、step0 は 4/180）。置き換え先として空いているのはそこ。
+#
+# LLM 呼び出し回数は rrf.yaml と同じ（_refine 1回 -> 書き換え1回）。
+# 検索回数はむしろ減る（重複除去が効くぶん）。
+
+name: reading
+llm: { name: azure_openai, params: { reasoning_effort: medium } }
+
+expansion:
+  sources:
+    - { name: specter2, index_name: faiss_specter2_abstract }
+    - { name: bib_coupling, min_shared: 2 }
+    - { name: bm25_mlt, query_chars: 1200 }
+  neighbors: 50
+  # **anchors: 1 では材料Bが成立しない。** ランキングA の top20 に入っていない
+  # multi の gold 26本のうち、B の上位5本に入るのは anchors=1 で0本・anchors=3 で5本
+  # （上位50本まで見ても 5本 vs 13本）。anchors=5 は replay_expansion の再生で
+  # 悪化した（ecr@20 0.892）ので 3。
+  anchors: 3
+  rrf_k: 60
+  combine: rrf
+  combine_rrf_k: 60
+  related_weight: 1.0
+  related_offset: 0
+
+# **書き換えは B の順位に手を触れない。** ランキングB は従来どおり reranker を
+# 通さずに _combine_rrf() へ渡る。ここで作るのは「B の語彙で reranker に問い直す
+# 別の検索」で、その結果は普通のサブクエリとして chunks に積まれる
+# ——だから展開由来の論文もチャンクを持ち、evidence に出られるようになる。
+rewrite:
+  enabled: true
+  at_step: 1
+  chunk_store: /data2/iseakira/pdfs/chunks/mineru_chunks.jsonl
+
+  from_a:
+    # 詳細ビュー: タイトル + abstract + **実際にヒットしたチャンク**。
+    # ヒットしたチャンクが要点で、「質問のどの側面に当たっているか」はそこにしか無い。
+    detail_papers: 5
+    hit_chunks_per_paper: 2
+    include_abstract: true
+    # 俯瞰ビュー: タイトルのみ。**5本の窓では分布の異常が分布に見えない**
+    # ——q_022 では上位5本に長文脈論文が1本しか無い（ノイズに見える）のに、
+    # 20本まで広げると10本が長文脈で軸ズレが一目で分かる。タイトルだけなので
+    # 追加コストはほぼゼロ。
+    listing_papers: 20
+
+  from_b:
+    # **本文チャンクは見せず本数を稼ぐ。** 欲しいのは「この論文は自分を何と呼ぶか」
+    # という語彙だけなので本文は要らない。abstract だけなら20本でも詳細5本ぶんと
+    # 同じ分量に収まる。
+    top_papers: 20
+    include_abstract: true
+    body_chunks_per_paper: 0
+
+# **本数を先に決めない。** LLM に N 本と指定しても返るのは言い回し違いの同じ
+# クエリになりがちで、そのぶん検索と reranker が空回りする。判定は
+# 「引いてくる論文が重なるか」で行う——文字列の重複では捕まえられない
+# （別語彙で別の論文を引くクエリは残すべきで、言い回し違いで同じ論文しか
+# 引かないクエリは捨てるべき）。
+#
+# 篩いは **BM25 だけ**で行う。本番の検索1本は reranker が pool_k 件を推論するが、
+# BM25 の引き当ては索引を1回叩くだけ。重複したクエリに reranker を1回も走らせない。
+subquery_dedup:
+  method: bm25_overlap
+  probe_k: 20
+  max_overlap: 0.7
+  max_queries: 4
+
+params:
+  max_steps: 3
+  retrieve_top_k: 20
+  max_candidates: 20     # 読解が読む本数。書き換え材料の5本とは別物
+  chunks_per_paper: 2
+  snippet_chars: 1800
+  paper_cutoff: llm
+  max_papers: 10
