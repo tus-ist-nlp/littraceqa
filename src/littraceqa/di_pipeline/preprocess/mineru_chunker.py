@@ -32,8 +32,20 @@ from pathlib import Path
 from markdownify import markdownify
 
 from littraceqa.di_pipeline.contracts import Chunk
-from littraceqa.di_pipeline.preprocess.figure_vlm import _extract_number
 from littraceqa.di_pipeline.registry import register
+
+# 図表番号の抽出。figure_vlm プリプロセッサを削除したので、唯一の利用者である
+# ここへ移した（`Figure 3` / `Table 12a` のような caption 先頭の番号を取る）。
+_VISIBLE_ID_RE = re.compile(r"(?:Figure|Table|Fig\.?)\s*(\d+[a-zA-Z]?)", re.IGNORECASE)
+
+
+def _extract_number(caption: str) -> str | None:
+    """caption から図表番号（例: "3", "12a"）を抽出する。マッチしなければ None。"""
+    if not caption:
+        return None
+    match = _VISIBLE_ID_RE.search(caption)
+    return match.group(1) if match else None
+
 
 # MinerU は採番済み数式を "$$ ... \tag{12} $$" の形で出す。
 _EQUATION_TAG_RE = re.compile(r"\\tag\{(\d+[a-zA-Z]?)\}")
