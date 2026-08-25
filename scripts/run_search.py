@@ -8,7 +8,7 @@
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --process configs/process_style/mineru.yaml \\
-      --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
+      --search configs/search_style/bm25_specter2_body_qwen3/qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl \\
@@ -18,7 +18,7 @@
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --process configs/process_style/mineru.yaml \\
-      --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
+      --search configs/search_style/bm25_specter2_body_qwen3/qwen3.yaml \\
       --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl
@@ -40,6 +40,7 @@ except ImportError:
     def tqdm(iterable, **kwargs):
         return iterable
 
+from littraceqa.common import config_label
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 from littraceqa.di_pipeline.config import build_pipeline, compose_config, load_config
 from littraceqa.di_pipeline.contracts import Chunk, Query
@@ -56,6 +57,105 @@ def load_papers(path: Path) -> list[dict]:
     return papers
 
 
+# 採点の基準になる gold。分割実行(val_a/val_b)の網羅率もこれで測る。
+GOLD_PATH = Path("data/validation.jsonl")
+
+
+def read_predictions(path: Path) -> dict[str, dict]:
+    """予測 jsonl を query_id -> レコードで読む。"""
+    records = {}
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            records[str(record.get("query_id", ""))] = record
+    return records
+
+
+def merge_predictions(output_path: Path, others: list[str]) -> tuple[Path, list[str]]:
+    """今回の予測に他の分割実行の予測を結合し、結合後のファイルパスを返す。
+
+    val_a(28件)/val_b(27件) のように分けて回すと、片側だけを 55件の gold に対して
+    採点することになり、全 macro 指標が網羅率のぶんだけ薄まる（val_a だけだと約半分）。
+    別構成との比較でその数字を使うと誤った結論になるので、もう片方が既にあるなら
+    結合してから採点する。query_id が衝突したときは今回の実行を優先する。
+    """
+    merged = read_predictions(output_path)
+    for other in others:
+        other_path = Path(other)
+        if not other_path.exists():
+            print(f"エラー: --merge-with に指定した {other_path} が存在しません", file=sys.stderr)
+            sys.exit(1)
+        records = read_predictions(other_path)
+        overlap = sorted(set(records) & set(merged))
+        if overlap:
+            print(
+                f"警告: {other_path} は今回の予測と {len(overlap)} 件重複しています"
+                f"（例: {', '.join(overlap[:3])}）。今回の実行の予測を優先します。",
+                file=sys.stderr,
+            )
+        for query_id, record in records.items():
+            merged.setdefault(query_id, record)
+
+    merged_path = output_path.with_name(f"{output_path.stem}_merged{output_path.suffix}")
+    with merged_path.open("w", encoding="utf-8") as f:
+        for _, record in sorted(merged.items()):
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"{len(merged)} 件に結合して {merged_path} に書き出しました（採点はこちらを使います）")
+    return merged_path, others
+
+
+def dump_runs(handle, query_id: str, runs: list) -> None:
+    """サブクエリ1本 = 1行で、検索が返した順位とスコアを書き出す。
+
+    テキストは載せない（chunk_id から chunk_store で引ける／土台ファイルが
+    数百MBになるため）。オフライン再生に要るのは順位とスコアだけ。
+    """
+    for run in runs:
+        handle.write(
+            json.dumps(
+                {
+                    "query_id": query_id,
+                    "step": run.step,
+                    "subquery": run.subquery,
+                    "results": [
+                        {
+                            "chunk_id": r.chunk_id,
+                            "paper_id": r.paper_id,
+                            "rank": rank,
+                            "score": r.score,
+                            "source": r.source,
+                        }
+                        for rank, r in enumerate(run.results, 1)
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
+def check_coverage(scored_path: Path) -> dict[str, Any]:
+    """採点対象が gold の何件を覆っているかを返し、欠けていれば警告する。"""
+    if not GOLD_PATH.exists():
+        return {}
+    gold_ids = set(read_predictions(GOLD_PATH))
+    pred_ids = set(read_predictions(scored_path))
+    covered = len(gold_ids & pred_ids)
+    total = len(gold_ids)
+    if covered < total:
+        print(
+            f"\n警告: gold {total}件のうち {covered}件しか予測がありません。"
+            f"macro 指標は約 {covered / total:.0%} に薄まった値になります。\n"
+            f"        残りの分割を回してから --merge-with {scored_path} を付けて実行すると"
+            f"{total}件で採点されます。この行の数字を別構成と比べないでください。\n",
+            file=sys.stderr,
+        )
+    return {"covered": covered, "gold_total": total}
+
+
 def load_chunks(path: Path) -> list[Chunk]:
     chunks = []
     with path.open(encoding="utf-8") as f:
@@ -69,35 +169,19 @@ def load_chunks(path: Path) -> list[Chunk]:
 
 # 本番の入力に実際に入っているフィールドはこの4つだけ（確定仕様）。
 # multiple_choice の options は**本番では与えられない**ので、ここには入れない。
-_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema")
+# `multiple_choice_options` は本番入力に実在する（`data/test_inputs.jsonl` 71件中50件）。
+# ただし `Query.from_dict` が読むのは `options`（validation の gold から結合する oracle 用）
+# なので、残しても Query には載らない——本番入力の定義を正しく保つためだけに並べてある。
+_PRODUCTION_FIELDS = (
+    "query_id",
+    "question",
+    "answer_types",
+    "multiple_choice_options",
+    "table_schema",
+)
 
 
-def load_mc_options(path: Path) -> dict[str, dict]:
-    """query_id -> multiple_choice の options だけを読む（gold は絶対に読まない）。
-
-    本番入力に options は無い（上記 _PRODUCTION_FIELDS）。よってこれを結合した実行は
-    「選択肢を教えてもらえたら何点取れるか」を見る **oracle 設定** であり、本番の点数
-    ではない。gold（正解の選択肢）は読まないので答えそのものの漏洩ではないが、
-    41/55 問が multiple_choice で、うち21問は freeform すら無い（選択肢が無いと
-    そもそも文字を決められない）ため、点数への影響は大きい。
-    """
-    options_map: dict[str, dict] = {}
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            mc = (record.get("answer") or {}).get("multiple_choice") or {}
-            options = mc.get("options") if isinstance(mc, dict) else None
-            if options:
-                options_map[record["query_id"]] = options
-    return options_map
-
-
-def load_queries(
-    path: Path, production_input: bool = False, options_path: Path | None = None
-) -> list[Query]:
+def load_queries(path: Path, production_input: bool = False) -> list[Query]:
     """クエリを読み込む。
 
     production_input=True にすると、本番入力に無いフィールド
@@ -106,14 +190,7 @@ def load_queries(
     本番入力には無い。task_family は提出論文数（cutoff）を決めるのに使うので、
     これを与えたまま評価すると「正解を教えてもらった状態」の点数になり、
     本番の点数と乖離する。比較実験ではこちらを使うこと。
-
-    options_path があれば multiple_choice の選択肢だけを結合する（gold は読まない）。
-    ただし本番入力に options は無いので、これは oracle 設定であり本番の点数ではない。
-    production_input=True のときに自動で結合してはいけない（--production-input は
-    本番と情報量を揃えるためのフラグなので、そこで本番に無い情報を足し戻すと
-    フラグの意味が消える）。呼び出し側で options_path を渡さないこと。
     """
-    options_map = load_mc_options(options_path) if options_path else {}
     queries = []
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -123,8 +200,6 @@ def load_queries(
             record = json.loads(line)
             if production_input:
                 record = {k: v for k, v in record.items() if k in _PRODUCTION_FIELDS}
-            if not record.get("options") and record["query_id"] in options_map:
-                record["options"] = options_map[record["query_id"]]
             queries.append(Query.from_dict(record))
     return queries
 
@@ -214,7 +289,8 @@ def log_experiment(
     n_queries: int,
     cfg: dict,
     retriever_obj: Any = None,
-    options_joined: bool = False,
+    coverage: dict | None = None,
+    merged_from: list[str] | None = None,
 ) -> None:
     """どの組み合わせで何点だったかを results/experiments.jsonl に追記する。
 
@@ -222,9 +298,8 @@ def log_experiment(
     全部同じ行に見えてしまい、後から「この数字はどのパラメータで出たのか」が
     追えない。compose_config() が解決した実際の値ごと残す。
 
-    options_joined は multiple_choice の選択肢を与えた oracle 実行かどうか。
-    本番では options が来ないので、True の行の multiple_choice_accuracy は
-    本番の点数として読んではいけない。後から見分けられるように残す。
+    coverage は gold の何件を採点できたか。分割実行を単独で採点した行は
+    macro が薄まっているので、後から比較対象に選ばないようここに残す。
     """
     path = Path("results/experiments.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,9 +311,10 @@ def log_experiment(
         "agent": args.agent,
         "queries": args.queries,
         "production_input": args.production_input,
-        "options_joined": options_joined,
         "n_queries": n_queries,
         "output": args.output,
+        **({"coverage": coverage} if coverage else {}),
+        **({"merged_from": merged_from} if merged_from else {}),
         "git_sha": git_sha(),
         "tuned_params": tuned_params(cfg, retriever_obj),
         "config": cfg,
@@ -250,9 +326,15 @@ def log_experiment(
 
 
 def _load_matching_experiments(
-    process: str, search: str, agent: str, limit: int = 3
+    process: str, search: str, agent: str, n_queries: int | None = None, limit: int = 3
 ) -> list[dict]:
-    """results/experiments.jsonl から同じ組み合わせの過去記録を、直近 limit 件取り出す。"""
+    """results/experiments.jsonl から同じ組み合わせの過去記録を、直近 limit 件取り出す。
+
+    n_queries を渡すと件数が同じ記録だけに絞る。分割実行(val_a 28件 / val_b 27件)は
+    同じ組み合わせの別の行として残るので、絞らないと「今回の実行の片割れ」を
+    前回として渡してしまい、LLM が存在しない改善(28件の薄まった値 -> 55件の値)を
+    書く。件数が違う行はそもそも比較対象にならない。
+    """
     path = Path("results/experiments.jsonl")
     if not path.exists():
         return []
@@ -263,12 +345,15 @@ def _load_matching_experiments(
             if not line:
                 continue
             record = json.loads(line)
-            if (record.get("process"), record.get("search"), record.get("agent")) == (
+            if (record.get("process"), record.get("search"), record.get("agent")) != (
                 process,
                 search,
                 agent,
             ):
-                matches.append(record)
+                continue
+            if n_queries is not None and record.get("n_queries") != n_queries:
+                continue
+            matches.append(record)
     return matches[-limit:]
 
 
@@ -281,7 +366,9 @@ def generate_comment(llm, args: argparse.Namespace, metrics: dict, n_queries: in
     if llm is None:
         return "(LLMコメントなし: このagent_styleはLLMを使用しない設定です)"
 
-    history = _load_matching_experiments(args.process, args.search, args.agent, limit=4)[:-1]
+    history = _load_matching_experiments(
+        args.process, args.search, args.agent, n_queries=n_queries, limit=4
+    )[:-1]
     history_text = "\n".join(
         f"- {record['timestamp']}: {json.dumps(record['metrics'], ensure_ascii=False)}"
         for record in history
@@ -312,12 +399,18 @@ def write_report(
     comment: str,
     cfg: dict,
     retriever_obj: Any = None,
-    options_joined: bool = False,
+    coverage: dict | None = None,
+    merged_from: list[str] | None = None,
 ) -> None:
-    """1回の実行につき、設定・指標・LLMコメントをまとめた Markdown を report/ に1枚書く。"""
-    process_name = Path(args.process).stem
-    search_name = Path(args.search).stem
-    agent_name = Path(args.agent).stem
+    """1回の実行につき、設定・指標・LLMコメントをまとめた Markdown を1枚書く。
+
+    クエリ1件ごとの診断は書かない（`scripts/audit_report.py` が作る単一HTMLに集約した）。
+    """
+    # agent_style はフォルダで分類してあるので、stem だけだと reading_loop/rrf と
+    # reading_expand_rrf/rrf が同じ "rrf" になる（config_label がフォルダ名を前に付ける）。
+    process_name = config_label(args.process)
+    search_name = config_label(args.search)
+    agent_name = config_label(args.agent)
     now = datetime.now()
 
     report_dir = Path("report")
@@ -333,16 +426,23 @@ def write_report(
         f"- process: `{args.process}`",
         f"- search: `{args.search}`",
         f"- agent: `{args.agent}`",
-        f"- queries: `{args.queries}` ({n_queries}件, production_input={args.production_input})",
+        f"- queries: `{args.queries}` (採点 {n_queries}件, "
+        f"production_input={args.production_input})",
         f"- output: `{args.output}`",
     ]
     sha = git_sha()
     if sha:
         lines.append(f"- git: `{sha[:12]}`")
-    if options_joined:
+    if merged_from:
         lines.append(
-            "- **[oracle] multiple_choice の選択肢を与えて実行**（本番入力に options は"
-            "無いため、multiple_choice_accuracy は本番の点数ではない）"
+            "- 分割実行を結合して採点: " + ", ".join(f"`{p}`" for p in merged_from)
+        )
+    if coverage and coverage["covered"] < coverage["gold_total"]:
+        lines.append(
+            f"- **警告: gold {coverage['gold_total']}件のうち {coverage['covered']}件しか"
+            f"予測が無い。** 下の macro 指標は約 {coverage['covered'] / coverage['gold_total']:.0%} に"
+            "薄まった値であり、他の構成と比較してはいけない。残りの分割を回して "
+            "`--merge-with` で結合し直すこと。"
         )
     # yaml は後から書き換わるので、レポート単体で「どの値で回したか」が分かるように
     # 解決済みのパラメータをここに焼き込む。
@@ -395,12 +495,24 @@ def main() -> None:
         "（比較実験ではこちらを使う）",
     )
     parser.add_argument(
-        "--options-file",
+        "--dump-runs",
         default=None,
-        help="[oracle] multiple_choice の options を結合する jsonl（gold は読まない）。"
-        "本番入力に options は無いので、これを付けた実行は「選択肢を教えてもらえたら"
-        "何点取れるか」を見る ablation であり本番の点数ではない。"
-        "--production-input との併用時は無視される。",
+        metavar="RUNS.JSONL",
+        help="サブクエリ1本ごとの検索結果（step / subquery / 上位チャンクの順位とスコア）を"
+        "書き出す。scripts/replay_merge.py がこれを土台に、サブクエリ間マージ・検索の深さ・"
+        "プールの剪定をオフラインで振れる（本走行4〜5時間に対して数十秒）。"
+        "土台にするなら retrieve_top_k を大きめ（例: reading_normal/fat.yaml の100）にして"
+        "1回だけ回す。",
+    )
+    parser.add_argument(
+        "--merge-with",
+        nargs="+",
+        default=[],
+        metavar="PREDICTIONS.JSONL",
+        help="他の分割実行の予測 jsonl を結合してから採点する。"
+        "val_a(28件)/val_b(27件) のように分けて回したとき、片側だけを 55件の gold に"
+        "採点すると macro が網羅率のぶん薄まる。2本目の実行にこれを付ければ"
+        "55件で採点された行が results/ と report/ に残る。",
     )
     args = parser.parse_args()
 
@@ -456,39 +568,28 @@ def main() -> None:
                 sys.exit(1)
         print("読み込み完了")
 
-    # multiple_choice の options の入手先を決める。本番入力に options は無いので、
-    # 結合するのは常に oracle 設定（--options-file を明示したときだけ）。
-    # --production-input との併用は矛盾（本番と揃えるフラグなのに本番に無い情報を足す）
-    # なので、その場合は結合しない。
-    options_path = Path(args.options_file) if args.options_file else None
-    if options_path is not None and args.production_input:
-        print(
-            "警告: --production-input と --options-file は併用できません"
-            "（本番入力に options は無い）。options の結合をスキップします。",
-            file=sys.stderr,
-        )
-        options_path = None
-    queries = load_queries(
-        Path(args.queries),
-        production_input=args.production_input,
-        options_path=options_path,
-    )
+    queries = load_queries(Path(args.queries), production_input=args.production_input)
     if args.production_input:
         print("本番と同じ4フィールド（query_id/question/answer_types/table_schema）で走らせます")
-    if options_path is not None:
-        n_opt = sum(1 for q in queries if q.options)
-        print(
-            f"[oracle] multiple_choice options を {options_path} から結合しました"
-            f"（{n_opt}件）。本番では与えられないので、この点数は本番の点数ではありません。"
-        )
     print(f"{len(queries)} 件の質問に対して検索中...")
+
+    # --dump-runs: サブクエリ1本ごとの検索結果を別ファイルに落とす。
+    # Prediction.trace には入れない（提出ファイルが膨らむため）。
+    # scripts/replay_merge.py がこれを土台に、マージ方法や深さをオフラインで振る。
+    runs_file = open(args.dump_runs, "w", encoding="utf-8") if args.dump_runs else None
 
     predictions = []
     for i, query in enumerate(queries):
         pred = agent.run(query)
         predictions.append(pred.to_dict())
+        if runs_file is not None:
+            dump_runs(runs_file, query.query_id, getattr(agent, "last_runs", []))
         if (i + 1) % 10 == 0:
             print(f"  {i + 1}/{len(queries)} 完了")
+
+    if runs_file is not None:
+        runs_file.close()
+        print(f"サブクエリ単位の検索結果を {args.dump_runs} に書き出しました")
 
     output_path = Path(args.output)
     with output_path.open("w", encoding="utf-8") as f:
@@ -496,29 +597,40 @@ def main() -> None:
             f.write(json.dumps(pred, ensure_ascii=False) + "\n")
     print(f"予測結果を {output_path} に書き出しました")
 
+    # 分割実行を単独で採点すると macro が薄まるので、結合できるなら結合してから採点する。
+    scored_path = output_path
+    merged_from: list[str] = []
+    if args.merge_with:
+        scored_path, merged_from = merge_predictions(output_path, args.merge_with)
+    coverage = check_coverage(scored_path)
+
     print("\n採点中...")
     result = subprocess.run(
         [
             "uv", "run", "python", "scripts/evaluate.py",
-            "--gold", "data/validation.jsonl",
-            "--pred", str(output_path),
+            "--gold", str(GOLD_PATH),
+            "--pred", str(scored_path),
         ],
         capture_output=True,
         text=True,
     )
-    print(result.stdout)
     if result.stderr:
         print(result.stderr, file=sys.stderr)
 
     try:
-        metrics = json.loads(result.stdout)["metrics"]
+        scored = json.loads(result.stdout)
+        metrics = scored["metrics"]
     except (json.JSONDecodeError, KeyError):
+        print(result.stdout)
         print("採点結果を解釈できなかったので実験ログには残しません", file=sys.stderr)
         return
-    options_joined = options_path is not None
-    log_experiment(args, metrics, len(queries), cfg, retriever, options_joined)
-    comment = generate_comment(getattr(agent, "llm", None), args, metrics, len(queries))
-    write_report(args, metrics, len(queries), comment, cfg, retriever, options_joined)
+    print(json.dumps({k: v for k, v in scored.items() if k != "per_query"},
+                     ensure_ascii=False, indent=2))
+    # 記録に残すのは「採点した件数」。結合したなら今回回した件数ではなく結合後の件数。
+    n_scored = coverage.get("covered", len(queries))
+    log_experiment(args, metrics, n_scored, cfg, retriever, coverage, merged_from)
+    comment = generate_comment(getattr(agent, "llm", None), args, metrics, n_scored)
+    write_report(args, metrics, n_scored, comment, cfg, retriever, coverage, merged_from)
 
 
 if __name__ == "__main__":
