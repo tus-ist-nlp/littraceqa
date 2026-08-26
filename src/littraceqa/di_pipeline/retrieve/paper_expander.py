@@ -60,6 +60,7 @@ import pickle
 import re
 from collections import Counter
 from pathlib import Path
+from typing import Protocol
 
 import bm25s
 import faiss
@@ -77,49 +78,18 @@ _PAPER_ID_RE = re.compile(r'"paper_id":\s*"([^"]+)"')
 # 字間が割れることがあるので、間の空白を許す。
 _ARXIV_RE = re.compile(r"ar\s*X\s*iv[:\s]*(\d{4}\.\d{4,5})")
 
-# ランキングA（質問→論文）とランキングB（論文→論文）を RRF 統合するときの設定。
-# 実際に統合するのは ReadingAgent（agent/reading.py の _combine_rrf）で、
-# ここは値の置き場所。全 expander が同じキーを受けられるようにしておく
-# （config.build_pipeline が expansion ブロックの設定を全ソースに配るため）。
-_COMBINE_DEFAULTS: dict = {
-    # 歴史的なキー。取り込み方は RRF 統合の1通りだけになったので**読まれない**
-    # （書いてあっても害は無いので、既存 yaml のために受けられるようにしてある）。
-    "combine": None,
-    "combine_rrf_k": 60,
-    # 素の RRF（重み1.0・下駄なし）が実測で最良。詳細は agent/reading.py の _combine_rrf。
-    "related_weight": 1.0,
-    # ランキングB の順位に足す下駄。B 単独の論文が入る深さを決める。
-    "related_offset": 0,
-    # True なら anchor（と融合ソース）ごとのランキングを潰さず別々に RRF へ渡す。
-    # 「複数の anchor が揃って推した論文」が項の数だけ加点される（= Consensus）。
-    # False（既定）なら従来どおり _interleave() で1本に潰す。
-    "consensus": False,
-    # ランキングB の起点をどこから取るか。None（既定）なら従来どおり
-    # 候補列の先頭 `anchors` 本。"verdict" なら **読解 LLM が根拠を確認した論文**
-    # （`_read_and_judge()` の paper_ids）を候補1位と合わせて起点にする。
-    # "score" なら **リランカのスコアが高い論文**を同じ役目に使う（LLM 不要）。
-    # 実装と実測は agent/reading.py の `_anchor_papers()`。
-    "anchor_from": None,
-    # `anchor_from: "score"` のしきい値。**検索エージェントを使わない構成のために
-    # 用意した、verdict の LLM 不要な代替**。reranker のスコアは yes 確率なので
-    # `anchor_score_min` は絶対値で解釈できる。`anchor_score_ratio` は1位比
-    # （reranker を使わない構成でも効くように）。両方書けば AND。
-    "anchor_score_min": None,
-    "anchor_score_ratio": None,
-    # 起点の本数上限（候補1位を含む）。**既定は上限なし**——`anchor_from: verdict`
-    # の実測はすべて無制限で採ったものなので、既定値で切ると検証済みの構成
-    # （notable など）の挙動が変わってしまう。`anchor_from: score` では
-    # しきい値次第で何本でも残るため、そちらの yaml では必ず明示する。
-    "anchor_max": None,
-}
+class PaperExpander(Protocol):
+    """論文→論文の近さで「起点に似た論文」を順位付けする（ランキングB）。
 
+    **起点（anchor）は呼び出し側が決めて渡す。** どの論文を起点にするかは
+    A/B 統合の判断（`agent/reading.py` の `_anchor_papers`）なので、expander は
+    「渡された起点の近傍を返す」ことだけを担う。
 
-def _set_combine(expander: object, kwargs: dict) -> None:
-    unknown = set(kwargs) - set(_COMBINE_DEFAULTS)
-    if unknown:
-        raise TypeError(f"unknown expander params: {sorted(unknown)}")
-    for key, default in _COMBINE_DEFAULTS.items():
-        setattr(expander, key, kwargs.get(key, default))
+    返り値から**既存候補を除外しない**。既存候補と重なる論文こそ RRF 統合での
+    加点対象なので、ここで落とすと統合の意味が消える（`_combine_rrf` 参照）。
+    """
+
+    def rank(self, anchors: list[str]) -> list[str]: ...
 
 
 def _interleave(
@@ -142,19 +112,11 @@ def _interleave(
 
 @register("expander", "specter2")
 class Specter2PaperExpander:
-    """候補上位 anchors 本の近傍 neighbors 本を、候補列の末尾に足す。"""
+    """SPECTER2(proximity) 埋め込みの近傍。構築済みの faiss 索引をそのまま読む。"""
 
-    def __init__(
-        self,
-        index_dir: str,
-        neighbors: int = 20,
-        anchors: int = 1,
-        **combine_kwargs,
-    ):
-        _set_combine(self, combine_kwargs)
+    def __init__(self, index_dir: str, neighbors: int = 20):
         self.index_dir = Path(index_dir)
         self.neighbors = neighbors
-        self.anchors = anchors
         # 索引のロードは初回 rank() まで遅延する（--build だけの実行や
         # テストで索引が無くても構築できるように）。
         self._index: faiss.Index | None = None
@@ -176,16 +138,16 @@ class Specter2PaperExpander:
                     self._pid_of[row] = paper_id
                     self._chunk_of[paper_id] = chunk
 
-    def _pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
+    def _pools(self, anchors: list[str]) -> list[list[str]]:
         """anchor ごとの近傍リスト（近い順）。"""
-        if not ranked_paper_ids:
+        if not anchors:
             return []
         if self._index is None:
             self._load()
         assert self._index is not None
 
         pools: list[list[str]] = []
-        for anchor in ranked_paper_ids[: self.anchors]:
+        for anchor in anchors:
             row = self._row_of.get(anchor)
             if row is None:
                 continue
@@ -200,23 +162,8 @@ class Specter2PaperExpander:
             )
         return pools
 
-    def rank(self, ranked_paper_ids: list[str]) -> list[str]:
-        """anchor の近傍を関連度順に返す（**既存候補を除外しない**）。
-
-        既存候補と重なる論文こそ RRF 統合での加点対象なので、こちらは落とさない
-        （`combine: rrf` 用。詳細は agent/reading.py の `_combine_rrf`）。
-        """
-        return _interleave(self._pools(ranked_paper_ids), self.neighbors)
-
-    def rank_pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
-        """anchor ごとのランキングを**潰さずに**返す（`consensus: true` 用）。
-
-        `rank()` は `_interleave()` で1本にするので、2本の anchor が同じ論文を
-        推しても候補列には1回しか現れず、「揃って推した」という情報が消える。
-        RRF は同じ論文が複数のランキングに出れば項の数だけ加点するので、
-        潰さずに渡せば合意がそのまま信号になる。
-        """
-        return [pool[: self.neighbors] for pool in self._pools(ranked_paper_ids)]
+    def rank(self, anchors: list[str]) -> list[str]:
+        return _interleave(self._pools(anchors), self.neighbors)
 
     def text_of(self, paper_id: str) -> str:
         """rerank に渡す代表テキスト（title+abstract）。無ければ空文字。"""
@@ -243,15 +190,11 @@ class BibCouplingExpander:
         chunks: str,
         cache_path: str,
         neighbors: int = 20,
-        anchors: int = 1,
         min_shared: int = 2,
-        **combine_kwargs,
     ):
-        _set_combine(self, combine_kwargs)
         self.chunks_path = Path(chunks)
         self.cache_path = Path(cache_path)
         self.neighbors = neighbors
-        self.anchors = anchors
         # 共有文献がこの本数未満のペアは切る。1本だけの共有は汎用的な引用
         # （Adam, ResNet 等）で繋がってしまい、ノイズにしかならない。
         self.min_shared = min_shared
@@ -328,20 +271,16 @@ class BibCouplingExpander:
         # 40%強のクエリが実行のたびに入れ替わり、cr@20 が 0.4pt ぶれた。
         return sorted(scores, key=lambda p: (-scores[p], p))[: self.neighbors]
 
-    def _pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
-        if not ranked_paper_ids:
+    def _pools(self, anchors: list[str]) -> list[list[str]]:
+        if not anchors:
             return []
         if self._refs is None:
             self._load()
-        return [self._neighbors(a) for a in ranked_paper_ids[: self.anchors]]
+        return [self._neighbors(a) for a in anchors]
 
-    def rank(self, ranked_paper_ids: list[str]) -> list[str]:
-        """書誌結合の近さ順（**既存候補を除外しない**）。`combine: rrf` 用。"""
-        return _interleave(self._pools(ranked_paper_ids), self.neighbors)
-
-    def rank_pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
-        """anchor ごとのランキングを潰さずに返す（`consensus: true` 用）。"""
-        return [pool[: self.neighbors] for pool in self._pools(ranked_paper_ids)]
+    def rank(self, anchors: list[str]) -> list[str]:
+        """書誌結合の近さ順。"""
+        return _interleave(self._pools(anchors), self.neighbors)
 
     def text_of(self, paper_id: str) -> str:
         if self._refs is None:
@@ -397,18 +336,14 @@ class BM25MLTExpander:
         index_dir: str,
         cache_path: str,
         neighbors: int = 20,
-        anchors: int = 1,
         # anchor のクエリに使う先頭文字数。title+abstract を覆う程度に取る
         # （短い abstract では本文の冒頭まで入るが、MLT のクエリとしては害がない）。
         query_chars: int = 1200,
-        **combine_kwargs,
     ):
         self.index_dir = Path(index_dir)
         self.cache_path = Path(cache_path)
         self.neighbors = neighbors
-        self.anchors = anchors
         self.query_chars = query_chars
-        _set_combine(self, combine_kwargs)
         self._bm25 = None
         self._pids: list[str] = []
         self._text: dict[str, str] = {}
@@ -457,20 +392,16 @@ class BM25MLTExpander:
             if 0 <= int(i) < len(self._pids) and self._pids[int(i)] != paper_id
         ]
 
-    def _pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
-        if not ranked_paper_ids:
+    def _pools(self, anchors: list[str]) -> list[list[str]]:
+        if not anchors:
             return []
         if self._bm25 is None:
             self._load()
-        return [self._neighbors(a) for a in ranked_paper_ids[: self.anchors]]
+        return [self._neighbors(a) for a in anchors]
 
-    def rank(self, ranked_paper_ids: list[str]) -> list[str]:
-        """全文 BM25 の近さ順（**既存候補を除外しない**）。`combine: rrf` 用。"""
-        return _interleave(self._pools(ranked_paper_ids), self.neighbors)
-
-    def rank_pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
-        """anchor ごとのランキングを潰さずに返す（`consensus: true` 用）。"""
-        return [pool[: self.neighbors] for pool in self._pools(ranked_paper_ids)]
+    def rank(self, anchors: list[str]) -> list[str]:
+        """全文 BM25 の近さ順。"""
+        return _interleave(self._pools(anchors), self.neighbors)
 
     def text_of(self, paper_id: str) -> str:
         if self._bm25 is None:
@@ -489,12 +420,10 @@ class FusedPaperExpander:
 
     def __init__(
         self,
-        sources: list,
+        sources: list[PaperExpander],
         neighbors: int = 20,
         rrf_k: int = 60,
-        **combine_kwargs,
     ):
-        _set_combine(self, combine_kwargs)
         self.sources = sources
         self.neighbors = neighbors
         self.rrf_k = rrf_k
@@ -507,29 +436,9 @@ class FusedPaperExpander:
         ordered = sorted(scores, key=lambda p: -scores[p])
         return ordered[: self.neighbors]
 
-    def rank(self, ranked_paper_ids: list[str]) -> list[str]:
-        """各ソースの rank()（**既存候補を落とさない**側）を RRF 融合する。
-
-        既存候補と重なる論文こそ統合での加点対象なので、ここで落としてはいけない
-        （詳細は agent/reading.py の `_combine_rrf`）。
-        """
-        return self._fuse([s.rank(ranked_paper_ids) for s in self.sources])
-
-    def rank_pools(self, ranked_paper_ids: list[str]) -> list[list[str]]:
-        """各ソースの anchor 別ランキングを**連結して**返す（`consensus: true` 用）。
-
-        ソース間の RRF 融合（`_fuse`）も通さない。ソースをまたいで同じ論文が
-        出ることも「合意」なので、統合側（`_combine_rrf`）に1本ずつ渡して
-        まとめて数えさせる。ソース3 × anchor3 なら9本になるので、
-        B 側の重みは本数で正規化される（agent/reading.py の `_combine_rrf`）。
-        """
-        pools: list[list[str]] = []
-        for source in self.sources:
-            if hasattr(source, "rank_pools"):
-                pools.extend(source.rank_pools(ranked_paper_ids))
-            else:
-                pools.append(source.rank(ranked_paper_ids))
-        return [pool for pool in pools if pool]
+    def rank(self, anchors: list[str]) -> list[str]:
+        """各ソースの近傍ランキングを RRF 融合する。"""
+        return self._fuse([source.rank(anchors) for source in self.sources])
 
     def text_of(self, paper_id: str) -> str:
         for source in self.sources:

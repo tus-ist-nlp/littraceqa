@@ -202,7 +202,13 @@ cutoff で落ちた論文の evidence は出さない。
 質問から推定しても正解率0.67程度で当てにならない。本数決定の経路から
 task_family を外し、LLM の `sufficient` 判定だけに寄せた。
 
-## 主要パラメータ（`agent_style/reading.yaml`）
+## 主要パラメータ（`ReadingConfig`）
+
+yaml の `agent.params` は `ReadingConfig`（`agent/reading.py`）になる。**どの param が
+存在するかの定義はこの dataclass だけ**で、`ReadingConfig.from_params()` が未知のキーを
+名前を挙げて弾く（綴り間違いや削除済みフラグを書いた古い yaml が、既定値のまま黙って
+走ることがない）。`ReadingAgent.__init__` が名前付きで受けるのは協働オブジェクト
+（`retriever` / `llm` / `paper_expander`）だけ。
 
 | param | 既定 | 意味 |
 |---|---|---|

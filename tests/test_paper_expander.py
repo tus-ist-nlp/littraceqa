@@ -43,26 +43,27 @@ def index_dir(tmp_path: Path) -> Path:
 
 
 def test_rank_returns_neighbors_in_order(index_dir: Path) -> None:
-    expander = Specter2PaperExpander(str(index_dir), neighbors=3, anchors=1)
-    # anchor 自身（p0）は近傍に入らない。既存候補の p1 は落とさない（統合での加点源）。
-    assert expander.rank(["p0", "p1"]) == ["p1", "p2", "p3"]
+    expander = Specter2PaperExpander(str(index_dir), neighbors=3)
+    # anchor 自身（p0）は近傍に入らない。**渡されたリストは全部 anchor**なので、
+    # 「既存候補を落とさない」は expander が候補列を見ないことで構造的に保たれる。
+    assert expander.rank(["p0"]) == ["p1", "p2", "p3"]
 
 
 def test_rank_unknown_anchor_is_silent(index_dir: Path) -> None:
-    expander = Specter2PaperExpander(str(index_dir), neighbors=3, anchors=1)
+    expander = Specter2PaperExpander(str(index_dir), neighbors=3)
     assert expander.rank(["unknown_paper"]) == []
     assert expander.rank([]) == []
 
 
 def test_rank_multi_anchor_interleaves_by_rank(index_dir: Path) -> None:
-    expander = Specter2PaperExpander(str(index_dir), neighbors=3, anchors=2)
+    expander = Specter2PaperExpander(str(index_dir), neighbors=3)
     # anchor p0 の近傍: p1,p2,p3 / anchor p4 の近傍: p3,p2,p1
     # 交互配置: rank0 -> p1(p0側), p3(p4側), rank1 -> p2 ... 重複は除去。
     assert expander.rank(["p0", "p4"]) == ["p1", "p3", "p2"]
 
 
 def test_rank_caps_at_neighbors(index_dir: Path) -> None:
-    expander = Specter2PaperExpander(str(index_dir), neighbors=2, anchors=2)
+    expander = Specter2PaperExpander(str(index_dir), neighbors=2)
     assert len(expander.rank(["p0", "p4"])) <= 2
 
 

@@ -57,7 +57,7 @@ from littraceqa.di_pipeline import registry
 # APIキー等はリポジトリ直下の .env から読む（コードにも yaml にも書かない）。
 # 既に export されている環境変数は上書きしない。
 load_dotenv(ROOT / ".env")
-from littraceqa.di_pipeline.agent.reading import ReadingAgent  # noqa: F401
+from littraceqa.di_pipeline.agent.reading import CombineConfig, ReadingAgent  # noqa: F401
 from littraceqa.di_pipeline.index.bm25_index import BM25Index  # noqa: F401
 from littraceqa.di_pipeline.index.bm25_paper_index import BM25PaperIndex  # noqa: F401
 from littraceqa.di_pipeline.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: F401
@@ -190,53 +190,61 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
     }
 
 
-def build_paper_expander(agent_cfg: dict):
-    """agent_cfg の expansion ブロックから論文→論文展開を組み立てる。無ければ None。
+# expansion ブロックのうち、A/B 統合（ReadingAgent 側）が使うキー。
+# 残りは expander 自身のパラメータ（neighbors / rrf_k / ソース固有）。
+_COMBINE_KEYS = {
+    "anchors": "anchors",
+    "combine_rrf_k": "rrf_k",
+    "related_weight": "related_weight",
+    "related_offset": "related_offset",
+    "anchor_from": "anchor_from",
+}
+
+
+def build_paper_expander(agent_cfg: dict) -> tuple[Any, CombineConfig]:
+    """agent の expansion ブロックを、展開器と A/B 統合の設定に振り分ける。
+
+    **どちらが何を使うかをここで1回だけ決める。** 展開器は「渡された起点の近傍を
+    返す」だけ、統合の重みや起点の決め方は ReadingAgent の持ち物なので、
+    yaml の1ブロックを2つの宛先に配る場所が要る。
 
     ソースが1つならそのまま、複数なら RRF 融合する FusedPaperExpander で包む。
-    索引もLLMも要らないので、scripts/replay_expansion.py はここだけを呼んで
-    オフラインで展開・統合をやり直せる。
     """
-    expansion_cfg = agent_cfg.get("expansion")
+    expansion_cfg = dict(agent_cfg.get("expansion") or {})
     if not expansion_cfg:
-        return None
+        return None, CombineConfig()
 
-    expansion_cfg = dict(expansion_cfg)
     source_cfgs = expansion_cfg.pop("sources", [])
-    # 統合まわりの設定は全ソースに配る（単一ソース時はそのまま効く）。
-    shared = {
-        key: expansion_cfg[key]
-        for key in (
-            "neighbors",
-            "anchors",
-            # A（質問→論文）と B（論文→論文）の RRF 統合。ソース側では使わないが、
-            # 単一ソース構成でも ReadingAgent が読めるように同じ経路で配る。
-            "combine",
-            "combine_rrf_k",
-            "related_weight",
-            "related_offset",
-            # anchor / ソースごとのランキングを潰さず RRF に渡す（Consensus）。
-            "consensus",
-            # ランキングB の起点を読解 LLM の確認済み論文から取る。
-            # "score" ならリランカのスコアで代替する（LLM 不要＝エージェント抜き用）。
-            "anchor_from",
-            "anchor_score_min",
-            "anchor_score_ratio",
-            "anchor_max",
+    combine = CombineConfig(
+        **{
+            field: expansion_cfg.pop(key)
+            for key, field in _COMBINE_KEYS.items()
+            if key in expansion_cfg
+        }
+    )
+    # 残りは展開器のもの。未知のキーは黙って捨てず名前を挙げる
+    # （綴り間違いが既定値のまま走ると、効いていない設定で実験してしまう）。
+    unknown = sorted(set(expansion_cfg) - {"neighbors", "rrf_k"})
+    if unknown:
+        raise ValueError(
+            f"unknown expansion keys: {unknown}. "
+            f"valid: {sorted(set(_COMBINE_KEYS) | {'sources', 'neighbors', 'rrf_k'})}"
         )
-        if key in expansion_cfg
-    }
+    neighbors = expansion_cfg.get("neighbors")
+    shared = {} if neighbors is None else {"neighbors": neighbors}
+
     sources = [
         registry.build("expander", s["name"], **{**shared, **s.get("params", {})})
         for s in source_cfgs
     ]
     if len(sources) == 1:
-        return sources[0]
-    return FusedPaperExpander(
+        return sources[0], combine
+    fused = FusedPaperExpander(
         sources=sources,
-        **{k: v for k, v in shared.items() if k != "anchors"},
+        **shared,
         **{k: v for k, v in expansion_cfg.items() if k == "rrf_k"},
     )
+    return fused, combine
 
 
 def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
@@ -264,10 +272,11 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
     if llm_cfg:
         llm_kwargs["llm"] = registry.build("llm", llm_cfg["name"], **llm_cfg.get("params", {}))
 
-    # 論文→論文展開（agent yaml の expansion ブロック）。無ければ従来どおり。
-    expander = build_paper_expander(agent_cfg)
+    # 論文→論文展開（agent yaml の expansion ブロック）。無ければ候補列は検索の順位のまま。
+    expander, combine = build_paper_expander(agent_cfg)
     if expander is not None:
         llm_kwargs["paper_expander"] = expander
+        llm_kwargs["combine"] = combine
 
     # 属性フィルタ（会議名・年）。設定が無い / enabled: false なら無効のまま。
     attribute_cfg = cfg["retriever"].get("attribute_filter") or {}

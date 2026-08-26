@@ -25,7 +25,6 @@ expansion:
   neighbors: 100
   anchors: 1
   rrf_k: 60
-  combine: rrf
   combine_rrf_k: 10
   anchor_from: verdict
   related_weight: 1.0

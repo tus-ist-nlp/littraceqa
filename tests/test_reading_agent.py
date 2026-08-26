@@ -6,11 +6,18 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
+import yaml
 
-from littraceqa.di_pipeline.agent.reading import CANDIDATE_PAPERS_LIMIT, ReadingAgent
+from littraceqa.di_pipeline.agent.reading import (
+    CANDIDATE_PAPERS_LIMIT,
+    CombineConfig,
+    ReadingAgent,
+    ReadingConfig,
+)
 from littraceqa.di_pipeline.contracts import Query, RetrievalResult
 from littraceqa.di_pipeline.llm.fake import FakeLLM
 
@@ -482,33 +489,27 @@ def test_no_expander_means_identical_behavior():
 
 
 class _StubRelated:
-    """関連ランキング（B）のスタブ。rank() は既存候補も含めた順位を返す。"""
-
-    combine = "rrf"
-    combine_rrf_k = 60
-    related_weight = 1.0
-    related_offset = 0
-    anchors = 1
+    """関連ランキング（B）のスタブ。**起点は引数で受け取り、設定は持たない。**"""
 
     def __init__(self, ranking: list[str]):
         self.ranking = ranking
+        self.anchor_calls: list[list[str]] = []
 
-    def rank(self, ranked: list[str]) -> list[str]:
+    def rank(self, anchors: list[str]) -> list[str]:
         # 本物の expander と同じく anchor 自身は近傍に含めない。
-        return [p for p in self.ranking if p != ranked[0]]
+        self.anchor_calls.append(list(anchors))
+        return [p for p in self.ranking if p not in anchors]
 
 
-def _rrf_agent(ranking: list[str], **kwargs) -> ReadingAgent:
-    expander = _StubRelated(ranking)
-    for key, value in kwargs.items():
-        setattr(expander, key, value)
+def _rrf_agent(ranking: list[str], **combine_kwargs) -> ReadingAgent:
     return ReadingAgent(
         _StubRetriever(),
         llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
         max_steps=1,
         retrieve_top_k=5,
         max_candidates=2,
-        paper_expander=expander,
+        paper_expander=_StubRelated(ranking),
+        combine=CombineConfig(**combine_kwargs),
         paper_cutoff="llm",
         max_papers=1,
     )
@@ -538,67 +539,41 @@ def test_combine_rrf_keeps_the_anchor_on_top():
     assert prediction.candidate_papers[0] == "p0"
 
 
+def test_expander_receives_only_the_anchors():
+    """**起点を決めるのは agent 側。** expander には候補列ではなく起点だけを渡す。
+
+    以前は候補列をまるごと渡し、expander が先頭 `anchors` 本を自分で切っていた。
+    起点を差し替えるたびに expander の `anchors` 属性を書き換えて戻す必要があり、
+    「誰が起点を決めるのか」が2つのオブジェクトに割れていた。
+    """
+    expander = _StubRelated(["pE1"])
+    agent = ReadingAgent(
+        _StubRetriever(), llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
+        max_steps=1, retrieve_top_k=5, max_candidates=2, paper_expander=expander,
+    )
+    agent.run(_query())
+    # 候補列は p0..p4 だが、渡るのは起点1本だけ。
+    assert expander.anchor_calls == [["p0"]]
+
+
+def test_verdict_anchor_adds_the_llm_confirmed_papers():
+    """`anchor_from: verdict` は候補1位に読解 LLM の確認済み論文を足す。"""
+    expander = _StubRelated(["pE1"])
+    agent = ReadingAgent(
+        _StubRetriever(), llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p1"], sufficient=True)]),
+        max_steps=1, retrieve_top_k=5, max_candidates=2, paper_expander=expander,
+        combine=CombineConfig(anchor_from="verdict"),
+    )
+    agent.run(_query())
+    # 候補1位（p0）は必ず残す。外すと single の cr@1 が落ちる。
+    assert expander.anchor_calls == [["p0", "p1"]]
+
+
 def test_combine_rrf_offset_pushes_b_only_papers_down():
     """related_offset は B 単独の論文が入る深さを決める（既定0 = 素の RRF）。"""
     shallow = _rrf_agent(["pE1"]).run(_query()).candidate_papers
     deep = _rrf_agent(["pE1"], related_offset=10).run(_query()).candidate_papers
     assert shallow.index("pE1") < deep.index("pE1")
-
-
-class _StubPools(_StubRelated):
-    """anchor ごとのランキングを潰さずに返す expander（consensus: true 用）。"""
-
-    consensus = True
-    anchors = 2
-
-    def __init__(self, pools: list[list[str]]):
-        super().__init__(pools[0])
-        self.pools = pools
-
-    def rank_pools(self, ranked: list[str]) -> list[list[str]]:
-        anchors = set(ranked[: self.anchors])
-        return [[p for p in pool if p not in anchors] for pool in self.pools]
-
-
-def test_consensus_prefers_papers_backed_by_several_pools():
-    """複数の pool が揃って推した論文が、1つの pool だけの論文より上に来る。
-
-    _interleave() で1本に潰していたときは作れなかった動き（重複が消えるため）。
-    """
-    # pE1 は両方の pool に居る（2項）。pE2 は片方の1位にしか居ない（1項）。
-    expander = _StubPools([["pE1", "pE2"], ["pE1", "pE3"]])
-    agent = ReadingAgent(
-        _StubRetriever(),
-        llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
-        paper_expander=expander,
-    )
-    candidates = agent.run(_query()).candidate_papers
-    assert candidates.index("pE1") < candidates.index("pE2")
-    assert candidates.index("pE1") < candidates.index("pE3")
-
-
-def test_consensus_off_is_the_existing_path():
-    """consensus を書かなければ rank_pools があっても使わない（既定経路の保全）。"""
-    pools = [["pE1", "pE2"], ["pE1", "pE3"]]
-    on = _StubPools(pools)
-    off = _StubPools(pools)
-    off.consensus = False
-    # consensus オフ側は rank()（= pools[0] 相当）だけを見るので pE3 が入らない。
-    def _run(expander):
-        return ReadingAgent(
-            _StubRetriever(),
-            llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
-            max_steps=1,
-            retrieve_top_k=5,
-            max_candidates=2,
-            paper_expander=expander,
-        ).run(_query()).candidate_papers
-
-    assert "pE3" in _run(on)
-    assert "pE3" not in _run(off)
 
 
 def _two_subquery_retriever():
@@ -658,6 +633,54 @@ def test_submission_is_the_candidate_ranking_not_the_llm_selection():
     assert [e.paper_id for e in prediction.evidence] == ["p5"]
 
 
+# ---- 設定（ReadingConfig）--------------------------------------------------
+
+
+def test_config_rejects_unknown_params_by_name():
+    """yaml の綴り間違いを既定値のまま黙って走らせない。
+
+    `agent.params` は registry.build が **kwargs で展開してくるので、キーの正しさを
+    見張れるのは ReadingConfig だけ。削除済みの ablation フラグを書いた古い yaml も
+    ここで止まる（黙って無視されると、効いていない設定で実験してしまう）。
+    """
+    with pytest.raises(ValueError, match=r"unknown agent params: \['retrive_top_k'\]"):
+        ReadingConfig.from_params({"retrive_top_k": 20})
+    # エラーには正しいキーの一覧が入る。
+    with pytest.raises(ValueError, match="valid params:.*retrieve_top_k"):
+        ReadingAgent(_StubRetriever(), llm=FakeLLM(responses=[]), retrive_top_k=20)
+
+
+def test_config_is_frozen_and_normalizes_list_params():
+    """設定は不変。yaml がリストで書く項目はタプルに寄せる。"""
+    config = ReadingConfig.from_params({"paper_score_skip_chunk_types": ["table"]})
+    assert config.paper_score_skip_chunk_types == ("table",)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        config.max_steps = 99
+
+
+def test_config_can_be_passed_as_an_object():
+    """設定オブジェクトを直接渡せる（個別 params との併用は弾く）。"""
+    agent = ReadingAgent(
+        _StubRetriever(), llm=FakeLLM(responses=[]), config=ReadingConfig(max_steps=1)
+    )
+    assert agent.config.max_steps == 1
+    with pytest.raises(ValueError, match="同時に渡せない"):
+        ReadingAgent(
+            _StubRetriever(), llm=FakeLLM(responses=[]),
+            config=ReadingConfig(), max_steps=1,
+        )
+
+
+def test_production_config_params_all_resolve():
+    """最終構成の yaml が書く params が1つ残らず ReadingConfig に載る。"""
+    params = yaml.safe_load(
+        open("configs/agent_style/reading_expand_rrf/notable.yaml", encoding="utf-8")
+    )["params"]
+    config = ReadingConfig.from_params(params)
+    assert config.paper_cutoff == "llm"
+    assert config.paper_score_skip_chunk_types == ("table",)
+
+
 def test_decompose_asks_for_a_fixed_number_of_subqueries():
     """分解の件数は task_family で振り分けず SUBQUERY_COUNT 本に固定する。
 
@@ -694,62 +717,3 @@ def test_decompose_does_not_call_the_task_family_classifier():
     assert len(llm.calls) == 2  # 分解1 + 読解1 だけ
     assert "task_family" not in llm.calls[0]
 
-
-# ---- LLM 不要の起点（anchor_from: score） ----------------------------------
-
-
-def _anchor_agent(**expander_attrs) -> ReadingAgent:
-    """`_anchor_papers()` だけを見るための最小構成。"""
-    expander = _StubRelated([])
-    for key, value in expander_attrs.items():
-        setattr(expander, key, value)
-    return ReadingAgent(
-        _StubRetriever(),
-        llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
-        max_steps=1,
-        paper_expander=expander,
-    )
-
-
-def test_score_anchor_picks_papers_above_the_threshold():
-    """読解を走らせない構成では verdict が無いので、リランカのスコアで代替する。"""
-    agent = _anchor_agent(anchor_from="score", anchor_score_min=0.99, anchor_max=None)
-    anchors = agent._anchor_papers(
-        ["p0", "p1", "p2", "p3"],
-        verdict_papers=None,
-        paper_scores={"p0": 0.999, "p1": 0.995, "p2": 0.5, "p3": 0.9999},
-    )
-    # しきい値を超えた p1 / p3 が起点に加わる。順序は候補列の順のまま。
-    assert anchors == ["p0", "p1", "p3"]
-
-
-def test_score_anchor_always_keeps_the_top_candidate():
-    """候補1位を外すと single_paper の cr@1 が落ちる（verdict 版と同じ事故）。"""
-    agent = _anchor_agent(anchor_from="score", anchor_score_min=0.99, anchor_max=None)
-    anchors = agent._anchor_papers(
-        ["p0", "p1"], verdict_papers=None, paper_scores={"p0": 0.1, "p1": 0.999}
-    )
-    assert anchors[0] == "p0"
-
-
-def test_score_anchor_respects_anchor_max():
-    agent = _anchor_agent(anchor_from="score", anchor_score_min=0.0, anchor_max=2)
-    anchors = agent._anchor_papers(
-        ["p0", "p1", "p2"],
-        verdict_papers=None,
-        paper_scores={"p0": 1.0, "p1": 1.0, "p2": 1.0},
-    )
-    assert anchors == ["p0", "p1"]
-
-
-def test_score_anchor_needs_scores():
-    """スコアが渡らない経路（位置挿入など）では従来の起点に落ちる。"""
-    agent = _anchor_agent(anchor_from="score", anchor_score_min=0.99)
-    assert agent._anchor_papers(["p0"], verdict_papers=None, paper_scores=None) is None
-
-
-def test_anchor_max_defaults_to_no_cap_so_verdict_is_unchanged():
-    """`anchor_max` の既定で verdict 版の挙動を変えてはいけない（無制限で検証済み）。"""
-    agent = _anchor_agent(anchor_from="verdict")
-    anchors = agent._anchor_papers(["p0"], verdict_papers=["p1", "p2", "p3", "p4", "p5"], paper_scores=None)
-    assert anchors == ["p0", "p1", "p2", "p3", "p4", "p5"]
