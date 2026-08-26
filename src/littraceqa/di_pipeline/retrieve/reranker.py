@@ -14,7 +14,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from littraceqa.di_pipeline.accel import load_with_best_attn, maybe_compile
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.registry import register
 
 _DEFAULT_INSTRUCTION = (
     "Given a scientific question, retrieve passages from research papers that "
@@ -33,7 +32,6 @@ _PREFIX = (
 _SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
-@register("reranker", "qwen3")
 class Qwen3Reranker:
     def __init__(
         self,

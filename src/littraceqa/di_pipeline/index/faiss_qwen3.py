@@ -36,7 +36,6 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer
 from littraceqa.di_pipeline.accel import load_with_best_attn, maybe_compile
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
 from littraceqa.di_pipeline.index.chunk_filter import filter_chunk_types
-from littraceqa.di_pipeline.registry import register
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"
@@ -48,7 +47,22 @@ _DONE_FILENAME = "_embeddings.done"
 _ADD_ROWS = 100_000
 
 
-@register("indexer", "faiss_qwen3")
+# 本番構成の埋め込み設定。`di_pipeline.pipeline` と
+# `scripts/build_faiss_qwen3_shard.py`（分散ビルド）が共有する。**索引を作り直すときは
+# 検索時と同じ値でなければならない**ので、2箇所に書かない。
+# `devices` だけは含めない——構築は空いている全GPUを使い、検索は devices[0] しか
+# 使わないので1枚に絞る（残りを reranker に空ける）。
+INDEX_NAME = "faiss_qwen3_8b"
+PRODUCTION_PARAMS: dict = {
+    "model": "Qwen/Qwen3-Embedding-8B",
+    "fp16": True,
+    "max_tokens": 8192,
+    "doc_prefix": "passage: ",
+    "query_prefix": "query: ",
+    "batch_size": 8,
+}
+
+
 class Qwen3FAISSIndex:
     name = "faiss_qwen3"
 

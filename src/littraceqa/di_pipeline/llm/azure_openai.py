@@ -40,7 +40,6 @@ import os
 import openai
 from openai import AzureOpenAI
 
-from littraceqa.di_pipeline.registry import register
 
 _SYSTEM = (
     "あなたは科学論文の検索システムの一部として動作しています。"
@@ -56,7 +55,6 @@ _REQUIRED = (
 )
 
 
-@register("llm", "azure_openai")
 class AzureOpenAILLM:
     """Azure OpenAI の Chat Completions を1往復だけ呼ぶクライアント。"""
 

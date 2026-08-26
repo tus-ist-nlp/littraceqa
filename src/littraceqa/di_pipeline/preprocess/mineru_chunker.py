@@ -32,7 +32,6 @@ from pathlib import Path
 from markdownify import markdownify
 
 from littraceqa.di_pipeline.contracts import Chunk
-from littraceqa.di_pipeline.registry import register
 
 # 図表番号の抽出。figure_vlm プリプロセッサを削除したので、唯一の利用者である
 # ここへ移した（`Figure 3` / `Table 12a` のような caption 先頭の番号を取る）。
@@ -127,7 +126,6 @@ def _split_oversized(paragraph: str, max_chars: int) -> list[str]:
     return parts
 
 
-@register("preprocessor", "mineru")
 class MinerUChunker:
     def __init__(
         self,

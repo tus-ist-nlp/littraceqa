@@ -8,7 +8,6 @@ table）は生成しない**——回答生成も提出論文の選定も読解�
 
 ## ファイル
 
-- `base.py` — `SearchAgent` Protocol（`run(query) -> Prediction`）
   検索そのものの素の実力を測る基準線として `scripts/eval_retrieval.py` が使う
 - `reading.py` — `ReadingAgent`: 検索→読解→不足分の再検索を反復する本命（デフォルト）
 - `task_family.py` — `TaskFamilyClassifier`（single/multi 推定）と `apply_paper_cutoff`
@@ -57,7 +56,7 @@ LLM 呼び出しは **1周につき最大2回**（`_decompose` / `_refine` が1�
   落とすことがあるため、サブクエリから抽出すると発火しない。
 - 制約が取れたときだけ `retrieve(..., attribute_filter=...)` に渡す。取れなければ
   引数自体を渡さず、**制約が無い質問の挙動は従来と完全に同一**に保つ。
-- 抽出器は retriever が持つ（search_style の `attribute_filter` 設定で構築される）。
+- 抽出器は retriever が持つ（`pipeline.build_retriever()` が `AttributeExtractor` を渡す）。
   無効な構成では None を返す。詳細は `retrieve/attribute_filter.py`。
 - 抽出器が `extract_with_llm()` を持つ構成（`attribute_filter.llm_extract: true`）では
   そちらを使う。正規表現で取れなかった質問だけ LLM に判定させる経路で、**元の質問に
@@ -287,7 +286,7 @@ retriever が返すのは常に **chunk 単位**。「どの論文か」に畳�
 
 ## b. 各 indexer の実行（`_run_indexers`）
 
-indexer 群は `search_style` の yaml で決まり（例: `bm25s` + `faiss_specter2` +
+indexer 群は `pipeline.build_indexers()` で決まり（例: `bm25s` + `faiss_specter2` +
 `faiss_qwen3`）、それぞれ `search(query, k) -> list[RetrievalResult]` を持つ。
 **制約の有無で2つのコードパスに分かれる**。
 
@@ -327,7 +326,7 @@ for indexer in indexers:
 RRF 後の候補を `pool_k` 件プールし、クエリ×チャンクを yes/no 判定型モデルで採点し直す。
 `pool_k` を書かないと候補が増えず reranker の効果が出ない（CLAUDE.md 参照）。
 `rerank_blend` を書くと順位を置き換えずに融合前の順位と混ぜる。
-`search_style` に `reranker` を書かなければ融合結果の上位 `top_k` をそのまま返す。
+`reranker=None` にすれば融合結果の上位 `top_k` をそのまま返す。
 
 ## この層の主要パラメータ（`HybridRetriever.__init__`）
 
@@ -340,6 +339,6 @@ RRF 後の候補を `pool_k` 件プールし、クエリ×チャンクを yes/no
 | `min_filtered_results` | 10 | 絞り込み後これ未満なら fail-open |
 | `rerank_blend` | None | 融合前の順位と reranker の順位を RRF で混ぜる設定。None なら reranker が順位を置き換える（従来） |
 
-`per_index_k` / `pool_k` / 属性フィルタ関連はすべて `search_style` の yaml から
-`compose_config()` → `build_pipeline()` 経由で注入される。agent 側の `top_k`
-（1サブクエリで受け取る chunk 数）とは別物なので混同しないこと。
+`per_index_k` / `pool_k` / 属性フィルタ関連はすべて `pipeline.build_retriever()` で
+渡している。agent 側の `retrieve_top_k`（1サブクエリで受け取る chunk 数）とは
+別物なので混同しないこと。

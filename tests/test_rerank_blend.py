@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
+from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, RerankBlend
 from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
 
 
@@ -75,7 +75,7 @@ def test_without_blend_the_reranker_replaces_the_ranking():
 def test_blend_keeps_the_original_ranking_partly_alive():
     """重みを元順位側に寄せると、reranker に丸ごと反転されない。"""
     got = _retriever(
-        rerank_blend={"original_weight": 1.0, "rerank_weight": 0.0, "rrf_k": 60}
+        rerank_blend=RerankBlend(original_weight=1.0, rerank_weight=0.0, rrf_k=60)
     ).retrieve("q", top_k=5)
     assert [r.paper_id for r in got] == ["a", "b", "c", "d", "e"]
 
@@ -83,7 +83,7 @@ def test_blend_keeps_the_original_ranking_partly_alive():
 def test_blend_score_matches_the_returned_order():
     """**融合順位が score に載っている。** 下流が score で並べ直しても崩れない。"""
     got = _retriever(
-        rerank_blend={"original_weight": 0.6, "rerank_weight": 0.4, "rrf_k": 60}
+        rerank_blend=RerankBlend(original_weight=0.6, rerank_weight=0.4, rrf_k=60)
     ).retrieve("q", top_k=5)
     scores = [r.score for r in got]
     assert scores == sorted(scores, reverse=True)
@@ -96,12 +96,10 @@ def test_blend_score_matches_the_returned_order():
 def test_protect_top_keeps_the_original_head_set():
     """融合前の上位集合は reranker に押し出させない。"""
     got = _retriever(
-        rerank_blend={
-            "original_weight": 0.0,  # reranker だけを見る設定でも……
-            "rerank_weight": 1.0,
-            "rrf_k": 60,
-            "protect_top": 2,
-        }
+        rerank_blend=RerankBlend(original_weight=0.0,  # reranker だけを見る設定でも……
+            rerank_weight=1.0,
+            rrf_k=60,
+            protect_top=2)
     ).retrieve("q", top_k=5)
     # ……融合前の上位2件（a, b）は先頭に残る（並び順は融合結果に従う）
     assert set(r.paper_id for r in got[:2]) == {"a", "b"}
@@ -117,6 +115,6 @@ def test_no_reranker_is_untouched():
         fuser=PaperRRFFuser(k=60),
         reranker=None,
         per_index_k=10,
-        rerank_blend={"original_weight": 0.6, "rerank_weight": 0.4},
+        rerank_blend=RerankBlend(original_weight=0.6, rerank_weight=0.4),
     )
     assert [r.paper_id for r in retriever.retrieve("q", top_k=3)] == ["a", "b", "c"]

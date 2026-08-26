@@ -10,8 +10,6 @@ from littraceqa.di_pipeline.contracts import (
     Query,
     RetrievalResult,
 )
-from littraceqa.di_pipeline.registry import build, list_registered, register
-
 __all__ = [
     "Answer",
     "Chunk",
@@ -21,7 +19,4 @@ __all__ = [
     "Prediction",
     "Query",
     "RetrievalResult",
-    "build",
-    "list_registered",
-    "register",
 ]

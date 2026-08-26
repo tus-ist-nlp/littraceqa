@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from littraceqa.di_pipeline.registry import register
 
 
-@register("llm", "fake")
 class FakeLLM:
     """呼び出すたびに ``responses`` を順番に返すフェイク LLM クライアント。
 

@@ -16,12 +16,10 @@ from pathlib import Path
 import bm25s
 
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
-from littraceqa.di_pipeline.registry import register
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 
 
-@register("indexer", "bm25s")
 class BM25Index:
     name = "bm25s"
 

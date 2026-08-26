@@ -33,7 +33,6 @@ from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 from littraceqa.di_pipeline.agent.task_family import TaskFamilyClassifier, apply_paper_cutoff
 from littraceqa.di_pipeline.contracts import Answer, Evidence, Prediction, Query, RetrievalResult
 from littraceqa.di_pipeline.llm.base import LLMClient
-from littraceqa.di_pipeline.registry import register
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
 from littraceqa.di_pipeline.retrieve.paper_expander import PaperExpander
 
@@ -188,7 +187,6 @@ class ReadingConfig:
         return cls(**values)
 
 
-@register("agent", "reading")
 class ReadingAgent:
     """候補を読んで根拠を確定し、足りなければ検索し直す反復エージェント。
 

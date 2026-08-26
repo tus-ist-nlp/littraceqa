@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pytest
 
-from littraceqa.di_pipeline.config import compose_config
 from littraceqa.di_pipeline.contracts import Chunk
 from littraceqa.di_pipeline.index.chunk_filter import ALL_CHUNK_TYPES, filter_chunk_types
 
@@ -48,48 +47,3 @@ def test_all_chunk_types_matches_what_the_chunkers_emit():
     assert "title_abstract" in ALL_CHUNK_TYPES
     assert "text_span" in ALL_CHUNK_TYPES
     assert "table" in ALL_CHUNK_TYPES
-
-
-def _compose(indexers: list[dict]) -> dict:
-    return compose_config(
-        paths={
-            "pdf_dir": "/d/pdfs",
-            "chunks_dir": "/d/chunks",
-            "index_dir": "/d/index",
-            "paper_metadata": "m.jsonl",
-        },
-        process={"name": "mineru", "params": {}},
-        search={
-            "per_index_k": 100,
-            "indexers": indexers,
-            "fuser": {"name": "paper_rrf", "params": {}},
-        },
-        agent={"name": "simple", "params": {}},
-    )
-
-
-def test_index_name_defaults_to_the_indexer_name():
-    cfg = _compose([{"name": "faiss_specter2", "params": {}}])
-    assert cfg["retriever"]["indexers"][0]["params"]["index_dir"] == (
-        "/d/index/mineru/faiss_specter2"
-    )
-
-
-def test_index_name_separates_variants_of_the_same_indexer():
-    """abstract版が全チャンク版の索引を上書きしないこと。"""
-    cfg = _compose(
-        [
-            {"name": "faiss_specter2", "params": {}},
-            {
-                "name": "faiss_specter2",
-                "index_name": "faiss_specter2_abstract",
-                "params": {"chunk_types": ["title_abstract"]},
-            },
-        ]
-    )
-    dirs = [ix["params"]["index_dir"] for ix in cfg["retriever"]["indexers"]]
-    assert dirs == [
-        "/d/index/mineru/faiss_specter2",
-        "/d/index/mineru/faiss_specter2_abstract",
-    ]
-    assert len(set(dirs)) == 2, "索引パスが衝突している"

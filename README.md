@@ -27,19 +27,16 @@ uv sync --extra azure         # Azure RAG pipeline (baseline)
 uv sync --extra di_pipeline   # DI-based hybrid retrieval pipeline
 ```
 
-## DI-based hybrid retrieval pipeline
+## Hybrid retrieval pipeline
 
-This pipeline lives under `src/littraceqa/di_pipeline/` (preprocessors,
-indexers, fusers/rerankers, and agents wired up via dependency injection —
-see `CLAUDE.md` and `configs/README.md` for the full design and usage) and
-is run via `scripts/run_search.py`, e.g.:
+The whole system is wired up in `src/littraceqa/di_pipeline/pipeline.py` — read that
+file to see every stage and every tuned value in one place (`CLAUDE.md` explains why
+each value was chosen). Only machine-dependent paths live in `configs/paths/*.yaml`.
+It is run via `scripts/run_search.py`, e.g.:
 
 ```bash
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
-  --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/k100_external_all.yaml \
-  --agent configs/agent_style/reading_expand_rrf/notable.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions.jsonl
 ```
@@ -73,7 +70,7 @@ provenance, and the gold — the last one quarantined under `_gold`:
     {"rank": 1, "paper_id": "acl2025_00005", "title": "500x Compressor: ...",
      "venue": "ACL", "year": 2025}
   ],
-  "_meta": {"source_predictions": "...", "search": "configs/search_style/....yaml",
+  "_meta": {"source_predictions": "...",
             "agent": "...", "run_timestamp": "...", "n_candidates": 50},
   "_gold": {"task_family": "...", "primary_evidence_type": "...",
             "gold_papers": [...], "evidence": [...], "answer": {...}}

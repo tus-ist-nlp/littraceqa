@@ -32,7 +32,6 @@ from transformers import AutoTokenizer
 
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
 from littraceqa.di_pipeline.index.chunk_filter import filter_chunk_types
-from littraceqa.di_pipeline.registry import register
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"
@@ -41,7 +40,6 @@ _INDEX_FILENAME = "index.faiss"
 _MAX_TOKENS = 512
 
 
-@register("indexer", "faiss_specter2")
 class Specter2FAISSIndex:
     name = "faiss_specter2"
 

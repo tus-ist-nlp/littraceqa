@@ -22,7 +22,6 @@ from pathlib import Path
 import bm25s
 
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
-from littraceqa.di_pipeline.registry import register
 
 _PAPERS_FILENAME = "papers.jsonl"
 
@@ -53,7 +52,6 @@ def _build_paper_chunks(chunks: Iterable[Chunk]) -> list[Chunk]:
     ]
 
 
-@register("indexer", "bm25s_paper")
 class BM25PaperIndex:
     name = "bm25s_paper"
 

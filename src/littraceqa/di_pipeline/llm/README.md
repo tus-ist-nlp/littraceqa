@@ -1,33 +1,21 @@
 # src/littraceqa/di_pipeline/llm/
 
-`ReadingAgent` / `TaskFamilyClassifier` が使うLLMクライアント。
-`__call__(prompt: str) -> str` の形で統一する。
+`ReadingAgent` / `TaskFamilyClassifier` が使う LLM クライアント。
+`__call__(prompt: str) -> str` の形に統一してある。
 
-- `base.py` — `LLMClient` Protocol
-- `claude.py` — `ClaudeLLM`（"claude"）: Anthropic Claude API の実クライアント
-- `fake.py` — `FakeLLM`（"fake"）: テスト・ドライラン用。渡した応答を順番に返すだけ
+- `base.py` — `LLMClient` Protocol（このメソッド1つだけ）
+- `azure_openai.py` — `AzureOpenAILLM`: 本番。Azure OpenAI の実クライアント
+- `fake.py` — `FakeLLM`: テスト用。渡した応答を順番に返すだけ
 
-## ClaudeLLM を使う
+`pipeline.build_agent()` が既定で `AzureOpenAILLM(reasoning_effort="medium")` を渡す。
+テストは第2引数に `FakeLLM` を渡して差し替える。
 
-APIキーを環境変数に設定するだけで動く。
+## 認証
 
-```
-export ANTHROPIC_API_KEY=sk-ant-...
-```
+APIキー等はリポジトリ直下の `.env` から読む（コードにも yaml にも書かない）。
+必要な環境変数は `.env.example` を参照。
 
-agent_style の yaml で指定する:
-
-```yaml
-name: reading
-llm: { name: claude, params: { effort: medium } }
-params: { top_k: 20, max_candidates: 20 }
-```
-
-`params` に渡せるもの: `model`（既定 `claude-opus-4-8`）, `max_tokens`, `effort`
-(`low`/`medium`/`high`/`xhigh`/`max`), `thinking`, `system`, `api_key`,
-`max_retries`, `timeout`。
-
-キーが無い状態で `ClaudeLLM` を構築すると、その場で `RuntimeError` になる。
-エージェントは LLM 呼び出しを try/except で囲んでフォールバックする作りなので、
-実行中に認証で失敗すると「LLMが動いていないのに静かに劣化する」状態になってしまう。
-それを避けるため、認証の失敗はパイプライン組み立て時（`build_pipeline`）に必ず表面化させる。
+キーが無い状態でクライアントを構築すると、その場で例外になる。**エージェントは
+LLM 呼び出しを try/except で囲んでフォールバックする作り**なので、実行中に認証で
+失敗すると「LLM が動いていないのに静かに劣化する」状態になってしまう。それを避けるため、
+認証の失敗はパイプライン組み立て時に必ず表面化させる。

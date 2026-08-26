@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
 from littraceqa.di_pipeline.retrieve.attribute_filter import (
@@ -21,6 +21,36 @@ from littraceqa.di_pipeline.retrieve.attribute_filter import (
 )
 from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
 from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker
+
+
+@dataclass(frozen=True)
+class RerankBlend:
+    """reranker に順位を置き換えさせず、融合前の順位と RRF で混ぜる設定。
+
+    既定（`rerank_blend=None`）では reranker が順位を**完全に置き換える**。だが
+    reranker は「質問に答えるか」で判定するので、質問文が名指ししないピア gold を
+    必ず下げる（`agent/reading.py` の `_combine_rrf` がランキングB を reranker に
+    通さないのと同じ理由）。置換だとその危険が検索ランキングの内部で無防備になる。
+    """
+
+    original_weight: float = 0.6
+    rerank_weight: float = 0.4
+    rrf_k: int = 60
+    # 融合前の上位N件の「集合」を先頭に残す（21位以下が無条件に上位へ侵入するのを防ぐ）。
+    protect_top: int = 0
+
+
+@dataclass(frozen=True)
+class SeedExpansion:
+    """1位論文の title+abstract の先頭 `query_chars` 文字を質問に足して引き直す設定。
+
+    **質問文は「その論文が自分をどう呼ぶか」を知らない。** ある gold 論文は自分を
+    一度も `reference-free` と呼ばず `Direct Alignment Algorithm` と名乗る——質問文に
+    無い語なので、質問だけを投げ続ける限り当たらない。上位論文からコーパス内の語彙を
+    借りるのがこの機構の役目。LLM は1回も呼ばない。
+    """
+
+    query_chars: int = 512
 
 
 class HybridRetriever:
@@ -36,8 +66,8 @@ class HybridRetriever:
         fetch_safety: float = 1.5,
         max_fetch_k: int = 5000,
         min_filtered_results: int = 10,
-        rerank_blend: dict | None = None,
-        seed_expansion: dict | None = None,
+        rerank_blend: RerankBlend | None = None,
+        seed_expansion: SeedExpansion | None = None,
         anchor_store: object | None = None,
     ):
         self.indexers = indexers
@@ -123,11 +153,11 @@ class HybridRetriever:
         返り値の並び順だけに順位を乗せると捨てられる。既存の `Qwen3Reranker.rerank`
         が score を上書きしているのと同じ事情。
         """
-        blend = self.rerank_blend or {}
-        k = blend.get("rrf_k", 60)
-        w_orig = blend.get("original_weight", 0.6)
-        w_rerank = blend.get("rerank_weight", 0.4)
-        protect_top = blend.get("protect_top") or 0
+        blend = self.rerank_blend or RerankBlend()
+        k = blend.rrf_k
+        w_orig = blend.original_weight
+        w_rerank = blend.rerank_weight
+        protect_top = blend.protect_top
 
         scores: dict[str, float] = {}
         for rank, result in enumerate(fused):
@@ -186,7 +216,7 @@ class HybridRetriever:
         anchor_text = self._anchor_text(fused[0])
         if not anchor_text:
             return fused
-        query_chars = self.seed_expansion.get("query_chars", 512)
+        query_chars = self.seed_expansion.query_chars
         expanded = f"{query}\n{anchor_text[:query_chars]}"
         runs = self._run_indexers(expanded, attribute_filter)
         expanded_fused = self.fuser.fuse(runs, top_k=fuse_k)

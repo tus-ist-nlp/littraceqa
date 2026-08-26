@@ -36,7 +36,6 @@ from __future__ import annotations
 import dataclasses
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.registry import register
 
 # 論文単位索引の擬似チャンク。順位付けには使うが、代表チャンクには選ばない。
 PAPER_LEVEL_SOURCES = frozenset({"bm25s_paper"})
@@ -108,7 +107,6 @@ def paper_rrf_fuse(
     return fused
 
 
-@register("fuser", "paper_rrf")
 class PaperRRFFuser:
     def __init__(
         self,

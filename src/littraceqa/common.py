@@ -30,33 +30,6 @@ Record = dict[str, Any]
 T = TypeVar("T")
 
 
-def config_label(path: str | Path) -> str:
-    """config のパスから、report のファイル名・実験ラベルに使う短い名前を作る。
-
-    `agent_style` はフォルダで分類してあるので、stem だけを取ると `rrf.yaml` が
-    2つの意味（`reading_loop/rrf` = サブクエリ間マージ、`reading_expand_rrf/rrf` =
-    検索ランキングと関連ランキングの統合）で衝突して、実験どうしを名前で
-    見分けられなくなる。サブフォルダに置かれた config はフォルダ名を前に付ける。
-
-    フォルダ名の末尾の語と同じ stem は重ねない
-    （`reading_expand_rrf/rrf` -> `reading_expand_rrf`）。フォルダ分けする前の
-    ファイル名と同じラベルになるので、過去の report/*.md と並べて読める。
-
-    ここ（依存の軽い common）に置いてあるのは、audit_report.py が
-    di_pipeline.config を import すると torch / faiss まで読み込まれるため。
-    """
-    path = Path(path)
-    stem = path.stem
-    folder = path.parent.name
-    if not path.parent.parent.name.endswith("_style"):
-        return stem  # configs/{kind}/ 直下（従来どおり）
-    head = folder.rsplit("_", 1)[-1]
-    if stem == head:
-        return folder
-    if stem.startswith(f"{head}_"):
-        stem = stem[len(head) + 1 :]
-    return f"{folder}_{stem}"
-
 
 def temp_sibling(path: Path) -> Path:
     """Unique temp name in the SAME directory, so os.replace stays atomic."""

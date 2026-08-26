@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
+from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, SeedExpansion, to_gold_papers
 from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser, paper_rrf_fuse
 
 
@@ -169,7 +169,7 @@ class TestSeedExpansion:
 
     def test_expands_with_the_top_paper_vocabulary(self):
         retriever, indexer = self._retriever(
-            seed_expansion={"enabled": True, "query_chars": 512},
+            seed_expansion=SeedExpansion(query_chars=512),
             anchor_store=StubStore({"p_seed": "[ICML 2025] Seed Paper\nWe study reward shape."}),
         )
         papers = to_gold_papers(retriever.retrieve("元の質問", 10))
@@ -184,7 +184,7 @@ class TestSeedExpansion:
 
     def test_query_chars_truncates_the_anchor_text(self):
         retriever, indexer = self._retriever(
-            seed_expansion={"enabled": True, "query_chars": 10},
+            seed_expansion=SeedExpansion(query_chars=10),
             anchor_store=StubStore({"p_seed": "0123456789reward shape"}),
         )
         retriever.retrieve("元の質問", 10)
@@ -192,13 +192,13 @@ class TestSeedExpansion:
         assert indexer.queries[1].endswith("0123456789")
 
     def test_falls_back_to_the_hit_chunk_without_a_store(self):
-        retriever, indexer = self._retriever(seed_expansion={"enabled": True})
+        retriever, indexer = self._retriever(seed_expansion=SeedExpansion())
         retriever.retrieve("元の質問", 10)
         assert len(indexer.queries) == 2
         assert "title of p_seed" in indexer.queries[1]
 
     def test_no_op_when_the_first_search_is_empty(self):
-        retriever, indexer = self._retriever(seed_expansion={"enabled": True})
+        retriever, indexer = self._retriever(seed_expansion=SeedExpansion())
         assert retriever.retrieve("当たらない質問", 10) == []
         assert len(indexer.queries) == 1
 
@@ -212,7 +212,7 @@ class TestSeedExpansion:
                 return candidates[:top_k]
 
         retriever, _ = self._retriever(
-            seed_expansion={"enabled": True},
+            seed_expansion=SeedExpansion(),
             anchor_store=StubStore({"p_seed": "reward shape"}),
         )
         retriever.reranker = StubReranker()
@@ -221,38 +221,6 @@ class TestSeedExpansion:
         assert calls == ["元の質問"]
 
 
-class TestComposeConfig:
-    def test_compose_without_seed_expansion(self):
-        from littraceqa.di_pipeline.config import compose_config
-
-        cfg = compose_config(
-            paths={"pdf_dir": "/p", "chunks_dir": "/c", "index_dir": "/i", "paper_metadata": "/m.jsonl"},
-            process={"name": "mineru", "params": {}},
-            search={
-                "per_index_k": 100,
-                "indexers": [{"name": "bm25s", "params": {}}],
-                "fuser": {"name": "paper_rrf", "params": {}},
-            },
-            agent={"name": "reading", "params": {}},
-        )
-        assert cfg["retriever"]["seed_expansion"] is None
-
-    def test_compose_passes_seed_expansion(self):
-        from littraceqa.di_pipeline.config import compose_config
-
-        cfg = compose_config(
-            paths={"pdf_dir": "/p", "chunks_dir": "/c", "index_dir": "/i", "paper_metadata": "/m.jsonl"},
-            process={"name": "mineru", "params": {}},
-            search={
-                "per_index_k": 100,
-                "indexers": [{"name": "bm25s", "params": {}}],
-                "fuser": {"name": "paper_rrf", "params": {"chunks_per_paper": 3}},
-                "seed_expansion": {"enabled": True, "query_chars": 512},
-            },
-            agent={"name": "reading", "params": {}},
-        )
-        assert cfg["retriever"]["seed_expansion"]["query_chars"] == 512
-        assert cfg["retriever"]["fuser"]["name"] == "paper_rrf"
 
 
 def _search_style_paths() -> list[str]:

@@ -10,9 +10,10 @@ bm25s は全コーパスを1ドキュメント順で舐める必要があり分�
 分散対象にしない(bm25s は既存の run_search.py --build で全コーパス版が
 既に作られている前提)。faiss_qwen3.py 本体には一切手を入れない。
 
-パラメータ(model/devices/batch_size/max_tokens 等)は search_style の yaml から
-そのまま読むので、yaml と手打ちの値がズレる事故が起きない。索引の出力先も
-compose_config と同じ規約 {index_dir}/{process}/{index_name} で導出する。
+パラメータ(model/batch_size/max_tokens 等)は index/faiss_qwen3.py の PRODUCTION_PARAMS を
+そのまま使うので、検索側と手打ちの値がズレる事故が起きない(devices だけはマシンごとに
+空きGPUが違うのでコマンドラインで渡す)。索引の出力先も検索側と同じ規約
+{index_dir}/{process}/{INDEX_NAME} で導出する。
 
 スライスの決め方は faiss_qwen3.py の _embed_shard と同じ整数分割式:
     start = n * shard_index // num_shards
@@ -24,13 +25,13 @@ compose_config と同じ規約 {index_dir}/{process}/{index_name} で導出す�
     # nlp01 で
     uv run python scripts/build_faiss_qwen3_shard.py \
       --paths configs/paths/default.yaml \
-      --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/8b.yaml \
+      --devices cuda:0,cuda:1,cuda:2,cuda:3 \
       --shard-index 0 --num-shards 2
 
     # nlp02 で(chunks.jsonl を転送済み、nlp02 用 paths を使う)
     uv run python scripts/build_faiss_qwen3_shard.py \
       --paths configs/paths/nlp02.yaml \
-      --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/8b.yaml \
+      --devices cuda:0,cuda:1,cuda:2,cuda:3 \
       --shard-index 1 --num-shards 2
 
 OOM対策は3段構えになっている(詳細は index/faiss_qwen3.py の各パラメータのコメント)。
@@ -60,18 +61,21 @@ from pathlib import Path
 
 import yaml
 
-from littraceqa.di_pipeline import registry
 from littraceqa.di_pipeline.contracts import Chunk
 
-# config.py 全体を import すると marker/docling/siglip/colbert 等(figures extra 等)の
-# 重い任意依存まで芋づるで読み込まれ、それらを入れていないマシン(分散ビルド先の
-# nlp02 など)で import に失敗する。ここで必要なのは faiss_qwen3 indexer の登録だけ
-# なので、そのモジュールだけを import して @register("indexer","faiss_qwen3") を効かせる。
-import littraceqa.di_pipeline.index.faiss_qwen3  # noqa: F401
+# di_pipeline.pipeline を import すると reranker(torch) や expander(faiss/bm25s)、
+# LLM クライアントまで芋づるで読み込まれ、それらを入れていないマシン(分散ビルド先の
+# nlp02 など)で失敗する。ここで要るのは埋め込み索引だけなので、そのモジュールを
+# 直接読む。**モデル設定は本番と同じ定数を共有する**(2箇所に書かない)。
+from littraceqa.di_pipeline.index.faiss_qwen3 import (
+    INDEX_NAME,
+    PRODUCTION_PARAMS,
+    Qwen3FAISSIndex,
+)
 
 
-def load_config(path: str) -> dict:
-    """yaml を dict で読む(config.py の load_config と同じだが重い import を避ける)。"""
+def load_paths(path: str) -> dict:
+    """configs/paths/*.yaml を dict で読む(重い import を避けるため yaml 直読み)。"""
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -98,36 +102,12 @@ def load_chunks(path: Path) -> list[Chunk]:
     return chunks
 
 
-def find_faiss_qwen3_indexer(search_cfg: dict, index_name: str | None) -> dict:
-    """search_style yaml から faiss_qwen3 の indexer エントリを1つ取り出す。"""
-    candidates = [ix for ix in search_cfg["indexers"] if ix["name"] == "faiss_qwen3"]
-    if not candidates:
-        raise ValueError("この search_style に faiss_qwen3 indexer がありません")
-    if index_name is not None:
-        for ix in candidates:
-            if ix.get("index_name", "faiss_qwen3") == index_name:
-                return ix
-        raise ValueError(f"index_name={index_name} の faiss_qwen3 エントリが見つかりません")
-    if len(candidates) > 1:
-        names = [ix.get("index_name", "faiss_qwen3") for ix in candidates]
-        raise ValueError(
-            "faiss_qwen3 が複数あります。--index-name で選んでください: " + ", ".join(names)
-        )
-    return candidates[0]
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--paths", required=True, help="configs/paths/*.yaml")
-    parser.add_argument("--search", required=True, help="configs/search_style/*.yaml")
     parser.add_argument("--process-name", default="mineru", help="chunksファイル名の接頭辞")
     parser.add_argument("--shard-index", type=int, required=True, help="担当スライス番号(0始まり)")
     parser.add_argument("--num-shards", type=int, required=True, help="全マシン合計のスライス数")
-    parser.add_argument(
-        "--index-name",
-        default=None,
-        help="faiss_qwen3 が複数あるとき、どのエントリを使うか(yamlのindex_name)",
-    )
     parser.add_argument("--chunks", default=None, help="chunks.jsonlのパス(既定は paths から導出)")
     parser.add_argument("--index-dir", default=None, help="出力先(既定は paths から導出)")
     parser.add_argument(
@@ -135,7 +115,7 @@ def main() -> None:
         default=None,
         help=(
             "使うGPU(例: 'cuda:0,cuda:1')。マシンごとに空きGPUが違うので、"
-            "search_style yaml の devices をここで上書きできる。"
+            "構築のときだけここで指定する(検索側は devices[0] しか使わない)。"
             "8Bはfp16でもピーク19.3GB使うので、空きが20GB未満のGPUは指定しないこと"
         ),
     )
@@ -144,18 +124,15 @@ def main() -> None:
         type=int,
         default=None,
         help=(
-            "1バッチのパディング後トークン数の上限(OOM対策)。yaml の値を上書きする。"
+            "1バッチのパディング後トークン数の上限(OOM対策)。既定値を上書きする。"
             "VRAMに余裕がないマシンでは下げる"
         ),
     )
     args = parser.parse_args()
 
-    paths = load_config(args.paths)
-    search_cfg = load_config(args.search)
-    indexer_entry = find_faiss_qwen3_indexer(search_cfg, args.index_name)
-    index_name = indexer_entry.get("index_name", "faiss_qwen3")
-    params = dict(indexer_entry.get("params", {}))
-    # マシンごとに空きGPU・VRAMが違うので、yaml の値をコマンドラインで上書きできる。
+    paths = load_paths(args.paths)
+    params = dict(PRODUCTION_PARAMS)
+    # マシンごとに空きGPU・VRAMが違うので、ここだけコマンドラインで指定する。
     if args.devices:
         params["devices"] = args.devices
     if args.max_batch_tokens:
@@ -169,7 +146,7 @@ def main() -> None:
     index_dir = (
         args.index_dir
         if args.index_dir
-        else f"{paths['index_dir']}/{args.process_name}/{index_name}"
+        else f"{paths['index_dir']}/{args.process_name}/{INDEX_NAME}"
     )
     # 分割ビルドでは各スライスを別ディレクトリに出す(あとで merge する)。
     # 誤って本番の索引パスをスライスで上書きしないよう、末尾に shard 情報を足す。
@@ -185,7 +162,7 @@ def main() -> None:
         f"[{start:,}, {end:,}) の {len(shard):,} 件を {index_dir} に構築します"
     )
 
-    indexer = registry.build("indexer", "faiss_qwen3", index_dir=index_dir, **params)
+    indexer = Qwen3FAISSIndex(index_dir=index_dir, **params)
     indexer.build(shard)
     print(f"完了: {index_dir}")
     print(

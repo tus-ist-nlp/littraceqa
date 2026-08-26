@@ -5,9 +5,14 @@
 
 ## プロジェクト概要
 - LitTraceQA コンペ（EMNLP 2026）の検索システム
-- DI（依存性注入）設計で手法を差し替え可能にする
-- contracts.py / registry.py / config.py が骨格
-- **retrieval（indexer/search_style）の目的は gold paper（正解論文ID）の特定であり、
+- **構成は `di_pipeline/pipeline.py` 1ファイルに書き下してある。**
+  質問1件が候補50本になるまでの全段と、その全パラメータがそこで読める
+- `contracts.py` が各段の入出力契約（dataclass）
+- **手法を差し替える仕組みは持たない。** 以前は registry + 4分割 yaml で
+  差し替えられるようにしていたが（ablation を回すのに役立った）、最終構成1つを
+  出す段階では「yaml のキー → registry のキー → デコレータ → クラス」という
+  4ホップの読みにくさしか生まないので畳んだ。旧構成は `iseakira/paper-ablation` にある
+- **retrieval（indexer）の目的は gold paper（正解論文ID）の特定であり、
   根拠チャンクの特定（evidence）は ReadingAgent が別途担当する。** indexer を設計・
   追加するときは chunk 単位の粒度を保つことにこだわらなくてよく、論文単位の識別精度を
   優先してよい（例: `bm25s_paper` は論文全体を1ドキュメントとして扱い、
@@ -31,13 +36,7 @@
 | `iseakira/paper-repro` | + 論文 Table 2/3 の残り3構成 (a)(b)(c) と、それを測る道具 |
 | `iseakira/paper-ablation` | + 選定の過程で試した ablation すべて |
 
-最終構成:
-
-```
-process_style/mineru.yaml
-search_style/bm25_qwen3_8b_rerank_qwen3_8b/k100_external_all.yaml
-agent_style/reading_expand_rrf/notable.yaml
-```
+最終構成の全体は `src/littraceqa/di_pipeline/pipeline.py` にある。
 
 MinerU で PDF をチャンク化し、chunk BM25 + paper BM25 + Qwen3-Embedding-8B を
 **論文単位RRF**で融合、Seed Expansion を通してから Qwen3-Reranker-8B で**順位融合**、
@@ -53,85 +52,55 @@ validation 55件の `candidate_recall@k`（macro, total）:
 **選定基準は @50。** 読解チームは候補50本を順位で閾値化せず集合として使うので、
 最適化すべきは上位順位の精度ではなく50本の被覆。
 
-## 検索手法を追加するときのルール
+## コードの歩き方
 
-### 1. configs/ は4フォルダに分離されている
-前処理・検索手法・エージェント・共有パスはそれぞれ独立したyamlファイルで、
-実行時に4つから1ファイルずつ選んで組み合わせる（`src/littraceqa/di_pipeline/config.py` の
-`compose_config()` が合成する）。1ファイルに全部詰め込まない。
+**`src/littraceqa/di_pipeline/pipeline.py` を読めば全体が分かる。** 各段の構成と、
+振ったつまみの実効値がすべてそこに書いてある。個々の機構の根拠は下の「各機構の設計根拠」と
+各モジュールの docstring にある。
 
-- `configs/paths/{名前}.yaml`: 実行環境ごとの共有パス（pdf_dir, index_dirのルート等）
-- `configs/process_style/{preprocessor名}.yaml`: 前処理（`{name, params}`）
-- `configs/search_style/{組み合わせ名}.yaml`: 検索手法（indexer群 + fuser + reranker）
-- `configs/agent_style/{agent名}.yaml`: エージェント（`{name, llm?, params}`）
-
-**`search_style` / `agent_style` は1階層だけサブフォルダを掘ってよい。** 実験ラベルと
-レポート名は `config_label()`（`src/littraceqa/common.py`）が `{フォルダ名}_{stem}` に畳む。
-畳む前のファイル名と同じラベルになるよう、**フォルダ名は既存ファイル名の接頭辞をそのまま使う**。
-新しい語を挟むとラベルが変わり、過去の `results/experiments.jsonl` と名前が繋がらなくなる。
-
-`process_style`/`search_style` のファイルには `pdf_dir`/`index_dir` を**書かない**。
-`compose_config()` が `paths` から `{index_dir}/{process名}/{indexer名}` のように自動導出する
-（同じ `search_style` を別の `process_style` と組み合わせても索引パスが衝突しないため）。
-
-**同じ indexer の別バリアントを使うときは `index_name` を必ず付ける。** 索引パスの末尾は
-既定で indexer 名なので、たとえば `faiss_qwen3` を 0.6B 版と 8B 版で並べると、**同じパスを
-奪い合って先に作った索引を上書きしてしまう**（数時間かけたビルドが消える）。
-
-```yaml
-indexers:
-  - name: faiss_qwen3
-    index_name: faiss_qwen3_8b        # -> {index_dir}/{process}/faiss_qwen3_8b
-    params: { model: Qwen/Qwen3-Embedding-8B }
+```
+pipeline.py          構成そのもの（Paths / build_indexers / build_retriever /
+                     build_expander / build_agent）
+contracts.py         各段の入出力契約（Query / Chunk / RetrievalResult / Prediction …）
+index/               索引3本（bm25s / bm25s_paper / faiss_qwen3_8b）と SPECTER2
+retrieve/hybrid.py   検索本体（索引 → 融合 → Seed Expansion → reranker → 順位融合）
+retrieve/paper_rrf.py    論文単位RRF（1論文1票）
+retrieve/reranker.py     Qwen3-Reranker-8B
+retrieve/paper_expander.py  論文→論文展開（ランキングB）
+agent/reading.py     反復エージェント（分解 → 読解 → 再検索 → A/B 統合）
 ```
 
-**`chunk_types` で indexer ごとに索引する粒度を変えられる。** モデルには設計上の想定粒度が
-ある。省略すると全チャンクが対象。
+### 設定を変えるとき
+
+**手法のつまみは `pipeline.py` を直接編集する。** 実行環境の場所だけが
+`configs/paths/*.yaml` にある（マシンによって置き場所が違うため）。
+
+- エージェントのつまみ … `ReadingConfig`（`agent/reading.py`）。**存在する param の
+  定義はこの dataclass だけ**で、`from_params()` が未知のキーを名前を挙げて弾く
+- A/B 統合のつまみ … `CombineConfig`（同上）
+- 検索のつまみ … `build_retriever()` の引数
+
+**索引パスは `Paths.index(名前)` で導出する。** 名前が重なると**先に作った索引を
+上書きする**（数時間かけたビルドが消える）。`test_pipeline.py` が重複を検知する。
+
+**埋め込みのモデル設定は `index/faiss_qwen3.py` の `PRODUCTION_PARAMS` に置く。**
+分散ビルド（`scripts/build_faiss_qwen3_shard.py`）が同じ定数を読むので、
+**構築時と検索時でモデルや前置詞がズレる事故が起きない。**
 
 実行例:
 ```
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
-  --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/k100_external_all.yaml \
-  --agent configs/agent_style/reading_expand_rrf/notable.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions.jsonl \
   --production-input
+
+uv run python scripts/evaluate.py --gold data/validation.jsonl --pred predictions.jsonl
 ```
 
-### 2. 推奨デフォルトの組み合わせ
-
-`process_style/mineru.yaml` + `search_style/bm25_qwen3_8b_rerank_qwen3_8b/k100_external_all.yaml`
-+ `agent_style/reading_expand_rrf/notable.yaml`（= 論文の (d)）。
 索引（`bm25s` / `bm25s_paper` / `faiss_qwen3_8b`）と 27,489件分の chunks は構築済みで、
 `--build` なしですぐ検索できる。
 
-### 3. configs/ のディレクトリ構成
-```
-configs/
-├── paths/
-│   ├── default.yaml
-│   └── nlp02.yaml
-├── process_style/
-│   └── mineru.yaml          : MinerU。事前に scripts/run_mineru.py で変換が必要
-├── search_style/
-│   └── bm25_qwen3_8b_rerank_qwen3_8b/
-│       └── k100_external_all.yaml : 3索引（bm25s / bm25s_paper / faiss_qwen3_8b）を
-│                              paper_rrf で融合 → seed_expansion → Qwen3-Reranker-8B を
-│                              rerank_blend で順位融合。per_index_k=100 / pool_k=200 +
-│                              属性フィルタ
-└── agent_style/
-    └── reading_expand_rrf/
-        └── notable.yaml     : 分解→読解→再検索を繰り返し、最後に質問起点のランキングA と
-                               論文間展開のランキングB を RRF 統合する（combine_rrf_k=10）。
-                               anchor_from: verdict と
-                               paper_score_skip_chunk_types: [table] を含む
-```
-
-### 4. registry への登録確認
-`@register("indexer", "xxx")` のデコレータが付いているか確認する。
-付いていないと config から呼び出せない。
 
 ---
 
@@ -232,7 +201,7 @@ configs/
 統合するときは**50本で切る前の全長**をランキングA に使う（`_build_prediction`）。
 51位の論文を B が強く推していても、先に切ると押し上げようがないため。
 
-**論文→論文展開の近さは3種類あり、registry の "expander" で差し替え・併用する**
+**論文→論文展開の近さは3種類あり、`build_expander()` が RRF で併用する**
 （`retrieve/paper_expander.py`）:
 
 - `specter2`: SPECTER2(proximity) 埋め込みの近傍。構築済み索引を再利用（追加構築なし）。
@@ -301,7 +270,7 @@ multi ecr@20 0.908 -> **0.925**、**single は1桁も動かない**。
 
 ### 属性フィルタ（会議名・年）
 
-`search_style` に `attribute_filter: {enabled: true}` を書くと、質問が明示した会議名で
+`build_retriever()` が `attribute_extractor` を渡すと、質問が明示した会議名で
 検索結果を絞り込む（`retrieve/attribute_filter.py`）。**索引の改修も再構築も不要**。
 `RetrievalResult.metadata` に既に venue/year が入っているので、各索引から多めに取ってから
 落とすだけ。
@@ -421,9 +390,6 @@ mkdir -p logs
 tmux new-session -d -s littrace-exp \
   "PYTHONUNBUFFERED=1 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
-  --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/k100_external_all.yaml \
-  --agent configs/agent_style/reading_expand_rrf/notable.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions_{識別子}.jsonl \
   --production-input 2>&1 | tee logs/{識別子}.log"
@@ -460,9 +426,6 @@ LLM は非決定的（温度指定を受け付けない）でクエリは55件�
 # 1) 検索 -> 予測（tmux の中で）
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
-  --process configs/process_style/mineru.yaml \
-  --search configs/search_style/bm25_qwen3_8b_rerank_qwen3_8b/k100_external_all.yaml \
-  --agent configs/agent_style/reading_expand_rrf/notable.yaml \
   --queries data/test_inputs.jsonl \
   --output predictions_test_{識別子}.jsonl
 
@@ -503,7 +466,7 @@ bash scripts/setup_mineru_env.sh   # 初回のみ（.venv-mineru を作りモデ
   --paths configs/paths/default.yaml --gpus 0,1,2,3
 ```
 
-出力先は `pdf_dir` の兄弟 `mineru/`（`process_style` yaml にはパスを書かない方針に従い、
+出力先は `pdf_dir` の兄弟 `mineru/`（構成にパスを直書きしない方針に従い、
 `MinerUChunker` が自動導出する）。27,489件で 4GPU 約25時間。変換済みの論文は飛ばすので、
 中断しても同じコマンドで再開できる。
 

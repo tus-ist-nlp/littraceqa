@@ -66,7 +66,6 @@ import bm25s
 import faiss
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.registry import register
 
 _INDEX_FILENAME = "index.faiss"
 _CHUNKS_FILENAME = "chunks.jsonl"
@@ -110,7 +109,6 @@ def _interleave(
     return merged[:limit]
 
 
-@register("expander", "specter2")
 class Specter2PaperExpander:
     """SPECTER2(proximity) 埋め込みの近傍。構築済みの faiss 索引をそのまま読む。"""
 
@@ -165,7 +163,6 @@ class Specter2PaperExpander:
     def rank(self, anchors: list[str]) -> list[str]:
         return _interleave(self._pools(anchors), self.neighbors)
 
-@register("expander", "bib_coupling")
 class BibCouplingExpander:
     """書誌結合（参考文献の共有）で近い論文を返す。
 
@@ -292,7 +289,6 @@ def _json_string_prefix(line: str, start: int, max_chars: int) -> str:
     return "".join(out)
 
 
-@register("expander", "bm25_mlt")
 class BM25MLTExpander:
     """論文全文の more-like-this。anchor の title+abstract で `bm25s_paper` 索引を引く。
 
@@ -381,7 +377,6 @@ class BM25MLTExpander:
         """全文 BM25 の近さ順。"""
         return _interleave(self._pools(anchors), self.neighbors)
 
-@register("expander", "fused")
 class FusedPaperExpander:
     """複数の expander の近傍を RRF で融合する。
 

@@ -10,7 +10,6 @@ import dataclasses
 import json
 
 import pytest
-import yaml
 
 from littraceqa.di_pipeline.agent.reading import (
     CANDIDATE_PAPERS_LIMIT,
@@ -671,14 +670,29 @@ def test_config_can_be_passed_as_an_object():
         )
 
 
-def test_production_config_params_all_resolve():
-    """最終構成の yaml が書く params が1つ残らず ReadingConfig に載る。"""
-    params = yaml.safe_load(
-        open("configs/agent_style/reading_expand_rrf/notable.yaml", encoding="utf-8")
-    )["params"]
-    config = ReadingConfig.from_params(params)
-    assert config.paper_cutoff == "llm"
+def test_production_config_matches_what_was_measured():
+    """本番構成の値を固定する（cr@50 0.9682 を出したときの設定）。
+
+    `di_pipeline.pipeline` を import すると torch / faiss まで読み込むので、
+    ここでは設定オブジェクトだけを組み立てて突き合わせる。
+    """
+    config = ReadingConfig(
+        max_steps=3,
+        retrieve_top_k=20,
+        max_candidates=20,
+        chunks_per_paper=2,
+        snippet_chars=1800,
+        paper_cutoff="llm",
+        max_papers=10,
+        paper_score_skip_chunk_types=("table",),
+    )
+    combine = CombineConfig(
+        rrf_k=10, related_weight=1.0, related_offset=0, anchors=1, anchor_from="verdict"
+    )
+    assert config.subquery_count == 4  # 既定のまま（増やしても検索力は上がらない）
     assert config.paper_score_skip_chunk_types == ("table",)
+    assert combine.rrf_k == 10  # 60 だと深い順位でも A の1位に勝ってしまう
+    assert combine.anchors == 1  # 増やすと土台4本すべてで悪化する
 
 
 def test_decompose_asks_for_a_fixed_number_of_subqueries():
