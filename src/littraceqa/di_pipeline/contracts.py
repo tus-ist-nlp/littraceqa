@@ -1,9 +1,13 @@
 """LitTraceQA の各パイプライン段の入出力契約（dataclass）を定義するモジュール。
 
 LitTraceQA は 27,487 件の科学論文コーパスに対する質問について、根拠となる
-論文・箇所を検索するシステム。前処理・索引・検索・融合・根拠抽出・回答構築・
-提出という各段はここで定義する dataclass を介してデータをやり取りする。
-契約を固定することで、各段を互いに独立して実装・差し替えできるようにする。
+論文・箇所を検索するシステム。前処理・索引・検索・融合・根拠抽出・提出という
+各段は、ここで定義する dataclass を介してデータをやり取りする。段をまたぐのは
+この形だけなので、**各段の中身を読まずに境界だけを見れば全体の流れが追える**。
+
+`to_dict()` は `_AsDict` が配る（中身は `dataclasses.asdict()`）。逆向きの
+`from_dict()` は外部の jsonl を読む Query / PaperMeta だけが持ち、
+**必須フィールドが欠けたら KeyError で落ちる**（黙って None を入れない）。
 
 各クラスの役割（パイプライン順）:
     Query            -- システムへの入力1件（コーパスに対する質問）。
@@ -18,7 +22,25 @@ LitTraceQA は 27,487 件の科学論文コーパスに対する質問につい�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+
+
+class _AsDict:
+    """`to_dict()` を配るだけの土台。中身は `dataclasses.asdict()` に任せる。
+
+    フィールドを手で並べ直した辞書を返していたが、フィールドを1つ足すたびに
+    定義・to_dict・（あれば）from_dict の3箇所を直す必要があり、実際に漏れる。
+    `asdict()` は定義順にすべてのフィールドを再帰的に展開するので、
+    **キーの順序も含めて手書き版と同じ**辞書になる。
+
+    `asdict()` はネストした dataclass（Evidence の locator、Prediction の
+    evidence / answer）も展開し、dict や list は**複製する**。手書き版は
+    `metadata` などを参照のまま返していたので、返り値を書き換えると元の
+    オブジェクトが壊れた。
+    """
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 # 1. Query -- システムへの入力1件（質問）。
@@ -29,33 +51,19 @@ from dataclasses import dataclass, field
 # そのため両者は Optional とし、無い場合は littraceqa.di_pipeline.agent.task_family で question から
 # 推定する。
 @dataclass
-class Query:
+class Query(_AsDict):
     query_id: str
     question: str
     answer_types: list[str]
     # 回答が table 型のときだけ与えられる列定義: [{"name": ..., "type": ..., "is_row_key": bool}]
     table_schema: list[dict] | None = None
-    # multiple_choice の選択肢 {"A": "...", "B": "..."}。**本番入力には無い**（本番は
-    # query_id / question / answer_types / table_schema の4つだけ）。よってここが埋まるのは
-    # run_search.py --options-file で validation.jsonl から結合した oracle 実行のときだけで、
-    # 「選択肢を教えてもらえたら何点取れるか」を測る ablation 用。本番では常に None になり、
-    # そのとき ReadingAgent は multiple_choice を答えられない（選択肢が分からなければ
-    # どの文字を出すべきか決まらない）。
+    # multiple_choice の選択肢 {"A": "...", "B": "..."}。検証データでは gold 側にしか
+    # 無いので、ここが埋まるのは選択肢を結合して渡したときだけ。**回答生成は読解チーム側の
+    # 担当**なので、検索エージェントはこれを使わない。
     options: dict | None = None
     # 以下2つは本番入力には無い。手元の検証データにだけ入っている。
     task_family: str | None = None  # 観測値: "hidden_source_single_paper" / "multi_paper"
     primary_evidence_type: str | None = None  # 観測値: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
-
-    def to_dict(self) -> dict:
-        return {
-            "query_id": self.query_id,
-            "question": self.question,
-            "answer_types": self.answer_types,
-            "table_schema": self.table_schema,
-            "options": self.options,
-            "task_family": self.task_family,
-            "primary_evidence_type": self.primary_evidence_type,
-        }
 
     @classmethod
     def from_dict(cls, d: dict) -> Query:
@@ -73,7 +81,7 @@ class Query:
 
 # 2. PaperMeta -- data/paper_metadata.jsonl の1レコード。
 @dataclass
-class PaperMeta:
+class PaperMeta(_AsDict):
     paper_id: str
     title: str
     authors: list[str]
@@ -88,24 +96,6 @@ class PaperMeta:
     doi: str | None
     openreview_id: str | None
     anthology_id: str | None
-
-    def to_dict(self) -> dict:
-        return {
-            "paper_id": self.paper_id,
-            "title": self.title,
-            "authors": self.authors,
-            "abstract": self.abstract,
-            "venue": self.venue,
-            "year": self.year,
-            "track": self.track,
-            "award": self.award,
-            "source_url": self.source_url,
-            "pdf_url": self.pdf_url,
-            "arxiv_id": self.arxiv_id,
-            "doi": self.doi,
-            "openreview_id": self.openreview_id,
-            "anthology_id": self.anthology_id,
-        }
 
     @classmethod
     def from_dict(cls, d: dict) -> PaperMeta:
@@ -129,7 +119,7 @@ class PaperMeta:
 
 # 3. Chunk -- 前処理 → 索引 の境界。
 @dataclass
-class Chunk:
+class Chunk(_AsDict):
     chunk_id: str  # "{paper_id}#c{idx:04d}" の形式
     paper_id: str
     text: str  # "[{venue} {year}] {title}\n{body}" の形式
@@ -137,19 +127,10 @@ class Chunk:
     chunk_type: str
     metadata: dict
 
-    def to_dict(self) -> dict:
-        return {
-            "chunk_id": self.chunk_id,
-            "paper_id": self.paper_id,
-            "text": self.text,
-            "chunk_type": self.chunk_type,
-            "metadata": self.metadata,
-        }
-
 
 # 4. RetrievalResult -- 索引 → 融合 の境界。
 @dataclass
-class RetrievalResult:
+class RetrievalResult(_AsDict):
     chunk_id: str
     paper_id: str
     score: float
@@ -158,22 +139,11 @@ class RetrievalResult:
     metadata: dict
     source: str = ""  # "bm25s" / "faiss" / "colbert" など
 
-    def to_dict(self) -> dict:
-        return {
-            "chunk_id": self.chunk_id,
-            "paper_id": self.paper_id,
-            "score": self.score,
-            "text": self.text,
-            "chunk_type": self.chunk_type,
-            "metadata": self.metadata,
-            "source": self.source,
-        }
-
 
 # 5. EvidenceLocator -- 根拠1件の位置情報。source_type によって使うフィールドが変わる。
 # 全フィールド Optional で定義する。
 @dataclass
-class EvidenceLocator:
+class EvidenceLocator(_AsDict):
     page: int | None = None
     # table
     table_id: str | None = None
@@ -193,59 +163,27 @@ class EvidenceLocator:
     citation_id: str | None = None
     cited_paper: str | None = None
 
-    def to_dict(self) -> dict:
-        return {
-            "page": self.page,
-            "table_id": self.table_id,
-            "row": self.row,
-            "column": self.column,
-            "section": self.section,
-            "paragraph_id": self.paragraph_id,
-            "sentence_start": self.sentence_start,
-            "sentence_end": self.sentence_end,
-            "figure_id": self.figure_id,
-            "region": self.region,
-            "equation_id": self.equation_id,
-            "citation_id": self.citation_id,
-            "cited_paper": self.cited_paper,
-        }
-
 
 # 6. Evidence -- 提出用の根拠1件。
 @dataclass
-class Evidence:
+class Evidence(_AsDict):
     paper_id: str
     source_type: str
     locator: EvidenceLocator
     evidence_text_or_value: str | None = None  # 参照用（提出には不要だが保持）
 
-    def to_dict(self) -> dict:
-        return {
-            "paper_id": self.paper_id,
-            "source_type": self.source_type,
-            "locator": self.locator.to_dict(),
-            "evidence_text_or_value": self.evidence_text_or_value,
-        }
-
 
 # 7. Answer -- 提出用の回答1件。answer_types に応じて使うフィールドが変わる。
 @dataclass
-class Answer:
+class Answer(_AsDict):
     freeform: dict | None = None  # 例: {"text": "14.70"}
     multiple_choice: dict | None = None  # 例: {"options": {"A": "...", "B": "..."}, "gold": "C"}
     table: dict | None = None  # 例: {"schema": [{"name": ..., "type": ..., "is_row_key": True}], "rows": [...]}
 
-    def to_dict(self) -> dict:
-        return {
-            "freeform": self.freeform,
-            "multiple_choice": self.multiple_choice,
-            "table": self.table,
-        }
-
 
 # 8. Prediction -- Query 1件に対する提出レコード。
 @dataclass
-class Prediction:
+class Prediction(_AsDict):
     query_id: str
     gold_papers: list[dict[str, str]]  # 提出フォーマット: [{"paper_id": ...}]
     evidence: list[Evidence]
@@ -256,24 +194,3 @@ class Prediction:
     # いたか」を後から測れない。上位50本を残せば、予測を作り直さずに
     # recall@5/10/20/50 まで計算できる（再実行は LLM コストが高いので多めに持つ）。
     candidate_papers: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "query_id": self.query_id,
-            "gold_papers": self.gold_papers,
-            "evidence": [item.to_dict() for item in self.evidence],
-            "answer": self.answer.to_dict(),
-            "trace": self.trace,
-            "candidate_papers": self.candidate_papers,
-        }
-
-    @classmethod
-    def from_query(cls, query: Query) -> Prediction:
-        return cls(
-            query_id=query.query_id,
-            gold_papers=[],
-            evidence=[],
-            answer=Answer(),
-            trace=[],
-            candidate_papers=[],
-        )
