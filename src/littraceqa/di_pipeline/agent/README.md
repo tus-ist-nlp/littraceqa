@@ -124,7 +124,7 @@ LLM が空を返したら元の質問1本にフォールバックする。
 
 | フィールド | 用途 |
 |---|---|
-| `paper_ids` | 提出する論文。**既定では使わない**（`submit_from: candidates`。選定は読解チーム側の担当） |
+| `paper_ids` | LLM が根拠を確認した論文。**提出には使わない**（選定は読解チーム側の担当）。ランキングB の起点（`anchor_from: verdict`）にだけ使う |
 | `evidence_chunk_ids` | 提出する evidence の元チャンク |
 | `sufficient` | **反復の停止条件**。ここが true で break |
 | `missing` | 次に何を検索するか（`_refine` に渡す） |
@@ -170,26 +170,25 @@ candidate_papers  = to_gold_papers(全チャンク, max=50)            # 検索�
 - `candidate_papers` は**打ち切り前**の「検索が拾えた候補」。`candidate_recall@k` は
   これで測る。**検索力（拾えたか）と選定力（LLM がどれだけ絞れたか）を分離**する
   ため。indexer / reranker / 属性フィルタの改善はこの指標に出る。
-- `gold_papers` は cutoff の後。実提出の paper P/R/F1 はこちら。**既定では選定しない**
-  （`submit_from: candidates`）——どれを提出するかは読解チーム側の担当なので、
-  候補列の順位をそのまま渡す。verdict が一度も返らなかった場合も同じ経路。
+- `gold_papers` は cutoff の後。実提出の paper P/R/F1 はこちら。**選定はしない**
+  ——どれを提出するかは読解チーム側の担当なので、候補列の順位をそのまま渡す。
+  verdict が一度も返らなかった場合も同じ経路。
 - 各ステップの `trace`（subqueries / attribute_filter / n_chunks / selected /
   sufficient / missing）も残す。後から挙動を追える。
 
 evidence は `evidence_from_result()` で locator 付き `Evidence` に変換する。ただし
 cutoff で落ちた論文の evidence は出さない。
 
-## 提出論文の決め方（`submit_from`）
+## 提出論文は選定しない
 
-- `candidates`（**既定**）: 候補列の順位そのまま。**選定は読解チーム側の担当**なので
-  検索エージェントは順位を渡すところで止める。
-- `llm`: 読解 LLM が選んだ `paper_ids` を使う（選定込みで測りたい ablation 用）。
+提出するのは候補列の順位そのまま（`max_papers` で頭打ち）。**どれを提出するかの選定は
+読解チーム側の担当**なので、検索エージェントは順位を渡すところで止める。
 
-どちらでも `_read_and_judge()` は呼ぶ。1回の LLM 呼び出しが返す3つのうち、選定以外の
-2つ（`sufficient` = 反復の停止条件、`evidence_chunk_ids` = 根拠チャンク）は選定とは
-別の役割を持っているため。選定を外すと `paper_recall` は上がり `paper_precision` は
-下がるが、`candidate_recall` / `evidence_candidate_recall` は候補列を見る指標なので
-変わらない。
+**それでも `_read_and_judge()` は呼ぶ。** 1回の LLM 呼び出しが返す3つのうち、
+選定（`paper_ids`）以外の2つが別の役割を持っているため——`sufficient` は
+**反復の停止条件そのもの**（これが無いと `max_steps` 固定になる）、
+`evidence_chunk_ids` は根拠チャンク（`evidence_f1`）。`paper_ids` 自体も
+ランキングB の起点（`anchor_from: verdict`）として順位付けには使う。
 
 ## 提出本数の決め方（`paper_cutoff`）
 
@@ -214,7 +213,7 @@ task_family を外し、LLM の `sufficient` 判定だけに寄せた。
 | `snippet_chars` | 1800 | 1チャンクを何文字まで見せるか |
 | `paper_cutoff` | `llm` | 提出本数の決め方 |
 | `max_papers` | 10 | 提出本数の上限 |
-| `submit_from` | `candidates` | 提出論文をどのランキングから作るか（選定は読解チーム側） |
+| `paper_score_skip_chunk_types` | なし | 論文の代表スコアに使わないチャンク種別（`[table]` が実測での最良） |
 
 `max_candidates: 20` は評価指標 `candidate_recall@20` と揃えてある。ここが15だと
 16〜20位の論文は検索で拾えても LLM が見られず提出候補に入らないため、指標上の

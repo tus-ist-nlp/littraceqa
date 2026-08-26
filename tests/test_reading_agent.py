@@ -48,7 +48,7 @@ class _StubRetriever:
     def __init__(self, by_query: dict[str, list[RetrievalResult]] | None = None):
         self.by_query = by_query or {}
         self.calls: list[str] = []
-        self.top_ks: list[int] = []  # adaptive_depth が要求した件数を見るため
+        self.top_ks: list[int] = []  # 何件を要求されたかを見るため
 
     def retrieve(self, question: str, top_k: int) -> list[RetrievalResult]:
         self.calls.append(question)
@@ -102,7 +102,7 @@ def test_loop_iterates_when_llm_says_insufficient():
     assert prediction.trace[1]["sufficient"] is True
     # 不足を埋めるための再検索が実際に走っている
     assert "step2-sq" in retriever.calls
-    # 提出は候補列の順位そのまま（submit_from の既定）。2周目で拾った pX が
+    # 提出は候補列の順位そのまま。2周目で拾った pX が
     # スコア9.0で先頭に来ている = 再検索の結果が提出に反映されている。
     assert [p["paper_id"] for p in prediction.gold_papers][:2] == ["pX", "p0"]
 
@@ -238,26 +238,21 @@ def test_falls_back_to_cutoff_when_llm_output_is_unusable(task_family, expected)
 def test_candidate_papers_records_ranking_before_cutoff():
     """打ち切り前の候補論文を関連度順で残す（recall@k の分析に使う）。
 
-    gold_papers は LLM の選定と cutoff で数本に絞られるので、これだけでは
+    gold_papers は cutoff で数本に絞られるので、これだけでは
     「検索がそもそも gold を候補に拾えていたか」を後から測れない。
     """
     retriever = _StubRetriever(
         {"sq": [_result(0, f"p{i}", 10.0 - i) for i in range(8)]}
     )
-    llm = FakeLLM(
-        responses=[
-            _subqueries("sq"),
-            _judge(["p0"], sufficient=True),  # 提出は1本に絞られる
-        ]
-    )
+    llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
     agent = ReadingAgent(
-        retriever, llm=llm, max_steps=1, retrieve_top_k=8, paper_cutoff="llm",
-        submit_from="llm",  # 選定込みで「提出は絞られる」ことを見るテストなので明示する
+        retriever, llm=llm, max_steps=1, retrieve_top_k=8,
+        paper_cutoff="llm", max_papers=3,
     )
     prediction = agent.run(_query())
 
-    # 提出は絞られても、候補はスコア降順で丸ごと残っている。
-    assert [p["paper_id"] for p in prediction.gold_papers] == ["p0"]
+    # 提出は max_papers で切られても、候補はスコア降順で丸ごと残っている。
+    assert [p["paper_id"] for p in prediction.gold_papers] == ["p0", "p1", "p2"]
     assert prediction.candidate_papers == [f"p{i}" for i in range(8)]
 
 
@@ -514,7 +509,8 @@ def _rrf_agent(ranking: list[str], **kwargs) -> ReadingAgent:
         retrieve_top_k=5,
         max_candidates=2,
         paper_expander=expander,
-        submit_from="llm",
+        paper_cutoff="llm",
+        max_papers=1,
     )
 
 
@@ -527,7 +523,7 @@ def test_combine_rrf_promotes_papers_backed_by_both_rankings():
     assert candidates.index("p3") < candidates.index("p1")
     # B にしか居ない論文も入る（素の RRF なので A の上位とは競り負ける）
     assert "pE1" in candidates
-    # 統合は候補列だけを組み替える。LLM 選定（submit_from="llm"）には触らない。
+    # 統合は候補列だけを組み替える。提出（max_papers=1）は融合後の1位のまま。
     assert prediction.gold_papers == [{"paper_id": "p0"}]
     fusion = [s["paper_fusion"] for s in prediction.trace if "paper_fusion" in s]
     assert fusion and fusion[0]["anchor"] == "p0"
@@ -605,65 +601,8 @@ def test_consensus_off_is_the_existing_path():
     assert "pE3" not in _run(off)
 
 
-class _ScoreReranker:
-    """paper_id -> スコアの対応表で並べ替える偽 reranker。"""
-
-    def __init__(self, scores: dict[str, float]):
-        self.scores = scores
-        self.calls: list[str] = []
-
-    def rerank(self, query, candidates, top_k):
-        self.calls.append(query)
-        out = []
-        for c in candidates:
-            out.append(
-                RetrievalResult(
-                    chunk_id=c.chunk_id, paper_id=c.paper_id,
-                    score=self.scores.get(c.paper_id, 0.0), text=c.text,
-                    chunk_type=c.chunk_type, metadata=c.metadata, source=c.source,
-                )
-            )
-        return sorted(out, key=lambda r: r.score, reverse=True)[:top_k]
-
-
-class _RerankingRetriever(_StubRetriever):
-    def __init__(self, reranker, **kwargs):
-        super().__init__(**kwargs)
-        self.reranker = reranker
-
-
-# ---------------------------------------------------------------------------
-# 反復ループの拡張（docs/search_agent_spec.md 3〜7節）。
-# 共通の約束: **新 params を書かなければ既存の経路と完全に同一**。
-# ---------------------------------------------------------------------------
-
-
-def test_new_params_are_all_opt_in():
-    """新 params を一切書かない構成が、従来と同じ候補列を出す（後方互換）。
-
-    上のテスト24件が丸ごとこの保証を兼ねているが、既定値そのものが
-    「従来と同一」であることを明示的に固定しておく。
-    """
-    agent = ReadingAgent(_StubRetriever(), llm=FakeLLM(responses=[]))
-    assert agent.subquery_merge == "max"
-    assert agent.grounded_refine is False
-    assert agent.pool_rescore is False and agent.pool_prune_to is None
-    assert agent.adaptive_depth is None
-
-
-def test_unknown_subquery_merge_is_rejected():
-    """yaml の綴り間違いを黙って max に落とさない。"""
-    with pytest.raises(ValueError, match="subquery_merge"):
-        ReadingAgent(_StubRetriever(), llm=FakeLLM(responses=[]), subquery_merge="rff")
-
-
 def _two_subquery_retriever():
-    """サブクエリAが高スコアで1本、Bが低スコアで2本返すスタブ。
-
-    max マージだと pB1(0.5) は pA(0.9) に勝てないが、RRF なら pB1 は
-    「サブクエリBの1位」なので pA と同じ 1/(k+1) を得る。multi の gold が
-    「1本のサブクエリだけが見つける論文」であるときの再現。
-    """
+    """サブクエリAが高スコアで1本、Bが低スコアで2本返すスタブ。"""
     return _StubRetriever(
         {
             "sqA": [_result(0, "pA", 0.9), _result(0, "pX", 0.8)],
@@ -672,119 +611,13 @@ def _two_subquery_retriever():
     )
 
 
-def test_subquery_merge_rrf_ranks_by_rank_not_absolute_score():
-    """RRF では「別サブクエリの1位」が「あるサブクエリの2位」より上に来る。
-
-    max マージでは pX(0.8) が pB1(0.5) に勝つ。異なるサブクエリに対する
-    reranker の yes 確率を突き合わせているためで、この比較には意味が無い。
-    """
-    llm = FakeLLM(responses=[_subqueries("sqA", "sqB"), _judge(["pA"], sufficient=True)])
-    agent = ReadingAgent(
-        _two_subquery_retriever(), llm=llm, max_steps=1, retrieve_top_k=5,
-        subquery_merge="rrf",
-    )
-    cands = agent.run(_query()).candidate_papers
-    # pX は両サブクエリの2位なので2項ぶん入り首位。pB1（B の1位）は pA と同点で、
-    # 同点は挿入順（A が先）で決まるため pA の直後。
-    assert cands[0] == "pX", cands
-    assert cands.index("pB1") < cands.index("pA") + 2, cands
-
-
-def test_subquery_merge_max_is_unchanged():
-    """既定（max）では従来どおり絶対スコア順。上のテストとの対比。"""
+def test_pool_is_max_merged_across_subqueries():
+    """サブクエリをまたいだプールは chunk ごとの最高スコア順に並ぶ。"""
     llm = FakeLLM(responses=[_subqueries("sqA", "sqB"), _judge(["pA"], sufficient=True)])
     agent = ReadingAgent(
         _two_subquery_retriever(), llm=llm, max_steps=1, retrieve_top_k=5,
     )
     assert agent.run(_query()).candidate_papers == ["pA", "pX", "pB1"]
-
-
-def test_grounded_refine_shows_candidates_and_dead_subqueries():
-    """接地版の _refine が「候補上位」と「効かなかったサブクエリ」をプロンプトに含む。"""
-    retriever = _StubRetriever(
-        {
-            "hit": [_result(0, "pTop", 0.9, title="Speculative Decoding for LLMs")],
-            "dud": [_result(0, "pLow", 0.1, title="Unrelated Paper")],
-        }
-    )
-    llm = FakeLLM(
-        responses=[
-            _subqueries("hit", "dud"),
-            _judge(["pTop"], sufficient=False, missing="need the batch size"),
-            _subqueries("next"),
-            _judge(["pTop"], sufficient=True),
-        ]
-    )
-    agent = ReadingAgent(
-        retriever, llm=llm, max_steps=2, retrieve_top_k=5,
-        max_candidates=1, grounded_refine=True, grounded_refine_top_n=1,
-    )
-    agent.run(_query())
-
-    refine_prompt = llm.calls[2]
-    assert "Speculative Decoding for LLMs" in refine_prompt
-    # 上位1本に1件も残らなかった "dud" が名指しされ、残った "hit" はされない。
-    dead = refine_prompt.split("contributed nothing")[1]
-    assert "- dud" in dead and "- hit" not in dead
-    # 誤解の訂正を促す一文（q_003 の型）が入る。
-    assert "correct the assumption" in refine_prompt
-
-
-def test_refine_prompt_is_unchanged_without_grounding():
-    """grounded_refine を書かなければ _refine のプロンプトは従来のまま。"""
-    llm = FakeLLM(
-        responses=[
-            _subqueries("sq"),
-            _judge(["p0"], sufficient=False, missing="more"),
-            _subqueries("next"),
-            _judge(["p0"], sufficient=True),
-        ]
-    )
-    agent = ReadingAgent(_StubRetriever(), llm=llm, max_steps=2, retrieve_top_k=5)
-    agent.run(_query())
-    assert "contributed nothing" not in llm.calls[2]
-    assert "corpus actually returned" not in llm.calls[2]
-
-
-def test_pool_rescore_reranks_the_pool_with_the_original_question():
-    """pool_rescore はプール全体を**元の質問**で1回だけリランクする。
-
-    サブクエリで測り直すと、解消したかったスコア非可換性がそのまま残る。
-    """
-    reranker = _ScoreReranker({"pA": 0.1, "pB1": 0.9, "pX": 0.5})
-    retriever = _RerankingRetriever(reranker, by_query=_two_subquery_retriever().by_query)
-    llm = FakeLLM(responses=[_subqueries("sqA", "sqB"), _judge(["pA"], sufficient=True)])
-    agent = ReadingAgent(
-        retriever, llm=llm, max_steps=1, retrieve_top_k=5, pool_rescore=True,
-    )
-    prediction = agent.run(_query())
-
-    assert reranker.calls == ["Which papers report FID on CIFAR-10?"]
-    # 全チャンクが同じ尺度で測り直されるので、素の max マージの順（pA, pX, pB1）が覆る。
-    assert prediction.candidate_papers == ["pB1", "pX", "pA"]
-    assert [s for s in prediction.trace if "pool_rescore" in s]
-
-
-def test_pool_rescore_is_skipped_without_a_reranker():
-    """reranker を持たない構成では黙って skip する（NoneReranker も同じ）。"""
-    llm = FakeLLM(responses=[_subqueries("sqA", "sqB"), _judge(["pA"], sufficient=True)])
-    agent = ReadingAgent(
-        _two_subquery_retriever(), llm=llm, max_steps=1, retrieve_top_k=5,
-        pool_rescore=True,
-    )
-    prediction = agent.run(_query())
-    assert prediction.candidate_papers == ["pA", "pX", "pB1"]
-    assert not [s for s in prediction.trace if "pool_rescore" in s]
-
-
-def test_pool_prune_to_cuts_the_pool():
-    """pool_prune_to は再スコア後（無ければマージ後）に上位 N 件へ切る。"""
-    llm = FakeLLM(responses=[_subqueries("sqA", "sqB"), _judge(["pA"], sufficient=True)])
-    agent = ReadingAgent(
-        _two_subquery_retriever(), llm=llm, max_steps=1, retrieve_top_k=5,
-        pool_prune_to=2,
-    )
-    assert agent.run(_query()).candidate_papers == ["pA", "pX"]
 
 
 def _depth_agent(**depth):
@@ -793,58 +626,6 @@ def _depth_agent(**depth):
     base.update(depth)
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
     return llm, base
-
-
-def test_adaptive_depth_takes_few_results_when_the_winner_is_clear():
-    """1位が飛び抜けていれば shallow_k 件しか採らない（single_paper の型）。"""
-    steep = [_result(0, "p0", 1.0), _result(0, "p1", 0.9), _result(0, "p2", 0.2),
-             _result(0, "p3", 0.1), _result(0, "p4", 0.05)]
-    llm, depth = _depth_agent()
-    agent = ReadingAgent(
-        _StubRetriever({"sq": steep}), llm=llm, max_steps=1, adaptive_depth=depth,
-    )
-    assert agent.run(_query()).candidate_papers == ["p0", "p1"]
-
-
-def test_adaptive_depth_takes_many_results_when_scores_are_flat():
-    """スコアが平坦なら deep_k 件まで採る（multi_paper の型）。"""
-    flat = [_result(0, f"p{i}", 1.0 - i * 0.01) for i in range(5)]
-    llm, depth = _depth_agent()
-    agent = ReadingAgent(
-        _StubRetriever({"sq": flat}), llm=llm, max_steps=1, adaptive_depth=depth,
-    )
-    assert agent.run(_query()).candidate_papers == ["p0", "p1", "p2", "p3", "p4"]
-
-
-def test_adaptive_depth_asks_the_retriever_for_deep_k():
-    """retriever には常に deep_k を渡し、切るのはエージェント側。
-
-    reranker の推論件数は search_style の pool_k で決まるので、深く受け取っても
-    推論コストは増えない。浅く要求してしまうと拾い直せない。
-    """
-    seen: list[int] = []
-
-    class _Recording(_StubRetriever):
-        def retrieve(self, question, top_k):
-            seen.append(top_k)
-            return super().retrieve(question, top_k)
-
-    llm, depth = _depth_agent()
-    agent = ReadingAgent(
-        _Recording(), llm=llm, max_steps=1, retrieve_top_k=20, adaptive_depth=depth,
-    )
-    agent.run(_query())
-    assert seen == [5]
-
-
-def test_adaptive_depth_is_off_when_not_enabled():
-    """enabled: false は「書いていない」と同じ（従来の retrieve_top_k を使う）。"""
-    llm, depth = _depth_agent(enabled=False)
-    agent = ReadingAgent(
-        _StubRetriever(), llm=llm, max_steps=1, retrieve_top_k=3, adaptive_depth=depth,
-    )
-    assert agent.adaptive_depth is None
-    assert len(agent.run(_query()).candidate_papers) == 3
 
 
 def test_last_runs_is_exposed_for_dumping():
@@ -856,72 +637,8 @@ def test_last_runs_is_exposed_for_dumping():
     assert [r.paper_id for r in agent.last_runs[1].results] == ["pB1", "pX"]
 
 
-def test_stacked_loop_config_runs_with_every_extension_active():
-    """反復ループの拡張キーを同時に有効にしても反復が最後まで回る。
-
-    4つの拡張は別々の地点に効くので併用できる、というのがこの組み合わせの前提。
-
-    以前は `configs/agent_style/reading_loop/stacked.yaml` を実ファイルとして
-    読んでいたが、そのフォルダは削除した（拡張キー自体は reading.py に残る）。
-    params はここに直接置く——テストの対象は yaml ではなくコードの側なので、
-    プリセットが無くなっても併用可能性は保証し続ける必要がある。
-
-    `pool_rescore` は入れない。`_rescore_pool()` は `_merged_results()` の後に走り、
-    reranker がプール全件を再スコアして並びを置き換えるので、`subquery_merge` が
-    作った順位が candidate_papers では消える（同じ問題への別々の答えなので、
-    足すのではなく選ぶ）。
-    """
-    params = {
-        "max_steps": 3,
-        "retrieve_top_k": 20,  # adaptive_depth 有効時は使われない
-        "max_candidates": 20,
-        "chunks_per_paper": 2,
-        "snippet_chars": 1800,
-        "paper_cutoff": "llm",
-        "max_papers": 10,
-        "subquery_merge": "rrf",
-        "subquery_rrf_k": 60,
-        "grounded_refine": True,
-        "grounded_refine_top_n": 10,
-        "adaptive_depth": {
-            "enabled": True,
-            "probe_rank": 4,
-            "gap_threshold": 0.15,
-            "shallow_k": 10,
-            "deep_k": 40,
-        },
-        "pool_rescore": False,
-        "pool_prune_to": None,
-    }
-
-    # adaptive_depth の probe_rank(4) を超える件数を返す（落差を測れる長さ）。
-    flat = [_result(i, f"p{i}", 0.90 - 0.001 * i) for i in range(8)]
-    retriever = _StubRetriever({"hit": flat, "dud": [_result(0, "pLow", 0.1)]})
-    llm = FakeLLM(
-        responses=[
-            _subqueries("hit", "dud"),
-            _judge(["p0"], sufficient=False, missing="need the batch size"),
-            _subqueries("next"),
-            _judge(["p0", "p1"], sufficient=True),
-        ]
-    )
-    agent = ReadingAgent(retriever, llm=llm, **params)
-    prediction = agent.run(_query())
-
-    submitted = [p["paper_id"] for p in prediction.gold_papers]
-    assert submitted[0] == "p0"
-    # subquery_merge: rrf が効いている——"dud" の中では1位だった pLow が、
-    # 絶対スコア(0.1)では最下位なのに順位融合で上位に来る（max マージだと沈む）。
-    assert "pLow" in submitted[:3]
-    # grounded_refine が効いている（_refine のプロンプトに候補上位の接地情報が入る）。
-    assert "corpus actually returned" in llm.calls[2]
-    # adaptive_depth が「retrieve_top_k(20) ではなく deep_k(40)」で retriever を呼ぶ。
-    assert retriever.top_ks == [40, 40, 40]
-    assert prediction.candidate_papers
-
-
-def test_submit_from_candidates_is_the_default_and_ignores_llm_selection():
-    """既定では提出論文を**選ばない**。候補列の順位をそのまま渡す。
+def test_submission_is_the_candidate_ranking_not_the_llm_selection():
+    """提出論文を**選ばない**。候補列の順位をそのまま渡す。
 
     どれを提出するかの選定は読解チーム側の担当なので、検索エージェントは
     順位を渡すところで止める。LLM の paper_ids は使わないが、`sufficient`
@@ -939,23 +656,6 @@ def test_submit_from_candidates_is_the_default_and_ignores_llm_selection():
     assert prediction.trace[0]["sufficient"] is True
     # 選んだ論文が提出に残っているので evidence も出る。
     assert [e.paper_id for e in prediction.evidence] == ["p5"]
-
-
-def test_submit_from_llm_restores_the_selection():
-    """`submit_from: llm` にすると従来どおり LLM の選定結果を提出する。"""
-    retriever = _StubRetriever({"sq": [_result(0, f"p{i}", 10.0 - i) for i in range(8)]})
-    llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p5"], sufficient=True)])
-    agent = ReadingAgent(
-        retriever, llm=llm, max_steps=1, retrieve_top_k=8,
-        paper_cutoff="llm", submit_from="llm",
-    )
-    prediction = agent.run(_query())
-    assert [p["paper_id"] for p in prediction.gold_papers] == ["p5"]
-
-
-def test_unknown_submit_from_is_rejected():
-    with pytest.raises(ValueError, match="submit_from"):
-        ReadingAgent(_StubRetriever(), llm=FakeLLM(responses=[]), submit_from="reading_team")
 
 
 def test_decompose_asks_for_a_fixed_number_of_subqueries():
@@ -993,104 +693,6 @@ def test_decompose_does_not_call_the_task_family_classifier():
 
     assert len(llm.calls) == 2  # 分解1 + 読解1 だけ
     assert "task_family" not in llm.calls[0]
-
-
-# ---- 生質問1位のピン留め（rawq_pin） --------------------------------------
-
-
-def _rawq_retriever() -> _StubRetriever:
-    """サブクエリと元の質問で違う1位を返すスタブ。
-
-    `_decompose()` が作るサブクエリは元の質問の語の組み合わせを保たないので、
-    融合すると1位が薄まる——という実測の構図をそのまま写している。
-    """
-    return _StubRetriever(
-        {
-            "sq": [_result(0, "pSUB", 9.0), _result(1, "pB", 1.0)],
-            _query().question: [_result(0, "pRAW", 8.0), _result(1, "pB", 0.5)],
-        }
-    )
-
-
-def _rawq_agent(retriever: _StubRetriever, expander=None, **params) -> ReadingAgent:
-    return ReadingAgent(
-        retriever,
-        llm=FakeLLM(responses=[_subqueries("sq"), _judge(["pSUB"], sufficient=True)]),
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
-        paper_expander=expander,
-        **params,
-    )
-
-
-def test_rawq_pin_is_off_by_default():
-    """`rawq_pin` を書かなければ元の質問は検索にも順位にも一切現れない。"""
-    retriever = _rawq_retriever()
-    prediction = _rawq_agent(retriever).run(_query())
-
-    assert retriever.calls == ["sq"], "既定で検索が増えている"
-    assert "pRAW" not in prediction.candidate_papers
-    assert prediction.candidate_papers[0] == "pSUB"
-
-
-def test_rawq_pin_searches_the_original_question_and_pins_its_top_paper():
-    """元の質問を step0 に足し、その1位を候補列の先頭に固定する。
-
-    **足すだけでは効かない**（max マージは chunk 単位の最高スコアを残すだけで、
-    実測でも cr / ecr が全 k で不変だった）ので、固定まで含めて1つの打ち手。
-    """
-    retriever = _rawq_retriever()
-    prediction = _rawq_agent(retriever, rawq_pin=1).run(_query())
-
-    # 元の質問が5本目のサブクエリとして実際に投げられている
-    assert retriever.calls == ["sq", _query().question]
-    # スコアでは pSUB(9.0) が上でも、固定した pRAW(8.0) が先頭に来る
-    assert prediction.candidate_papers[0] == "pRAW"
-    assert prediction.candidate_papers[1] == "pSUB"
-
-
-def test_rawq_pin_only_pins_the_requested_number_of_papers():
-    """`rawq_pin: 1` なら生質問の2位は固定しない（2本以上は @5 を崩す）。"""
-    prediction = _rawq_agent(_rawq_retriever(), rawq_pin=1).run(_query())
-    # 生質問の2位 pB はスコア順のまま（先頭2枠は pRAW / pSUB）
-    assert prediction.candidate_papers.index("pB") >= 2
-
-
-def test_rawq_pin_moves_the_anchor_of_ranking_b():
-    """固定は統合の**前**なので、ランキングB の起点も生質問1位に変わる。
-
-    統合後の候補列に置くだけだと @1 しか動かないが、A の先頭に置くと
-    @5 以降にも効く（土台 notable の ecr@5: 統合後 0.8465 / A の先頭 0.8556）。
-    """
-    expander = _StubRelated(["pE1"])
-    prediction = _rawq_agent(_rawq_retriever(), expander=expander, rawq_pin=1).run(_query())
-
-    fusion = [s["paper_fusion"] for s in prediction.trace if "paper_fusion" in s]
-    assert fusion and fusion[0]["anchor"] == "pRAW"
-    assert prediction.candidate_papers[0] == "pRAW"
-
-
-def test_rawq_pin_keeps_the_original_question_chunks_in_the_pool():
-    """足した run は普通のサブクエリなので、生質問が引いたチャンクも evidence に出せる。"""
-    retriever = _rawq_retriever()
-    agent = ReadingAgent(
-        retriever,
-        llm=FakeLLM(
-            responses=[
-                _subqueries("sq"),
-                # 生質問だけが引いた論文のチャンクを根拠に指名する
-                _judge(["pRAW"], sufficient=True),
-            ]
-        ),
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
-        rawq_pin=1,
-    )
-    prediction = agent.run(_query())
-
-    assert [e.paper_id for e in prediction.evidence] == ["pRAW"]
 
 
 # ---- LLM 不要の起点（anchor_from: score） ----------------------------------

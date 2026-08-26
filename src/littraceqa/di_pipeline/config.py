@@ -150,15 +150,6 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
                     "cache_path",
                     f"{paths['index_dir']}/{process_name}/{index_name}/refs.pkl",
                 )
-            elif name in ("title_mention", "method_comention"):
-                # 2つとも「どの論文がどの論文を名指ししているか」という同じ索引を
-                # 読む（解釈だけが違う）ので、キャッシュを共有する。
-                # コーパス走査は初回の1回だけで済む。
-                params.setdefault("chunks", resolved_paths["chunks"])
-                params.setdefault(
-                    "cache_path",
-                    f"{paths['index_dir']}/{process_name}/relations/mentions.pkl",
-                )
             elif name == "bm25_mlt":
                 # 構築済みの bm25s_paper 索引をそのまま読む（追加構築なし）。
                 # 行番号 -> paper_id と anchor 用 title+abstract のキャッシュだけ
@@ -174,19 +165,6 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
             resolved_sources.append({"name": name, "params": params})
         expansion["sources"] = resolved_sources
         agent_cfg["expansion"] = expansion
-
-    # 名指し保護（agent params の title_protect）も識別子辞書のパスを要る。
-    # 関係グラフと同じキャッシュを読むので、索引は1本で済む。
-    agent_params = agent_cfg.get("params")
-    if isinstance(agent_params, dict) and agent_params.get("title_protect"):
-        agent_params = dict(agent_params)
-        protect = dict(agent_params["title_protect"])
-        protect.setdefault("chunks", resolved_paths["chunks"])
-        protect.setdefault(
-            "cache_path", f"{paths['index_dir']}/{process_name}/relations/mentions.pkl"
-        )
-        agent_params["title_protect"] = protect
-        agent_cfg["params"] = agent_params
 
     return {
         "paths": resolved_paths,
@@ -290,16 +268,6 @@ def build_pipeline(cfg: dict) -> tuple[Any, HybridRetriever, Any]:
     expander = build_paper_expander(agent_cfg)
     if expander is not None:
         llm_kwargs["paper_expander"] = expander
-
-    # 検索結果に接地したクエリ書き換えと、サブクエリの重複除去。
-    # どちらも agent yaml の**トップレベル**ブロック（params ではない）で、
-    # 書かなければキー自体を渡さないので既存構成の挙動は変わらない。
-    # rewrite は A（検索）と B（展開）の両方を材料にするので expansion の中に
-    # 入れない。
-    for key in ("rewrite", "subquery_dedup"):
-        block = agent_cfg.get(key)
-        if block:
-            llm_kwargs[key] = block
 
     # 属性フィルタ（会議名・年）。設定が無い / enabled: false なら無効のまま。
     attribute_cfg = cfg["retriever"].get("attribute_filter") or {}

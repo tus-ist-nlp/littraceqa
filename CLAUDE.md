@@ -357,7 +357,7 @@ BM25 と faiss なのでこれらは1件もヒットせず、2周目・3周目�
 `_read_and_judge()` が返す LLM の `sufficient` 判定のみ。本番入力に `task_family` が無く、
 推定しても正解率0.67程度で当てにならないため。
 
-### 提出論文は選定しない（`submit_from: candidates`、既定）
+### 提出論文は選定しない
 
 **どれを提出するかを決めるのは読解チーム側の担当**なので、検索エージェントは候補列の順位を
 渡すところで止める。`gold_papers` は `candidate_papers` の順位そのまま（`max_papers: 10` で
