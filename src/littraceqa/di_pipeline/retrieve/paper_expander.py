@@ -165,13 +165,6 @@ class Specter2PaperExpander:
     def rank(self, anchors: list[str]) -> list[str]:
         return _interleave(self._pools(anchors), self.neighbors)
 
-    def text_of(self, paper_id: str) -> str:
-        """rerank に渡す代表テキスト（title+abstract）。無ければ空文字。"""
-        if self._index is None:
-            self._load()
-        return (self._chunk_of.get(paper_id) or {}).get("text", "")
-
-
 @register("expander", "bib_coupling")
 class BibCouplingExpander:
     """書誌結合（参考文献の共有）で近い論文を返す。
@@ -200,7 +193,6 @@ class BibCouplingExpander:
         self.min_shared = min_shared
         self._refs: dict[str, set[str]] | None = None
         self._inv: dict[str, set[str]] = {}
-        self._text: dict[str, str] = {}
 
     def _load(self) -> None:
         if self.cache_path.exists():
@@ -211,15 +203,12 @@ class BibCouplingExpander:
             self.cache_path.write_bytes(pickle.dumps(payload))
         self._refs = payload["refs"]
         self._inv = payload["inv"]
-        self._text = payload["text"]
 
     def _build(self) -> dict:
         """chunks.jsonl を1回走査して {論文 -> 引用arXiv ID} と転置索引を作る。"""
         refs: dict[str, set[str]] = {}
-        text: dict[str, str] = {}
         current: str | None = None
         buffer: list[str] = []
-        title_abstract = ""
 
         def flush() -> None:
             if current is None:
@@ -227,8 +216,6 @@ class BibCouplingExpander:
             ids = set(_ARXIV_RE.findall(" ".join(buffer)))
             if ids:
                 refs[current] = ids
-            if title_abstract:
-                text[current] = title_abstract
 
         with open(self.chunks_path, encoding="utf-8") as handle:
             for line in handle:
@@ -238,18 +225,15 @@ class BibCouplingExpander:
                 paper_id = chunk.get("paper_id", "")
                 if paper_id != current:
                     flush()
-                    current, buffer, title_abstract = paper_id, [], ""
-                body = chunk.get("text", "")
-                buffer.append(body)
-                if chunk.get("chunk_type") == "title_abstract" and not title_abstract:
-                    title_abstract = body
+                    current, buffer = paper_id, []
+                buffer.append(chunk.get("text", ""))
         flush()
 
         inv: dict[str, set[str]] = {}
         for paper_id, ids in refs.items():
             for arxiv_id in ids:
                 inv.setdefault(arxiv_id, set()).add(paper_id)
-        return {"refs": refs, "inv": inv, "text": text}
+        return {"refs": refs, "inv": inv}
 
     def _neighbors(self, paper_id: str) -> list[str]:
         assert self._refs is not None
@@ -281,12 +265,6 @@ class BibCouplingExpander:
     def rank(self, anchors: list[str]) -> list[str]:
         """書誌結合の近さ順。"""
         return _interleave(self._pools(anchors), self.neighbors)
-
-    def text_of(self, paper_id: str) -> str:
-        if self._refs is None:
-            self._load()
-        return self._text.get(paper_id, "")
-
 
 def _json_string_prefix(line: str, start: int, max_chars: int) -> str:
     """JSON1行の ``start`` 位置から始まる文字列値の先頭 ``max_chars`` 文字を復号する。
@@ -403,12 +381,6 @@ class BM25MLTExpander:
         """全文 BM25 の近さ順。"""
         return _interleave(self._pools(anchors), self.neighbors)
 
-    def text_of(self, paper_id: str) -> str:
-        if self._bm25 is None:
-            self._load()
-        return self._text.get(paper_id, "")
-
-
 @register("expander", "fused")
 class FusedPaperExpander:
     """複数の expander の近傍を RRF で融合する。
@@ -439,12 +411,3 @@ class FusedPaperExpander:
     def rank(self, anchors: list[str]) -> list[str]:
         """各ソースの近傍ランキングを RRF 融合する。"""
         return self._fuse([source.rank(anchors) for source in self.sources])
-
-    def text_of(self, paper_id: str) -> str:
-        for source in self.sources:
-            text = source.text_of(paper_id)
-            if text:
-                return text
-        return ""
-
-

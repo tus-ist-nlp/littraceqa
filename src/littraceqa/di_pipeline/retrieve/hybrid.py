@@ -19,15 +19,17 @@ from littraceqa.di_pipeline.retrieve.attribute_filter import (
     AttributeFilter,
     filter_results,
 )
-from littraceqa.di_pipeline.retrieve.base import Fuser, Reranker
+from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
+from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker
 
 
 class HybridRetriever:
     def __init__(
         self,
         indexers: list,
-        fuser: Fuser,
-        reranker: Reranker | None = None,
+        fuser: PaperRRFFuser,
+        # None なら融合した順位をそのまま返す（再ランクしない）。
+        reranker: Qwen3Reranker | None = None,
         per_index_k: int = 100,
         pool_k: int | None = None,
         attribute_extractor: AttributeExtractor | None = None,

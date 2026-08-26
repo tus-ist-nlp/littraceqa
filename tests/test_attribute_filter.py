@@ -19,7 +19,7 @@ from littraceqa.di_pipeline.retrieve.attribute_filter import (
     filter_results,
 )
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
-from littraceqa.di_pipeline.retrieve.rrf import RRFFuser
+from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
 
 # 本物の paper_metadata.jsonl と同じ venue 構成（件数だけ縮めたもの）。
 _PAPERS = (
@@ -182,7 +182,7 @@ class _StubIndexer:
 def _retriever(indexer, extractor, **kwargs) -> HybridRetriever:
     return HybridRetriever(
         indexers=[indexer],
-        fuser=RRFFuser(),
+        fuser=PaperRRFFuser(),
         per_index_k=10,
         attribute_extractor=extractor,
         **kwargs,

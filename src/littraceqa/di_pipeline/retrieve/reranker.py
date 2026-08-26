@@ -1,10 +1,7 @@
-"""reranker 実装。
+"""Qwen3-Reranker（causal LM ベースの yes/no 判定型 reranker）によるチャンクの再ランク。
 
-* NoneReranker: reranker を使わない設定用の placeholder。
-* Qwen3Reranker: Qwen3-Reranker (causal LM ベースの yes/no 判定型 reranker) による
-  クエリ・チャンク間の再ランキング。索引構築ではなくクエリ時の推論のみなので、
-  Qwen3-Embedding の索引構築 (faiss_qwen3.py) のようなマルチGPU分散・memmap は不要で、
-  1GPUでバッチ推論すれば十分。
+索引構築ではなくクエリ時の推論のみなので、Qwen3-Embedding の索引構築
+（faiss_qwen3.py）のようなマルチGPU分散・memmap は不要で、GPUでバッチ推論すれば足りる。
 """
 
 from __future__ import annotations
@@ -18,18 +15,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from littraceqa.di_pipeline.accel import load_with_best_attn, maybe_compile
 from littraceqa.di_pipeline.contracts import RetrievalResult
 from littraceqa.di_pipeline.registry import register
-
-
-@register("reranker", "none")
-class NoneReranker:
-    def rerank(
-        self,
-        query: str,
-        candidates: list[RetrievalResult],
-        top_k: int,
-    ) -> list[RetrievalResult]:
-        return candidates[:top_k]
-
 
 _DEFAULT_INSTRUCTION = (
     "Given a scientific question, retrieve passages from research papers that "
@@ -146,8 +131,7 @@ class Qwen3Reranker:
         # rerank の順位が 100% 捨てられ、効果が「100件のプールから20件を選ぶ」
         # フィルタ効果だけになってしまう。
         # RRF スコアと yes 確率はスケールが違うが、reranker を設定した run では
-        # 全チャンクが必ずここを通る（NoneReranker は素通し）ので、1 run の中で
-        # スケールが混ざることはない。
+        # 全チャンクが必ずここを通るので、1 run の中でスケールが混ざることはない。
         ranked = sorted(
             (replace(c, score=float(s)) for c, s in zip(candidates, scores)),
             key=lambda result: result.score,
@@ -244,91 +228,3 @@ class Qwen3Reranker:
         pair_logits = logits[:, [self._no_id, self._yes_id]]
         log_probs = torch.nn.functional.log_softmax(pair_logits, dim=-1)
         return log_probs[:, 1].exp().float().cpu().tolist()
-
-
-# 論文内でのチャンクの順位を保つための微小オフセット。論文スコア（yes 確率、
-# 0〜1）の差はふつうこれより桁が大きいので、論文の並びは崩さない。
-_WITHIN_PAPER_EPSILON = 1e-6
-
-
-@register("reranker", "qwen3_paper")
-class Qwen3PaperReranker(Qwen3Reranker):
-    """**論文単位**で並べ替える Qwen3-Reranker。
-
-    チャンク単位の Qwen3Reranker との違いと、その理由:
-
-    * **推論回数が候補チャンク数ではなく候補論文数になる。** reranker は索引構築と
-      違いクエリのたびに走り、しかも ReadingAgent はサブクエリ×反復ステップで
-      1問あたり何度も retrieve する。チャンク単位で pool_k を大きくすると
-      実行時間が破綻する（0.6B実測 22.5件/秒。pool_k=1000 なら 55問で約6時間、
-      8B ならその十数倍）。論文単位にまとめれば推論回数が数分の1になる。
-    * **測っている指標と一致する。** candidate_recall は論文単位の指標で、
-      `to_gold_papers()` は論文ごとにチャンクスコアの max を取る。論文単位で
-      スコアを付ければ、reranker の判断がそのまま論文の順位になる。
-      CLAUDE.md の「retrieval の目的は gold paper の特定」という方針とも揃う。
-    * **モデルに論文全体を見せられる。** チャンク単位だと「その断片がクエリに
-      答えるか」を聞くことになるが、実際に知りたいのは「この論文が該当するか」。
-
-    論文の代表テキストは ``[{venue} {year}] {title}`` に上位 chunks_per_paper 件の
-    本文を足して作る。title/venue/year は全チャンクの metadata に必ず入っている
-    (preprocess/mineru_chunker.py) ので欠損しない。各チャンクの本文は先頭に同じ
-    prefix を持つので、重複させないよう取り除いてから連結する。
-
-    返すのは従来どおり RetrievalResult のリストなので、ReadingAgent も
-    to_gold_papers() も変更なしで動く。
-    """
-
-    def __init__(self, *args, chunks_per_paper: int = 3, **kwargs):
-        # マルチGPU（devices）とトークン予算バッチ（max_batch_tokens）は
-        # 基底クラス Qwen3Reranker が持つので、そのまま kwargs で渡る。
-        super().__init__(*args, **kwargs)
-        # 1論文の代表テキストに含める本文チャンク数。増やすほど判断材料は増えるが
-        # max_tokens で頭打ちになるので、実効上限は max_tokens 側で決まる。
-        self.chunks_per_paper = chunks_per_paper
-
-    def rerank(
-        self,
-        query: str,
-        candidates: list[RetrievalResult],
-        top_k: int,
-    ) -> list[RetrievalResult]:
-        if not candidates:
-            return []
-        self._ensure_loaded()
-
-        by_paper: dict[str, list[RetrievalResult]] = {}
-        for candidate in candidates:
-            by_paper.setdefault(candidate.paper_id, []).append(candidate)
-        for results in by_paper.values():
-            results.sort(key=lambda r: r.score, reverse=True)
-
-        paper_ids = list(by_paper)
-        texts = [self._paper_text(by_paper[paper_id]) for paper_id in paper_ids]
-
-        scores = self._score_all(query, texts)
-        paper_scores = dict(zip(paper_ids, scores))
-
-        ranked: list[RetrievalResult] = []
-        for paper_id in sorted(paper_ids, key=lambda p: paper_scores[p], reverse=True):
-            for within_rank, result in enumerate(by_paper[paper_id]):
-                # 論文スコアを全チャンクに配る。同点だと論文内の順位が下流の
-                # 安定ソートで失われるので、検索順に微小な差を付けておく。
-                ranked.append(
-                    replace(
-                        result,
-                        score=paper_scores[paper_id] - within_rank * _WITHIN_PAPER_EPSILON,
-                    )
-                )
-        return ranked[:top_k]
-
-    def _paper_text(self, results: list[RetrievalResult]) -> str:
-        """1論文ぶんの代表テキストを作る。"""
-        metadata = results[0].metadata or {}
-        header = f"[{metadata.get('venue', '')} {metadata.get('year', '')}] {metadata.get('title', '')}"
-        prefix = header + "\n"
-        bodies = []
-        for result in results[: self.chunks_per_paper]:
-            text = result.text
-            # 全チャンクが同じ prefix を持つので、代表テキストでは1回だけにする。
-            bodies.append(text[len(prefix) :] if text.startswith(prefix) else text)
-        return "\n".join([header, *bodies])

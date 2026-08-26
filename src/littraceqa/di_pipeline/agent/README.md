@@ -314,19 +314,20 @@ for indexer in indexers:
 - 発火条件は「会議名が一意に取れたとき」だけ。年のみ / `all venues` / 会議名が
   2種類以上 のときは抽出せず制約なしパスを通る（`attribute_filter.py`）。
 
-## c. 融合（`RRFFuser`, `retrieve/rrf.py`）
+## c. 融合（`PaperRRFFuser`, `retrieve/paper_rrf.py`）
 
-複数索引のランキングを Reciprocal Rank Fusion で1本に統合する。`rrf(k=60)`、
-全索引 weight 1.0（`search_style` 共通）。スコアの絶対値ではなく**順位**で混ぜるので、
-BM25（語彙）と埋め込み（意味）のようにスコールが違う索引を素直に合成できる。
-`fuse_k`（融合後に残す件数）は reranker の有無で変わる（上の図 c）。
+複数索引のランキングを**論文単位**の Reciprocal Rank Fusion で1本に統合する。`k=60`、
+全索引 weight 1.0。スコアの絶対値ではなく**順位**で混ぜるので、BM25（語彙）と
+埋め込み（意味）のようにスケールが違う索引を素直に合成できる。**1つの run の中では
+同じ論文に何チャンク当たっても1票**——チャンク単位で混ぜると、長い論文・表が多い論文が
+チャンク数だけで上位を占有してしまう（評価は論文単位なので、この歪みは指標に直接効く）。
 
-## d. reranker（任意, `retrieve/reranker.py`）
+## d. reranker（`Qwen3Reranker`, `retrieve/reranker.py`）
 
-`search_style` に reranker を書いた構成だけ発火。RRF 後の候補を `pool_k` 件プールし、
-クエリ×チャンクを cross-encoder 系モデルで採点し直して `top_k` に絞る。
+RRF 後の候補を `pool_k` 件プールし、クエリ×チャンクを yes/no 判定型モデルで採点し直す。
 `pool_k` を書かないと候補が増えず reranker の効果が出ない（CLAUDE.md 参照）。
-`none` の構成では融合結果の上位 `top_k` をそのまま返す。
+`rerank_blend` を書くと順位を置き換えずに融合前の順位と混ぜる。
+`search_style` に `reranker` を書かなければ融合結果の上位 `top_k` をそのまま返す。
 
 ## この層の主要パラメータ（`HybridRetriever.__init__`）
 

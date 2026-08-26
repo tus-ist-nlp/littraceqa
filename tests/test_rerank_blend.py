@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
-from littraceqa.di_pipeline.retrieve.rrf import RRFFuser
+from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
 
 
 def _result(name: str, score: float) -> RetrievalResult:
@@ -58,7 +58,7 @@ class _ReverseReranker:
 def _retriever(**kwargs) -> HybridRetriever:
     return HybridRetriever(
         indexers=[_StubIndexer(["a", "b", "c", "d", "e"])],
-        fuser=RRFFuser(k=60),
+        fuser=PaperRRFFuser(k=60),
         reranker=_ReverseReranker(),
         per_index_k=10,
         pool_k=5,
@@ -114,7 +114,7 @@ def test_no_reranker_is_untouched():
     """reranker が無ければ rerank_blend を書いても何も起きない。"""
     retriever = HybridRetriever(
         indexers=[_StubIndexer(["a", "b", "c"])],
-        fuser=RRFFuser(k=60),
+        fuser=PaperRRFFuser(k=60),
         reranker=None,
         per_index_k=10,
         rerank_blend={"original_weight": 0.6, "rerank_weight": 0.4},

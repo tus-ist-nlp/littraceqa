@@ -97,7 +97,6 @@ def test_bib_coupling_ranks_by_shared_references(tmp_path: Path) -> None:
     # p0 と2本共有する p1 のみ。p2 は1本しか共有しないので min_shared で落ちる。
     assert ex.rank(["p0"]) == ["p1"]
     # 代表テキストは title_abstract
-    assert "abstract one" in ex.text_of("p1")
     # 2回目はキャッシュから読む（走査しない）
     assert (tmp_path / "refs.pkl").exists()
     again = BibCouplingExpander(
@@ -127,7 +126,6 @@ def test_fused_expander_rrf_merges_sources(index_dir: Path, tmp_path: Path) -> N
     class _Fixed:
         def __init__(self, ids): self.ids = ids
         def rank(self, ranked): return list(self.ids)
-        def text_of(self, pid): return f"text of {pid}"
 
     # A: [x, y] / B: [y, z] -> y が両方で上位なので RRF で先頭に来る
     fused = FusedPaperExpander(
@@ -136,7 +134,6 @@ def test_fused_expander_rrf_merges_sources(index_dir: Path, tmp_path: Path) -> N
     assert fused.rank(["anchor"])[0] == "y"
     assert set(fused.rank(["anchor"])) == {"x", "y", "z"}
     # テキストは最初に持っていたソースから引く
-    assert fused.text_of("y") == "text of y"
 
 
 def _bm25_paper_index(tmp_path: Path) -> Path:
@@ -170,7 +167,6 @@ def test_bm25_mlt_ranks_lexically_close_papers(tmp_path: Path) -> None:
     assert added[0] == "p1"
     assert "p0" not in added
     # anchor のクエリ文は papers.jsonl の先頭（title+abstract）から取る
-    assert ex.text_of("p0").startswith("[ICLR 2025] Truncated Consistency Models")
     # 2回目はキャッシュから読む（papers.jsonl を走査しない）
     assert (tmp_path / "mlt.pkl").exists()
     again = BM25MLTExpander(str(index_dir), cache_path=str(tmp_path / "mlt.pkl"), neighbors=5)
@@ -184,7 +180,6 @@ def test_fused_rank_keeps_existing_candidates() -> None:
     class _Fixed:
         def __init__(self, ids): self.ids = ids
         def rank(self, ranked): return list(self.ids)
-        def text_of(self, pid): return f"text of {pid}"
 
     fused = FusedPaperExpander(
         sources=[_Fixed(["x", "y"]), _Fixed(["x", "z"])], neighbors=5, rrf_k=1

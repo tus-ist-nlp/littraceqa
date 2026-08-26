@@ -28,7 +28,6 @@ def _search() -> dict:
         "per_index_k": 100,
         "indexers": [{"name": "bm25s", "params": {}}],
         "fuser": {"name": "rrf", "params": {"k": 60, "weights": {"bm25s": 1.0}}},
-        "reranker": {"name": "none", "params": {}},
     }
 
 
@@ -50,7 +49,8 @@ def test_compose_config_shape():
     }
     assert cfg["retriever"]["per_index_k"] == 100
     assert cfg["retriever"]["fuser"] == _search()["fuser"]
-    assert cfg["retriever"]["reranker"] == _search()["reranker"]
+    # reranker は省略可（`_search()` は書いていない）。無ければ None が入る。
+    assert cfg["retriever"]["reranker"] is None
     assert cfg["agent"] == _agent()
     assert cfg["paths"]["chunks"] == "/data/chunks/marker_chunks.jsonl"
 
@@ -95,8 +95,7 @@ def test_explicit_pdf_dir_and_index_dir_override_auto_derivation():
         search={
             "per_index_k": 100,
             "indexers": [{"name": "bm25s", "params": {"index_dir": "/custom/index"}}],
-            "fuser": {"name": "rrf", "params": {}},
-            "reranker": {"name": "none", "params": {}},
+            "fuser": {"name": "paper_rrf", "params": {}},
         },
         agent=_agent(),
     )
@@ -131,7 +130,7 @@ def _pipeline_cfg(tmp_path, attribute_filter: dict) -> dict:
             "per_index_k": 10,
             "pool_k": None,
             "indexers": [{"name": "_stub_for_test", "params": {}}],
-            "fuser": {"name": "rrf", "params": {}},
+            "fuser": {"name": "paper_rrf", "params": {}},
             "reranker": None,
             "attribute_filter": attribute_filter,
         },

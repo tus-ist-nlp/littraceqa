@@ -62,8 +62,7 @@ def _compose(indexers: list[dict]) -> dict:
         search={
             "per_index_k": 100,
             "indexers": indexers,
-            "fuser": {"name": "rrf", "params": {}},
-            "reranker": {"name": "none", "params": {}},
+            "fuser": {"name": "paper_rrf", "params": {}},
         },
         agent={"name": "simple", "params": {}},
     )

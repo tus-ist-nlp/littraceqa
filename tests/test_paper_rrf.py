@@ -7,7 +7,6 @@ import pytest
 from littraceqa.di_pipeline.contracts import RetrievalResult
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
 from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser, paper_rrf_fuse
-from littraceqa.di_pipeline.retrieve.rrf import RRFFuser
 
 
 def result(chunk_id, paper_id, source="bm25s", text="body", chunk_type="text_span"):
@@ -24,10 +23,11 @@ def result(chunk_id, paper_id, source="bm25s", text="body", chunk_type="text_spa
 
 class TestPaperRRFFuse:
     def test_one_vote_per_paper_ignores_chunk_count(self):
-        """チャンクを大量に持つ論文が、上位1本の論文を抜かないこと。
+        """チャンクを大量に持つ論文が、順位の力ではなく本数で上がってこないこと。
 
-        チャンク単位 RRF では p_many が 1/61 + 1/62 + 1/63 = 0.0484 を集めて
-        p_top の 1/61 = 0.0164 を抜いてしまう。論文単位なら p_top が勝つ。
+        チャンク単位に融合すると p_many は 1/62 + 1/63 + 1/64 = 0.0473 を集め、
+        p_top の 1/61 = 0.0164 を票数だけで抜く。論文単位なら1 run 1票なので、
+        run の中で先に出た p_top が勝つ。
         """
         run = [
             result("p_top#c0", "p_top"),
@@ -35,11 +35,13 @@ class TestPaperRRFFuse:
             result("p_many#c1", "p_many"),
             result("p_many#c2", "p_many"),
         ]
-        chunk_order = to_gold_papers(RRFFuser().fuse([run], top_k=10))
-        paper_order = to_gold_papers(paper_rrf_fuse([run], top_k=10))
-        # チャンク単位でも1位は p_top（1本の run では順位がそのまま出る）。
-        assert chunk_order[0] == "p_top"
-        assert paper_order == ["p_top", "p_many"]
+        # 対比用のチャンク単位 RRF（本番の fuser は paper_rrf 一本なのでここに置く）。
+        chunk_scores: dict[str, float] = {}
+        for rank, r in enumerate(run):
+            chunk_scores[r.paper_id] = chunk_scores.get(r.paper_id, 0.0) + 1 / (60 + rank + 1)
+        assert chunk_scores["p_many"] > chunk_scores["p_top"]
+
+        assert to_gold_papers(paper_rrf_fuse([run], top_k=10)) == ["p_top", "p_many"]
 
     def test_papers_in_both_runs_win(self):
         """両方の run の上位に居る論文が、片方だけ1位の論文に勝つこと。"""
@@ -154,7 +156,7 @@ class TestSeedExpansion:
         )
         return HybridRetriever(
             indexers=[indexer],
-            fuser=RRFFuser(),
+            fuser=PaperRRFFuser(),
             per_index_k=10,
             **kwargs,
         ), indexer
@@ -229,8 +231,7 @@ class TestComposeConfig:
             search={
                 "per_index_k": 100,
                 "indexers": [{"name": "bm25s", "params": {}}],
-                "fuser": {"name": "rrf", "params": {}},
-                "reranker": {"name": "none", "params": {}},
+                "fuser": {"name": "paper_rrf", "params": {}},
             },
             agent={"name": "reading", "params": {}},
         )
@@ -246,7 +247,6 @@ class TestComposeConfig:
                 "per_index_k": 100,
                 "indexers": [{"name": "bm25s", "params": {}}],
                 "fuser": {"name": "paper_rrf", "params": {"chunks_per_paper": 3}},
-                "reranker": {"name": "none", "params": {}},
                 "seed_expansion": {"enabled": True, "query_chars": 512},
             },
             agent={"name": "reading", "params": {}},

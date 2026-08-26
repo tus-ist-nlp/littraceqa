@@ -23,9 +23,9 @@ compose_config() で組み合わせる（詳細は CLAUDE.md 参照）。
       fuser:
         name: rrf
         params: { k: 60, weights: { bm25s: 1.0, faiss_qwen3: 1.0 } }
-      reranker:
-        name: none
-        params: {}
+      reranker:                      # 省略可（書かなければ再ランクしない）
+        name: qwen3
+        params: { model: ... }
 
     configs/agent_style/reading.yaml:
       name: reading
@@ -77,9 +77,7 @@ from littraceqa.di_pipeline.retrieve.paper_expander import (  # noqa: F401
     Specter2PaperExpander,
 )
 from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser  # noqa: F401
-from littraceqa.di_pipeline.retrieve.reranker import NoneReranker  # noqa: F401
 from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker  # noqa: F401
-from littraceqa.di_pipeline.retrieve.rrf import RRFFuser  # noqa: F401
 
 
 def load_config(path: str | Path) -> dict:
@@ -175,7 +173,8 @@ def compose_config(paths: dict, process: dict, search: dict, agent: dict) -> dic
             "pool_k": search.get("pool_k"),
             "indexers": indexers,
             "fuser": search["fuser"],
-            "reranker": search["reranker"],
+            # 省略可。書かなければ融合した順位をそのまま返す。
+            "reranker": search.get("reranker"),
             # 質問が明示した会議名・年で絞り込む設定。search_style 側で省略可
             # （省略すると無効で、従来どおりのコードパスを通る）。
             "attribute_filter": search.get("attribute_filter"),
