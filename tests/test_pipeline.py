@@ -10,9 +10,11 @@ from __future__ import annotations
 import yaml
 
 from littraceqa.di_pipeline.index.faiss_qwen3 import INDEX_NAME, PRODUCTION_PARAMS
+from littraceqa.di_pipeline.llm.fake import FakeLLM
 from littraceqa.di_pipeline.pipeline import (
     PROCESS,
     Paths,
+    build_agent,
     build_expander,
     build_expander_index,
     build_indexers,
@@ -111,6 +113,31 @@ def test_expander_index_is_not_a_search_index(tmp_path):
     """SPECTER2 は融合に渡らない（ランキングB を引くためだけの索引）。"""
     names = [type(ix).__name__ for ix in build_indexers(_paths(tmp_path))]
     assert "Specter2FAISSIndex" not in names
+
+
+def test_agent_is_assembled_with_the_measured_settings(tmp_path):
+    """**本番の組み立てを実際に通す。**
+
+    build_retriever / build_expander だけを個別に叩いても、それらを束ねる
+    build_agent が壊れているのは分からない（実際、ReadingConfig から消した
+    param を渡したままにしていて run_search.py が即死する状態を作ってしまった）。
+    """
+    agent = build_agent(_paths(tmp_path), llm=FakeLLM())
+
+    assert agent.config.max_steps == 3
+    assert agent.config.max_candidates == 20
+    assert agent.config.max_papers == 10
+    assert agent.config.subquery_count == 4
+    # 表チャンクは論文の代表スコアに使わない（読解には従来どおり渡る）。
+    assert agent.config.paper_score_skip_chunk_types == ("table",)
+    # A/B 統合。k=60 だと深い順位でも A の1位に勝ってしまうので 10。
+    assert agent.combine.rrf_k == 10
+    assert agent.combine.anchors == 1
+    assert agent.combine.anchor_from == "verdict"
+    assert agent.combine.related_weight == 1.0 and agent.combine.related_offset == 0
+    # 検索と展開が両方ぶら下がっていること。
+    assert agent.retriever.reranker.model_name == "Qwen/Qwen3-Reranker-8B"
+    assert len(agent.paper_expander.sources) == 3
 
 
 def test_preprocessor_reads_mineru_output(tmp_path):

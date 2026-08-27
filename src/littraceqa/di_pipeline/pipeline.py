@@ -236,7 +236,6 @@ def build_agent(paths: Paths, llm: LLMClient | None = None) -> ReadingAgent:
             max_candidates=20,
             chunks_per_paper=2,
             snippet_chars=1800,
-            paper_cutoff="llm",
             max_papers=10,
             # 表チャンクは数値と短いラベルが密で、論文が質問の主題でなくても
             # 表1枚で代表スコアが跳ね上がる。**読解には従来どおり渡る。**
