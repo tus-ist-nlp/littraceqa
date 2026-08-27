@@ -14,6 +14,7 @@ from littraceqa.di_pipeline.pipeline import (
     PROCESS,
     Paths,
     build_expander,
+    build_expander_index,
     build_indexers,
     build_preprocessor,
     build_retriever,
@@ -88,6 +89,28 @@ def test_expander_uses_three_independent_sources(tmp_path):
         "Specter2PaperExpander", "BibCouplingExpander", "BM25MLTExpander",
     ]
     assert all(s.neighbors == 100 for s in expander.sources)
+
+
+def test_expander_index_can_be_rebuilt(tmp_path):
+    """**ランキングB の索引を作り直す経路があること。**
+
+    SPECTER2 索引は「作る側（Specter2FAISSIndex）」と「読む側
+    （Specter2PaperExpander）」が別クラスで、読む側は faiss を直接開く。
+    作る側をどこからも呼ばなくても検索は動いてしまうので、索引が消えるまで
+    「作り直せない」ことに気づけない。ここで両者が同じ場所を指すことを固定する。
+    """
+    paths = _paths(tmp_path)
+    builder = build_expander_index(paths)
+    reader = build_expander(paths).sources[0]
+    assert str(builder.index_dir) == str(reader.index_dir)
+    # 論文単位のモデルなので title+abstract だけを索引する。
+    assert builder.chunk_types == ["title_abstract"]
+
+
+def test_expander_index_is_not_a_search_index(tmp_path):
+    """SPECTER2 は融合に渡らない（ランキングB を引くためだけの索引）。"""
+    names = [type(ix).__name__ for ix in build_indexers(_paths(tmp_path))]
+    assert "Specter2FAISSIndex" not in names
 
 
 def test_preprocessor_reads_mineru_output(tmp_path):

@@ -8,9 +8,8 @@ table）は生成しない**——回答生成も提出論文の選定も読解�
 
 ## ファイル
 
-  検索そのものの素の実力を測る基準線として `scripts/eval_retrieval.py` が使う
-- `reading.py` — `ReadingAgent`: 検索→読解→不足分の再検索を反復する本命（デフォルト）
-- `task_family.py` — `TaskFamilyClassifier`（single/multi 推定）と `apply_paper_cutoff`
+- `reading.py` — `ReadingAgent`: 検索 → 読解 → 不足分の再検索 を反復する本体。
+  設定は `ReadingConfig` / `CombineConfig`
 - `evidence.py` — `RetrievalResult` から提出用 `Evidence`（locator 付き）を組み立てる
 - `json_utils.py` — LLM 応答からの JSON 抽出
 
@@ -58,9 +57,6 @@ LLM 呼び出しは **1周につき最大2回**（`_decompose` / `_refine` が1�
   引数自体を渡さず、**制約が無い質問の挙動は従来と完全に同一**に保つ。
 - 抽出器は retriever が持つ（`pipeline.build_retriever()` が `AttributeExtractor` を渡す）。
   無効な構成では None を返す。詳細は `retrieve/attribute_filter.py`。
-- 抽出器が `extract_with_llm()` を持つ構成（`attribute_filter.llm_extract: true`）では
-  そちらを使う。正規表現で取れなかった質問だけ LLM に判定させる経路で、**元の質問に
-  対して1回だけ**呼ぶ（サブクエリごとには呼ばない）。
 
 ### 1. 分解（`_decompose`）
 
@@ -189,17 +185,13 @@ cutoff で落ちた論文の evidence は出さない。
 `evidence_chunk_ids` は根拠チャンク（`evidence_f1`）。`paper_ids` 自体も
 ランキングB の起点（`anchor_from: verdict`）として順位付けには使う。
 
-## 提出本数の決め方（`paper_cutoff`）
+## 提出本数の決め方
 
-`apply_paper_cutoff`（`task_family.py`）が担当。モードは2つ。
+候補列の先頭 `max_papers`（既定10）本。**それだけ。**
 
-- `llm`（**現在の運用**）: LLM が `sufficient` と判断した時点の選定をそのまま出す。
-  `max_papers`（既定10）で頭打ち。**task_family を使わない。**
-- `task_family`: single なら1本、multi なら複数、と task_family で本数を決める。
-
-**現在 `llm` にしている理由**（CLAUDE.md にも記載）: 本番入力に task_family が無く、
-質問から推定しても正解率0.67程度で当てにならない。本数決定の経路から
-task_family を外し、LLM の `sufficient` 判定だけに寄せた。
+以前は `task_family`（single/multi）を LLM に推定させて本数を振り分ける経路もあったが、
+本番入力に `task_family` が無く、質問から推定しても正解率0.67程度で当てにならない。
+推定のためだけにクエリ1件につき LLM を1回余分に呼んでいたので、経路ごと削除した。
 
 ## 主要パラメータ（`ReadingConfig`）
 
@@ -216,7 +208,6 @@ yaml の `agent.params` は `ReadingConfig`（`agent/reading.py`）になる。*
 | `max_candidates` | 20 | LLM に見せる**論文**数。`candidate_recall@20` と揃える |
 | `chunks_per_paper` | 2 | 1論文あたり LLM に見せるチャンク数 |
 | `snippet_chars` | 1800 | 1チャンクを何文字まで見せるか |
-| `paper_cutoff` | `llm` | 提出本数の決め方 |
 | `max_papers` | 10 | 提出本数の上限 |
 | `paper_score_skip_chunk_types` | なし | 論文の代表スコアに使わないチャンク種別（`[table]` が実測での最良） |
 

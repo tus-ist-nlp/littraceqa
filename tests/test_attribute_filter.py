@@ -15,7 +15,6 @@ from littraceqa.di_pipeline.contracts import RetrievalResult
 from littraceqa.di_pipeline.retrieve.attribute_filter import (
     AttributeExtractor,
     AttributeFilter,
-    LLMAttributeExtractor,
     filter_results,
 )
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
@@ -226,119 +225,6 @@ def test_fails_open_when_filter_empties_the_run(extractor):
 
 
 # ---- LLM 抽出（正規表現が空のときだけ後ろに足す）---------------------------
-
-
-class _StubLLM:
-    """決め打ちの応答を返し、呼ばれた回数とプロンプトを記録する LLM。"""
-
-    def __init__(self, *responses: str):
-        self.responses = list(responses)
-        self.prompts: list[str] = []
-
-    def __call__(self, prompt: str) -> str:
-        self.prompts.append(prompt)
-        return self.responses.pop(0) if self.responses else "{}"
-
-
-def _llm_extractor(extractor, *responses) -> tuple[LLMAttributeExtractor, _StubLLM]:
-    llm = _StubLLM(*responses)
-    return LLMAttributeExtractor(extractor, llm), llm
-
-
-def test_llm_is_not_called_when_regex_succeeds(extractor):
-    """正規表現で取れた質問では LLM を呼ばない（検証55件で正規表現は100%正しい）。"""
-    llm_extractor, llm = _llm_extractor(extractor)
-    f = llm_extractor.extract_with_llm("Which NAACL 2025 papers use MCTS?")
-    assert f == AttributeFilter(venue="NAACL", year=2025)
-    assert llm.prompts == []
-
-
-def test_llm_resolves_venue_alias(extractor):
-    """正規表現が拾えない別名（NIPS）を LLM が正規の表記に直せること。"""
-    llm_extractor, llm = _llm_extractor(
-        extractor, '{"venue": "NeurIPS", "year": null, "all_venues": false}'
-    )
-    f = llm_extractor.extract_with_llm("Among NIPS papers, which one uses MCTS?")
-    assert f == AttributeFilter(venue="NeurIPS", year=None)
-    assert len(llm.prompts) == 1
-
-
-def test_llm_extracts_year_only(extractor):
-    """会議名なしで年だけの制約も通すこと（ECCV だけが 2024 なので情報量がある）。"""
-    llm_extractor, _ = _llm_extractor(
-        extractor, '{"venue": null, "year": 2024, "all_venues": false}'
-    )
-    assert llm_extractor.extract_with_llm("Which 2024 papers use MCTS?") == AttributeFilter(
-        venue=None, year=2024
-    )
-
-
-def test_llm_result_is_cached(extractor):
-    """同じ質問で2回目の API 呼び出しをしないこと。"""
-    llm_extractor, llm = _llm_extractor(
-        extractor, '{"venue": "NeurIPS", "year": null, "all_venues": false}'
-    )
-    question = "Among NIPS papers, which one uses MCTS?"
-    first = llm_extractor.extract_with_llm(question)
-    assert llm_extractor.extract_with_llm(question) == first
-    assert len(llm.prompts) == 1
-
-
-def test_llm_all_venues_is_empty(extractor):
-    llm_extractor, _ = _llm_extractor(
-        extractor, '{"venue": null, "year": null, "all_venues": true}'
-    )
-    assert llm_extractor.extract_with_llm("Across every venue, which paper wins?").is_empty()
-
-
-def test_llm_hallucinated_venue_is_rejected(extractor):
-    """コーパスに無い会議名を答えたら、年も含めて返答ごと捨てること。
-
-    年だけ残すと「AAAI 2025」への返答から year=2025 が生き残り、
-    会議名の誤りが ECCV を落とす絞り込みに化ける。
-    """
-    llm_extractor, _ = _llm_extractor(
-        extractor, '{"venue": "AAAI", "year": 2025, "all_venues": false}'
-    )
-    assert llm_extractor.extract_with_llm("Which AAAI 2025 papers use MCTS?").is_empty()
-
-
-def test_llm_impossible_pair_drops_the_year(extractor):
-    """コーパスに無い (会議名, 年) の組では年だけ落として会議名を残すこと。"""
-    llm_extractor, _ = _llm_extractor(
-        extractor, '{"venue": "NAACL", "year": 2024, "all_venues": false}'
-    )
-    assert llm_extractor.extract_with_llm(
-        "Among 2024 papers from the Americas chapter meeting, which uses MCTS?"
-    ) == AttributeFilter(venue="NAACL", year=None)
-
-
-def test_llm_garbage_response_is_empty(extractor):
-    llm_extractor, _ = _llm_extractor(extractor, "I could not determine the venue.")
-    assert llm_extractor.extract_with_llm("Which papers use MCTS?").is_empty()
-
-
-def test_llm_failure_does_not_raise(extractor):
-    """LLM が例外を投げても制約なしに落ちるだけで、検索は続くこと。"""
-
-    def _boom(prompt: str) -> str:
-        raise RuntimeError("API is down")
-
-    llm_extractor = LLMAttributeExtractor(extractor, _boom)
-    assert llm_extractor.extract_with_llm("Which papers use MCTS?").is_empty()
-
-
-def test_llm_extractor_extract_stays_regex_only(extractor):
-    """HybridRetriever が呼ぶ extract() は LLM を通さないこと。
-
-    制約を渡されなかったとき HybridRetriever は**サブクエリ1本ごとに**
-    extract() を呼ぶので、ここが LLM だと1クエリで十数回 API を叩いてしまう。
-    """
-    llm_extractor, llm = _llm_extractor(
-        extractor, '{"venue": "NeurIPS", "year": null, "all_venues": false}'
-    )
-    assert llm_extractor.extract("Among NIPS papers, which one uses MCTS?").is_empty()
-    assert llm.prompts == []
 
 
 def test_year_only_selectivity(extractor):

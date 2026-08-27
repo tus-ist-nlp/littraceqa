@@ -227,17 +227,17 @@ def test_duplicate_chunk_keeps_the_higher_score():
     assert listing.index("[paper_id: pA]") < listing.index("[paper_id: pB]")
 
 
-@pytest.mark.parametrize(
-    "task_family,expected", [("hidden_source_single_paper", 2), ("multi_paper", 5)]
-)
-def test_falls_back_to_cutoff_when_llm_output_is_unusable(task_family, expected):
-    """LLM が一度も使える判定を返さなければ、順位カットオフで出す。"""
+def test_falls_back_to_the_ranking_when_llm_output_is_unusable():
+    """LLM が一度も使える判定を返さなくても、検索の順位はそのまま提出する。
+
+    読解が壊れたクエリで提出が空になると、検索が拾えていた gold まで落とすことになる。
+    """
     retriever = _StubRetriever()
     llm = FakeLLM(responses=["not json"])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
-    prediction = agent.run(_query(task_family=task_family))
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5, max_papers=3)
+    prediction = agent.run(_query())
 
-    assert len(prediction.gold_papers) == expected
+    assert [p["paper_id"] for p in prediction.gold_papers] == ["p0", "p1", "p2"]
     assert prediction.evidence == []
 
 
@@ -252,8 +252,7 @@ def test_candidate_papers_records_ranking_before_cutoff():
     )
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
     agent = ReadingAgent(
-        retriever, llm=llm, max_steps=1, retrieve_top_k=8,
-        paper_cutoff="llm", max_papers=3,
+        retriever, llm=llm, max_steps=1, retrieve_top_k=8, max_papers=3,
     )
     prediction = agent.run(_query())
 
@@ -269,7 +268,7 @@ def test_candidate_papers_is_capped():
         {"sq": [_result(0, f"p{i:03d}", float(n - i)) for i in range(n)]}
     )
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p000"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=n, paper_cutoff="llm")
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=n)
     prediction = agent.run(_query())
 
     assert len(prediction.candidate_papers) == CANDIDATE_PAPERS_LIMIT
@@ -316,7 +315,7 @@ def test_attribute_filter_comes_from_the_question_not_the_subquery():
             _judge(["p0"], sufficient=True),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5, paper_cutoff="llm")
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
     agent.run(_query(question="Which NAACL 2025 papers explicitly mention MCTS?"))
 
     assert retriever.calls == ["MCTS in method figure"]
@@ -331,37 +330,11 @@ def test_no_attribute_filter_argument_when_nothing_is_extracted():
     """
     retriever = _StubRetriever()  # attribute_filter を受け取れない
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5, paper_cutoff="llm")
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
 
     prediction = agent.run(_query(question="Which papers report FID on CIFAR-10?"))
 
     assert prediction.trace[0]["attribute_filter"] is None
-
-
-class _LLMStubExtractor(_StubExtractor):
-    """extract_with_llm() を持つ抽出器（LLM 抽出が有効な構成に相当）。"""
-
-    def __init__(self):
-        super().__init__()
-        self.llm_calls: list[str] = []
-
-    def extract_with_llm(self, question: str):
-        self.llm_calls.append(question)
-        return self._cls(venue="NeurIPS", year=None)
-
-
-def test_llm_extractor_is_used_when_available():
-    """extract_with_llm() を持つ抽出器ではそちらを使うこと。"""
-    extractor = _LLMStubExtractor()
-    retriever = _FilterAwareRetriever(extractor)
-    llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5, paper_cutoff="llm")
-
-    agent.run(_query(question="Among NIPS papers, which one uses MCTS?"))
-
-    # 元の質問に対して1回だけ。サブクエリごとには呼ばない。
-    assert extractor.llm_calls == ["Among NIPS papers, which one uses MCTS?"]
-    assert [(f.venue, f.year) for f in retriever.filters] == [("NeurIPS", None)]
 
 
 # ---- サブクエリ生成プロンプト ---------------------------------------------
@@ -386,7 +359,7 @@ def test_subquery_prompts_forbid_web_search_operators():
             _judge(["p0"], sufficient=True),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=2, retrieve_top_k=5, paper_cutoff="llm")
+    agent = ReadingAgent(retriever, llm=llm, max_steps=2, retrieve_top_k=5)
     agent.run(_query())
 
     prompts = _subquery_prompts(llm)
@@ -415,7 +388,7 @@ def test_subquery_count_is_enforced_on_the_return_value_not_just_the_prompt():
         ]
     )
     agent = ReadingAgent(
-        retriever, llm=llm, max_steps=2, retrieve_top_k=5, paper_cutoff="llm", subquery_count=4
+        retriever, llm=llm, max_steps=2, retrieve_top_k=5, subquery_count=4
     )
     agent.run(_query())
 
@@ -434,7 +407,7 @@ def test_refine_prompt_states_the_subquery_budget():
         ]
     )
     agent = ReadingAgent(
-        retriever, llm=llm, max_steps=2, retrieve_top_k=5, paper_cutoff="llm", subquery_count=3
+        retriever, llm=llm, max_steps=2, retrieve_top_k=5, subquery_count=3
     )
     agent.run(_query())
 
@@ -459,7 +432,7 @@ def test_subquery_prompts_carry_the_venue_tag():
             _judge(["p0"], sufficient=True),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=2, retrieve_top_k=5, paper_cutoff="llm")
+    agent = ReadingAgent(retriever, llm=llm, max_steps=2, retrieve_top_k=5)
     agent.run(_query(question="Which NAACL 2025 papers explicitly mention MCTS?"))
 
     prompts = _subquery_prompts(llm)
@@ -472,7 +445,7 @@ def test_no_venue_tag_without_a_constraint():
     """制約が無い質問ではプロンプトに会議名の指示を混ぜないこと。"""
     retriever = _StubRetriever()
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5, paper_cutoff="llm")
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
     agent.run(_query(question="Which papers report FID on CIFAR-10?"))
 
     assert all("limits the search to" not in p for p in _subquery_prompts(llm))
@@ -509,7 +482,6 @@ def _rrf_agent(ranking: list[str], **combine_kwargs) -> ReadingAgent:
         max_candidates=2,
         paper_expander=_StubRelated(ranking),
         combine=CombineConfig(**combine_kwargs),
-        paper_cutoff="llm",
         max_papers=1,
     )
 
@@ -620,7 +592,7 @@ def test_submission_is_the_candidate_ranking_not_the_llm_selection():
     """
     retriever = _StubRetriever({"sq": [_result(0, f"p{i}", 10.0 - i) for i in range(8)]})
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p5"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=8, paper_cutoff="llm")
+    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=8)
     prediction = agent.run(_query())
 
     # LLM は p5 だけを選んだが、提出は候補列の順位（max_papers で頭打ち）。
@@ -682,7 +654,6 @@ def test_production_config_matches_what_was_measured():
         max_candidates=20,
         chunks_per_paper=2,
         snippet_chars=1800,
-        paper_cutoff="llm",
         max_papers=10,
         paper_score_skip_chunk_types=("table",),
     )
@@ -723,8 +694,7 @@ def test_decompose_does_not_call_the_task_family_classifier():
     クエリ1件につき LLM が3回になっていた。
     """
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(_StubRetriever(), llm=llm, max_steps=1, retrieve_top_k=5,
-                         paper_cutoff="llm")
+    agent = ReadingAgent(_StubRetriever(), llm=llm, max_steps=1, retrieve_top_k=5)
     # task_family を持たない（= --production-input 相当の）クエリ
     agent.run(Query(query_id="q_prod", question="Which papers report FID?", answer_types=[]))
 

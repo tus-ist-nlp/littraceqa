@@ -322,9 +322,10 @@ BM25 と faiss なのでこれらは1件もヒットせず、2周目・3周目�
 **検索語としての**制約。title_abstract チャンクの本文は実際に `[ACL 2025] タイトル…` と
 この表記で始まる（`preprocess/mineru_chunker.py`）ので、同じ表記が BM25 の語として効く。
 
-**`reading` の打ち切りは task_family に依存しない。** 反復検索の停止条件は
-`_read_and_judge()` が返す LLM の `sufficient` 判定のみ。本番入力に `task_family` が無く、
-推定しても正解率0.67程度で当てにならないため。
+**反復の停止条件は `_read_and_judge()` が返す LLM の `sufficient` 判定のみ。**
+提出本数は候補列の先頭 `max_papers` 本で切るだけで、`task_family`（single/multi）には
+依存しない——本番入力にその項目が無く、質問から推定しても正解率0.67程度で
+当てにならないため（推定器は削除済み）。
 
 ### 提出論文は選定しない
 

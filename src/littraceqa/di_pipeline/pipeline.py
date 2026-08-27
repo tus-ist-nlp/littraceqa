@@ -38,6 +38,7 @@ from littraceqa.di_pipeline.index.faiss_qwen3 import (
     PRODUCTION_PARAMS as QWEN3_PARAMS,
 )
 from littraceqa.di_pipeline.index.faiss_qwen3 import Qwen3FAISSIndex
+from littraceqa.di_pipeline.index.faiss_specter2 import Specter2FAISSIndex
 from littraceqa.di_pipeline.llm.azure_openai import AzureOpenAILLM
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.di_pipeline.preprocess.mineru_chunker import MinerUChunker
@@ -59,6 +60,12 @@ load_dotenv(ROOT / ".env")
 # 前処理の名前。索引ディレクトリの中間パスに入る（`{index_dir}/mineru/bm25s`）ので、
 # 別の前処理で作り直しても既存の索引と衝突しない。
 PROCESS = "mineru"
+
+# SPECTER2 の索引名。**論文単位のモデルなので title+abstract だけを索引する**
+# （proximity アダプタは title+abstract で学習されており、本文の断片・表・数式を
+# 個別に埋め込むと学習時の入力分布から外れる）。名前に abstract が入っているのは、
+# かつて全チャンク版と並存させたときの区別の名残。
+SPECTER2_INDEX_NAME = "faiss_specter2_abstract"
 
 
 @dataclass(frozen=True)
@@ -158,6 +165,22 @@ def build_retriever(paths: Paths) -> HybridRetriever:
     )
 
 
+def build_expander_index(paths: Paths) -> Specter2FAISSIndex:
+    """ランキングB が読む SPECTER2 索引。**検索の索引ではないので `build_indexers` に
+    入れない**（融合には渡らず、`build_expander()` が近傍を引くためだけに使う）。
+
+    それでも `--build` では作る必要がある。作る側と読む側が別クラスなので、
+    ここに置いておかないと「索引を作り直す方法が無い」状態になる。
+    """
+    return Specter2FAISSIndex(
+        index_dir=str(paths.index(SPECTER2_INDEX_NAME)),
+        model="allenai/specter2_base",
+        chunk_types=["title_abstract"],
+        batch_size=128,
+        fp16=True,
+    )
+
+
 def build_expander(paths: Paths) -> FusedPaperExpander:
     """論文→論文の近さ（ランキングB）。**3つは違う gold を拾うので併用する。**
 
@@ -168,7 +191,7 @@ def build_expander(paths: Paths) -> FusedPaperExpander:
         sources=[
             # SPECTER2(proximity) の近傍。構築済み索引を読むだけ（追加構築なし）。
             Specter2PaperExpander(
-                index_dir=str(paths.index("faiss_specter2_abstract")), neighbors=100
+                index_dir=str(paths.index(SPECTER2_INDEX_NAME)), neighbors=100
             ),
             # 参考文献の arXiv ID 集合の Jaccard。**引用グラフではない**——コーパスは
             # 2024〜2025年しか無く同時期の論文は互いに引用できないので、

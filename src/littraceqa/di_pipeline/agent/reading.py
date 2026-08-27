@@ -30,7 +30,6 @@ from dataclasses import dataclass, field, fields
 
 from littraceqa.di_pipeline.agent.evidence import evidence_from_result
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
-from littraceqa.di_pipeline.agent.task_family import TaskFamilyClassifier, apply_paper_cutoff
 from littraceqa.di_pipeline.contracts import Answer, Evidence, Prediction, Query, RetrievalResult
 from littraceqa.di_pipeline.llm.base import LLMClient
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
@@ -159,8 +158,7 @@ class ReadingConfig:
 
     # ---- 提出 ----
     # **どれを提出するかの選定は読解チーム側の担当**なので、このエージェントは
-    # 候補列の順位をそのまま渡して本数だけを切る。
-    paper_cutoff: str = "task_family"
+    # 候補列の順位をそのまま渡し、`max_papers` 本で切るだけ。
     max_papers: int = 10
 
     # ---- 論文の代表スコア ----
@@ -218,7 +216,6 @@ class ReadingAgent:
         # scripts/run_search.py の --dump-runs が読む。Prediction.trace には入れない
         # （提出ファイルが膨らむため）。
         self.last_runs: list[SubqueryRun] = []
-        self.task_family = TaskFamilyClassifier(llm)
 
     def run(self, query: Query) -> Prediction:
         # 会議名・年の制約は**元の質問から1回だけ**取る。_decompose() が作る
@@ -321,11 +318,7 @@ class ReadingAgent:
         extractor = getattr(self.retriever, "attribute_extractor", None)
         if extractor is None:
             return None
-        # LLM 抽出が有効な構成（search_style の attribute_filter.llm_extract）では
-        # extract_with_llm() を持つ。正規表現で取れたときは LLM を呼ばないので、
-        # 追加の API 呼び出しは「会議名が書かれていない質問」1件につき1回だけ。
-        extract = getattr(extractor, "extract_with_llm", extractor.extract)
-        attribute_filter = extract(query.question)
+        attribute_filter = extractor.extract(query.question)
         # 空なら None にして、retrieve() に引数自体を渡さないようにする
         # （制約が無い質問の挙動を従来と完全に同一に保つため）。
         return None if attribute_filter.is_empty() else attribute_filter
@@ -479,8 +472,7 @@ class ReadingAgent:
         if not paper_ids:
             return None
 
-        # 本数の打ち切りはここではやらない。paper_cutoff で一括して決める
-        # （比較実験で本数の決め方を揃えられるようにするため）。
+        # 本数の打ち切りはここではやらない（提出は候補列の順位で `max_papers` 本）。
         return {
             "paper_ids": paper_ids,
             "evidence_chunk_ids": evidence_chunk_ids,
@@ -593,15 +585,8 @@ class ReadingAgent:
 
         # **どれを提出するかは選ばない。** 検索の順位をそのまま渡し、選定は読解チーム側に
         # 任せる（読解 LLM が返す `paper_ids` は停止条件と evidence にだけ使う）。
-        # 直後の apply_paper_cutoff が最大 max_papers 本に切る。
         evidence: list[Evidence] = []
-        paper_ids = apply_paper_cutoff(
-            candidate_papers,
-            query,
-            self.task_family,
-            self.config.paper_cutoff,
-            self.config.max_papers,
-        )
+        paper_ids = candidate_papers[: self.config.max_papers]
 
         evidence_results: list[RetrievalResult] = []
         if verdict is not None:

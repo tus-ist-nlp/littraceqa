@@ -43,13 +43,18 @@ class _AsDict:
         return asdict(self)
 
 
+# gold の `task_family` に入る2値。**本番入力には無い**ので検索側は使わないが、
+# 採点（scripts/evaluate.py）が single/multi の内訳を出すのに使う。
+SINGLE = "hidden_source_single_paper"
+MULTI = "multi_paper"
+
+
 # 1. Query -- システムへの入力1件（質問）。
 #
 # 本番の入力に実際に入っているのは query_id / question / answer_types / table_schema の
 # 4つだけで、task_family と primary_evidence_type は与えられない（手元の
 # validation_inputs.jsonl にはこの2つが入っているが、本番では欠ける）。
-# そのため両者は Optional とし、無い場合は littraceqa.di_pipeline.agent.task_family で question から
-# 推定する。
+# そのため両者は Optional とし、検索側はどちらも使わない（提出本数は max_papers 本で切る）。
 @dataclass
 class Query(_AsDict):
     query_id: str
@@ -62,7 +67,7 @@ class Query(_AsDict):
     # 担当**なので、検索エージェントはこれを使わない。
     options: dict | None = None
     # 以下2つは本番入力には無い。手元の検証データにだけ入っている。
-    task_family: str | None = None  # 観測値: "hidden_source_single_paper" / "multi_paper"
+    task_family: str | None = None  # SINGLE / MULTI（採点の内訳にだけ使う）
     primary_evidence_type: str | None = None  # 観測値: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
 
     @classmethod

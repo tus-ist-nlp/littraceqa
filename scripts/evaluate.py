@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE
+from littraceqa.di_pipeline.contracts import MULTI, SINGLE
 
 # 候補上位 k 本に gold 論文が入っていたか。paper_recall_macro は「LLM がどう絞ったか」と
 # 「検索がそもそも拾えていたか」が混ざるが、こちらは絞り込み前の検索力だけを見る。

@@ -38,7 +38,13 @@ except ImportError:
         return iterable
 
 from littraceqa.di_pipeline.contracts import Chunk, Query
-from littraceqa.di_pipeline.pipeline import Paths, build_agent, build_indexers, build_preprocessor
+from littraceqa.di_pipeline.pipeline import (
+    Paths,
+    build_agent,
+    build_expander_index,
+    build_indexers,
+    build_preprocessor,
+)
 
 
 def load_papers(path: Path) -> list[dict]:
@@ -268,7 +274,9 @@ def main() -> None:
                 f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
         print(f"{len(chunks)} チャンクを {paths.chunks} に保存しました")
 
-        for indexer in build_indexers(paths):
+        # 検索の索引3本と、ランキングB が読む SPECTER2 索引。後者は融合に渡らないが、
+        # ここで作らないと再構築する方法が無くなる。
+        for indexer in [*build_indexers(paths), build_expander_index(paths)]:
             print(f"  {indexer.name} を構築中...")
             indexer.build(chunks)
         print("索引構築完了")

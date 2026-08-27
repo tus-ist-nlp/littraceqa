@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE
+from littraceqa.di_pipeline.contracts import MULTI, SINGLE
 from evaluate import CANDIDATE_RECALL_KS, evaluate
 
 # 看板指標の k（reading.yaml の max_candidates と一致）。カーブにも含まれている前提。

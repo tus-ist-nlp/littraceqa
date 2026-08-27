@@ -21,10 +21,9 @@ LitTraceQA の質問には「Which NAACL 2025 papers ...」「Among ICML 2025 pa
 取れなかったときは空の AttributeFilter を返し、呼び出し側は現状どおりの
 コードパスを通る（＝本番の質問が会議名を書かなければ挙動は一切変わらない）。
 
-正規表現が構造上拾えない書き方（別名 "NIPS"、正式名称、"a 2025 NeurIPS method" の
-ような語順、年だけの指定）に備えて ``LLMAttributeExtractor`` を後ろに足せる。
-正規表現が空を返したときだけ LLM に聞き、返答はコーパスに実在する (会議名, 年) の
-組でのみ採用する。既定では無効（search_style の ``attribute_filter.llm_extract``）。
+**正規表現だけで足りている。** 検証55件で取り逃がしはゼロ（会議名に言及する7件を
+発火5件／`all venues` の意図的除外2件ですべて正しく処理）。別名 "NIPS" や語順違いに
+備えて LLM を後段に足した版も作ったが、実測での利得がゼロだったので消してある。
 """
 
 from __future__ import annotations
@@ -162,119 +161,6 @@ class AttributeExtractor:
         if matched <= 0:
             return 1.0
         return matched / self._total
-
-
-_LLM_PROMPT = """\
-You are deciding whether a research question restricts the SEARCH SCOPE to a particular \
-publication venue or year.
-
-The corpus contains papers from exactly these venue/year pairs:
-  NeurIPS 2025, ICLR 2025, EMNLP 2025, ACL 2025, ICML 2025, CVPR 2025, ICCV 2025, \
-NAACL 2025, ECCV 2024
-Note that every venue except ECCV is 2025, so a year is only informative when it \
-distinguishes ECCV 2024 from the rest.
-
-Question: {question}
-
-Rules:
-* Report a venue ONLY if the question limits which papers to search. Resolve common \
-aliases to the names above (e.g. "NIPS" / "Neural Information Processing Systems" -> NeurIPS).
-* If the question mentions a venue only to identify a CITED or BASELINE paper (e.g. \
-"papers that cite UniAD (CVPR2023)"), that is not a scope restriction - do not report it.
-* If the question explicitly covers every venue ("across all venues", "regardless of venue"), \
-set all_venues to true and report no venue.
-* If two or more different venues are in scope, set all_venues to true.
-* Report a year ONLY if the question states which year to search. Do not infer a year \
-from a venue.
-* When in doubt, report nothing. A wrong restriction removes correct papers from the \
-search results; reporting nothing simply keeps the search as it is.
-
-Respond with JSON only, in the form \
-{{"venue": "NAACL" or null, "year": 2025 or null, "all_venues": false}}"""
-
-
-class LLMAttributeExtractor:
-    """正規表現で取れなかったときだけ LLM に会議名・年を判定させる抽出器。
-
-    正規表現版（``AttributeExtractor``）を置き換えるのではなく**後ろに足す**。
-    検証55件では正規表現の取り逃がしが無く（該当7件を発火5/意図的除外2で正しく処理）、
-    LLM に置き換える利得は実測ゼロだったので、確実に効いている経路には触らない。
-    LLM が担うのは正規表現が構造上拾えない書き方——別名（NIPS）、正式名称、
-    語順違い（"a 2025 NeurIPS method"）、年だけの指定——だけになる。
-
-    ``extract()`` は正規表現のままにしてある。``HybridRetriever`` は制約を渡されな
-    かったとき**サブクエリ1本ごとに** ``extract()`` を呼ぶので、ここを LLM にすると
-    1クエリあたり十数回 API を叩くことになる。LLM を通すのは ``ReadingAgent`` が
-    元の質問に対して1回だけ呼ぶ ``extract_with_llm()`` に限定する。
-    """
-
-    def __init__(self, base: AttributeExtractor, llm, prompt: str | None = None):
-        self._base = base
-        self._llm = llm
-        self._prompt = prompt or _LLM_PROMPT
-        self._cache: dict[str, AttributeFilter] = {}
-
-    # --- AttributeExtractor と同じインタフェース（HybridRetriever 用）---------
-
-    def extract(self, question: str) -> AttributeFilter:
-        """正規表現だけで抽出する。LLM は呼ばない（サブクエリ経路を無料に保つ）。"""
-        return self._base.extract(question)
-
-    def selectivity(self, attribute_filter: AttributeFilter) -> float:
-        return self._base.selectivity(attribute_filter)
-
-    # --- LLM を通す経路（ReadingAgent がクエリごとに1回だけ呼ぶ）-------------
-
-    def extract_with_llm(self, question: str) -> AttributeFilter:
-        """正規表現 → 取れなければ LLM、の順で制約を取る。"""
-        regex_filter = self._base.extract(question)
-        if not regex_filter.is_empty():
-            return regex_filter
-        if not question:
-            return AttributeFilter()
-        if question in self._cache:
-            return self._cache[question]
-
-        result = self._validate(self._ask(question))
-        self._cache[question] = result
-        return result
-
-    def _ask(self, question: str) -> dict | None:
-        try:
-            return parse_json_object(self._llm(self._prompt.format(question=question)))
-        except Exception:
-            # 抽出に失敗しても検索は続けたい。制約なし＝従来の挙動に落ちるだけ。
-            return None
-
-    def _validate(self, payload: dict | None) -> AttributeFilter:
-        """LLM の返答をコーパスの実在値と突き合わせる。
-
-        捏造した会議名や、コーパスに存在しない組み合わせをそのまま信じると
-        絞り込みで gold を全部落としうる。実在する組だけを通す。
-        """
-        if not isinstance(payload, dict) or payload.get("all_venues"):
-            return AttributeFilter()
-
-        raw_venue = payload.get("venue")
-        venue = AttributeExtractor.canonical_venue(raw_venue)
-        if raw_venue and venue is None:
-            # コーパスに無い会議名を答えた時点でその返答は信用できない。年だけ拾うと
-            # 「AAAI 2025」への返答から year=2025 が残って ECCV を落としてしまうので、
-            # 返答ごと捨てる。
-            return AttributeFilter()
-
-        year = payload.get("year")
-        try:
-            year = int(year) if year is not None else None
-        except (TypeError, ValueError):
-            year = None
-
-        # コーパスに無い組み合わせなら年を落とす（会議名だけなら残せることが多い）。
-        if year is not None and not self._base.exists(venue, year):
-            year = None
-        if venue is None and year is None:
-            return AttributeFilter()
-        return AttributeFilter(venue=venue, year=year)
 
 
 def filter_results(results: list, attribute_filter: AttributeFilter) -> list:
