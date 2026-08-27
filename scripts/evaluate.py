@@ -38,8 +38,7 @@ from littraceqa.di_pipeline.contracts import MULTI, SINGLE
 # ため 70 に直した。
 # CANDIDATE_PAPERS_LIMIT は**記録上限であって検索の上限ではない**（検索は
 # per_index_k=1000 / pool_k=1000 で内部的には順位が付いている）。もっと深く測りたければ
-# 上限を上げて再実行する。展開なしの実験は候補列が50本なので @70 は測れない
-# （scripts/recall_table.py がそのセルを空欄にする）。
+# 上限を上げて再実行する。候補列は50本なので @70 は分母が足りず参考値になる。
 CANDIDATE_RECALL_KS = (1, 5, 10, 20, 50, 70)
 CANDIDATE_RECALL_SCENARIOS = ("single", "multi", "total")
 

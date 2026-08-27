@@ -301,8 +301,8 @@ def main() -> None:
     print(f"{len(queries)} 件の質問に対して検索中...")
 
     # --dump-runs: サブクエリ1本ごとの検索結果を別ファイルに落とす。
-    # Prediction.trace には入れない（提出ファイルが膨らむため）。
-    # scripts/replay_merge.py がこれを土台に、マージ方法や深さをオフラインで振る。
+    # Prediction.trace には入れない（提出ファイルが膨らむため）。候補列の組み立てを
+    # あとからオフラインでやり直したいとき用の土台。
     runs_file = open(args.dump_runs, "w", encoding="utf-8") if args.dump_runs else None
 
     predictions = []

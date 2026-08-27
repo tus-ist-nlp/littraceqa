@@ -98,10 +98,12 @@ class HybridRetriever:
     ) -> list[RetrievalResult]:
         """検索する。
 
-        attribute_filter を渡すとその制約で絞り込む。渡さなかった場合、
-        attribute_extractor があれば query 自体から抽出する
-        （scripts/eval_retrieval.py のように生の質問を直接渡す呼び出し用。
-        ReadingAgent はサブクエリではなく元の質問から抽出したものを渡してくる）。
+        attribute_filter を渡すとその制約で絞り込む。渡さなかった場合は
+        attribute_extractor があれば query 自体から抽出する（生の質問を直接
+        投げる呼び出し用のフォールバック）。**本走行ではこの経路は通らない**——
+        ReadingAgent はサブクエリではなく元の質問から1回だけ抽出したものを渡してくる
+        （サブクエリからは会議名が落ちるため。agent/reading.py の
+        `_extract_attribute_filter` 参照）。
         """
         if not self.indexers:
             return []

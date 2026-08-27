@@ -34,8 +34,9 @@ class BM25Index:
     ):
         """BM25 のスコアリング・トークナイズ系パラメータを config から差し替えられる。
 
-        - k1 / b / method: bm25s.BM25 のスコアリングパラメータ（scripts/sweep_bm25_params.py
-          で validation の recall を見て決める）。build 時にスコア行列へ焼き込まれる。
+        - k1 / b / method: bm25s.BM25 のスコアリングパラメータ。**既定値のまま使っている**
+          （validation の recall で振って既定を超えなかった）。build 時にスコア行列へ
+          焼き込まれるので、変えたら索引を作り直すこと。
         - stopwords / stemmer: bm25s.tokenize のトークナイズ系。build と search で
           同じ設定を使う必要があるため、この2つはインスタンスに保持して両方で使う
           （yaml が build 時・load 時の両方で同じ params を渡す前提）。
