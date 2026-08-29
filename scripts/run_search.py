@@ -139,13 +139,26 @@ def dump_runs(handle, query_id: str, runs: list) -> None:
 
 
 def check_coverage(scored_path: Path) -> dict[str, Any]:
-    """採点対象が gold の何件を覆っているかを返し、欠けていれば警告する。"""
+    """採点対象が gold の何件を覆っているかを返し、欠けていれば警告する。
+
+    **重なりが0件なら本番走行**。本番入力(`data/test_inputs.jsonl`)の query_id は
+    `ltqa_*` で、検証の `q_*` と1件も重ならない。この2つを突き合わせると
+    例外は出ずに全指標 0.0 が正常に返ってくるので、採点を案内してはいけない。
+    """
     if not GOLD_PATH.exists():
         return {}
     gold_ids = set(read_predictions(GOLD_PATH))
     pred_ids = set(read_predictions(scored_path))
     covered = len(gold_ids & pred_ids)
     total = len(gold_ids)
+    if covered == 0:
+        print(
+            f"\n{GOLD_PATH} の gold と重なる query_id が1件もありません。"
+            "本番入力の走行として扱い、採点は案内しません。\n"
+            "        次は scripts/build_candidate_handoff.py --no-gold で"
+            "受け渡しファイルを作ってください。\n"
+        )
+        return {"covered": 0, "gold_total": total}
     if covered < total:
         print(
             f"\n警告: gold {total}件のうち {covered}件しか予測がありません。"
@@ -328,12 +341,14 @@ def main() -> None:
     scored_path = output_path
     if args.merge_with:
         scored_path, _ = merge_predictions(output_path, args.merge_with)
-    check_coverage(scored_path)
+    coverage = check_coverage(scored_path)
 
-    print(
-        "\n採点するには:\n"
-        f"  uv run python scripts/evaluate.py --gold {GOLD_PATH} --pred {scored_path}"
-    )
+    # 本番走行(重なり0件)では採点そのものが誤りなので、案内も出さない。
+    if coverage.get("covered", 0):
+        print(
+            "\n採点するには:\n"
+            f"  uv run python scripts/evaluate.py --gold {GOLD_PATH} --pred {scored_path}"
+        )
 
 
 if __name__ == "__main__":

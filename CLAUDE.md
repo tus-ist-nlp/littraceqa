@@ -437,16 +437,14 @@ uv run python scripts/build_candidate_handoff.py \
   --output data/test_inputs_with_candidates.jsonl
 ```
 
-**⚠ 本番データには gold が無い。採点してはいけない。** `run_search.py` は最後に必ず
-`evaluate.py --gold data/validation.jsonl` を呼ぶが、query_id が `ltqa_*` 形式で検証の `q_*` と
-1件も重ならないため、**全指標 0.0 の JSON が正常に返ってくる**（例外では落ちない）。その結果:
+**⚠ 本番データには gold が無い。採点してはいけない。** 本番入力の query_id は `ltqa_*` で
+検証の `q_*` と1件も重ならないため、`evaluate.py --gold data/validation.jsonl` に掛けると
+**例外では落ちず、全指標 0.0 の JSON が正常に返ってくる**。手法の良し悪しは従来どおり
+`data/validation_inputs.jsonl` の55件で測る。
 
-- `results/experiments.jsonl` に **全部 0 の行**が追記される
-- `report/*.md` が1枚書かれ、LLM コメントが「全指標が壊滅的に悪化した」と書く
-
-`--skip-eval` のようなフラグは無い。**本番走行のあとは `results/experiments.jsonl` の末尾行と
-`report/` の該当ファイルを消すこと**（消し忘れると以後の `generate_comment()` がその 0 行を
-「前回」として読む）。手法の良し悪しは従来どおり `data/validation_inputs.jsonl` の55件で測る。
+`run_search.py` は**採点を自分では呼ばない**（`evaluate.py` を走らせるのは常に手動）。
+gold と重なる query_id が0件のときは本番走行と見なして採点の案内も出さず、
+`build_candidate_handoff.py --no-gold` を次の手順として表示する（`check_coverage()`）。
 
 **本番入力のフィールドは6つ**（`query_id` / `benchmark` / `question` / `answer_types` /
 `multiple_choice_options` / `table_schema`）。`answer_types` は multiple_choice 50 / table 21 で

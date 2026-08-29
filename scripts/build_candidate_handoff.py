@@ -18,7 +18,7 @@
         {"rank": 1, "paper_id": "acl2025_00005", "title": "...", "venue": "ACL", "year": 2025},
         ...
       ],
-      "_meta": {"source_predictions": "...", "search": "...", "n_candidates": 50},
+      "_meta": {"source_predictions": "...", "n_candidates": 50},
       "_gold": {"task_family": ..., "primary_evidence_type": ..., "gold_papers": [...],
                 "evidence": [...], "answer": {...}}
     }
@@ -108,27 +108,6 @@ def load_paper_titles(path: Path) -> dict[str, Record]:
     return titles
 
 
-def find_run_record(predictions_path: Path, experiments_path: Path) -> Record | None:
-    """その予測ファイルを作った実行を results/experiments.jsonl から探す。
-
-    候補の並びは検索構成に依存するので、どの構成の候補なのかを出力に残す。
-    見つからなくても本題ではないので黙って None を返す。
-    """
-    if not experiments_path.exists():
-        return None
-    # 分割実行を結合したファイルは run_search.py:101 が `{stem}_merged` として
-    # 作るが、experiments.jsonl の `output` には結合前の名前が入る。両方で照合する。
-    names = {predictions_path.name}
-    if predictions_path.stem.endswith("_merged"):
-        base = predictions_path.stem[: -len("_merged")]
-        names.add(f"{base}{predictions_path.suffix}")
-    match: Record | None = None
-    for record in read_jsonl(experiments_path):
-        if Path(str(record.get("output") or "")).name in names:
-            match = record  # 同名で複数あれば最後（最新）を採る
-    return match
-
-
 def build_candidates(
     paper_ids: list[str], titles: dict[str, Record], limit: int
 ) -> list[Record]:
@@ -191,9 +170,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gold", type=Path, default=ROOT / "data/validation.jsonl")
     parser.add_argument("--metadata", type=Path, default=ROOT / "data/paper_metadata.jsonl")
     parser.add_argument(
-        "--experiments", type=Path, default=ROOT / "results/experiments.jsonl"
-    )
-    parser.add_argument(
         "--output", type=Path, default=ROOT / "data/validation_with_candidates.jsonl"
     )
     parser.add_argument(
@@ -216,12 +192,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     titles = load_paper_titles(args.metadata)
 
-    run = find_run_record(args.predictions, args.experiments)
+    # 構成は pipeline.py 1本に固定なので、どの構成で作ったかは予測ファイル名で足りる。
+    # （以前は results/experiments.jsonl から実行記録を引いて search/agent の
+    #   構成名を載せていたが、そのファイルを書く仕組みは最終構成では持たない。）
     meta_base: Record = {"source_predictions": args.predictions.name}
-    if run is not None:
-        meta_base["search"] = run.get("search")
-        meta_base["agent"] = run.get("agent")
-        meta_base["run_timestamp"] = run.get("timestamp")
 
     rows, missing = build_rows(
         inputs, gold, predictions, titles, meta_base, args.max_candidates, not args.no_gold
