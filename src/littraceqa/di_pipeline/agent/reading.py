@@ -29,7 +29,7 @@ evidence, and as the anchors of ranking B — never to choose the submission.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 
 from littraceqa.di_pipeline.agent.evidence import evidence_from_result
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
@@ -138,9 +138,10 @@ class ReadingConfig:
     say *what* to use; these say *how* to use it and get swept during experiments.
     ReadingAgent takes the two as separate arguments.
 
-    **This dataclass is the single definition of which params exist**, so a
-    misspelled key is rejected by name in `from_params()` rather than silently
-    running with the default.
+    **This dataclass is the single definition of which params exist.** There used
+    to be a `from_params()` that took a dict of yaml keys and rejected unknown ones
+    by name; with the yaml gone, every call site names the fields directly and a
+    misspelling is a TypeError at the constructor.
     """
 
     # ---- the iteration loop ----
@@ -173,29 +174,13 @@ class ReadingConfig:
     # tables still reach evidence as before.
     paper_score_skip_chunk_types: tuple[str, ...] = ()
 
-    @classmethod
-    def from_params(cls, params: dict) -> ReadingConfig:
-        """Build from a params dict, rejecting unknown keys."""
-        known = {f.name for f in fields(cls)}
-        unknown = sorted(set(params) - known)
-        if unknown:
-            raise ValueError(
-                f"unknown agent params: {unknown}. valid params: {sorted(known)}"
-            )
-        values = dict(params)
-        # Written as a list in config; normalised to a tuple to keep this frozen.
-        values["paper_score_skip_chunk_types"] = tuple(
-            values.get("paper_score_skip_chunk_types") or ()
-        )
-        return cls(**values)
-
 
 class ReadingAgent:
     """Read the candidates, settle the evidence, search again if it is not enough.
 
-    Settings live in `ReadingConfig` (`self.config`). `__init__` names only the
-    **collaborators**; everything else arrives as `**params` and is handed to
-    `ReadingConfig`.
+    `__init__` names only the **collaborators** (retriever / llm / paper_expander);
+    every number lives in `ReadingConfig` and `CombineConfig`, passed as one object
+    each. Omitting either uses its defaults.
     """
 
     def __init__(
@@ -210,15 +195,12 @@ class ReadingAgent:
         # A/B fusion settings; unused when no expander is given.
         combine: CombineConfig | None = None,
         config: ReadingConfig | None = None,
-        **params,
     ):
-        if config is not None and params:
-            raise ValueError("config と個別の params は同時に渡せない")
         self.retriever = retriever
         self.llm = llm
         self.paper_expander = paper_expander
         self.combine = combine or CombineConfig()
-        self.config = config if config is not None else ReadingConfig.from_params(params)
+        self.config = config or ReadingConfig()
         # Read by scripts/run_search.py --dump-runs. Deliberately not in
         # Prediction.trace, which would bloat the submission file.
         self.last_runs: list[SubqueryRun] = []
@@ -255,8 +237,9 @@ class ReadingAgent:
                     if previous is None or result.score > previous.score:
                         chunks[result.chunk_id] = result
 
-            merged = self._merged_results(chunks)
-            candidates = self._candidate_papers(merged)
+            # `chunks` was built as a max merge (same chunk_id, keep the higher
+            # score), so the accumulator itself is the merged ranking.
+            candidates = self._candidate_papers(list(chunks.values()))
             new_verdict = self._read_and_judge(query, candidates, chunks)
             if new_verdict is not None:
                 verdict = new_verdict
@@ -301,16 +284,6 @@ class ReadingAgent:
         return list(
             self.retriever.retrieve(subquery, self.config.retrieve_top_k, **retrieve_kwargs)
         )
-
-    # ---- merging across subqueries ------------------------------------------
-
-    def _merged_results(self, chunks: dict[str, RetrievalResult]) -> list[RetrievalResult]:
-        """Merge every subquery's results into one ranking.
-
-        Building `chunks` is itself the max merge (same chunk_id, keep the higher
-        score), so this just turns the accumulator into a list.
-        """
-        return list(chunks.values())
 
     # ---- 0. extract the attribute constraint --------------------------------
 
@@ -393,10 +366,7 @@ class ReadingAgent:
     def _candidate_papers(
         self, results: list[RetrievalResult]
     ) -> list[tuple[str, list[RetrievalResult]]]:
-        """Group the merged ranking by paper and return the top-scoring papers.
-
-        Takes the output of `_merged_results()`.
-        """
+        """Group the merged ranking by paper and return the top-scoring papers."""
         by_paper: dict[str, list[RetrievalResult]] = {}
         for result in results:
             by_paper.setdefault(result.paper_id, []).append(result)
@@ -562,7 +532,7 @@ class ReadingAgent:
         # This is "what retrieval found", before any truncation, so recall@k analysis
         # must read this rather than gold_papers (which comes after the cut and
         # therefore mixes retrieval quality with selection).
-        merged = self._merged_results(chunks)
+        merged = list(chunks.values())
         if self.paper_expander is not None:
             # Expansion enters only through the A/B RRF fusion (positional
             # insertion lost on every metric and was deleted; see CLAUDE.md).

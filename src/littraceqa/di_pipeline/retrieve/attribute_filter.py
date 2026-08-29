@@ -32,7 +32,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 
 # The venues present in the corpus (all 9 values of venue in
 # data/paper_metadata.jsonl). Looked up lower-cased to absorb spelling variants.
@@ -110,16 +109,6 @@ class AttributeExtractor:
         if venue is None and year is None:
             return False
         return self._counts.get((venue, year), 0) > 0
-
-    @staticmethod
-    def canonical_venue(name: str | None) -> str | None:
-        """Normalise a spelling variant to the corpus's venue string; None if unknown."""
-        if not name:
-            return None
-        for venue in _VENUES:
-            if venue.lower() == name.strip().lower():
-                return venue
-        return None
 
     def extract(self, question: str) -> AttributeFilter:
         """Extract the constraint from a question; an empty AttributeFilter if there is none."""

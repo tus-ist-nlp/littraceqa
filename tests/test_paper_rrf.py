@@ -84,12 +84,6 @@ class TestPaperRRFFuse:
         fused = paper_rrf_fuse([run], top_k=10, chunks_per_paper=1)
         assert [r.chunk_id for r in fused] == ["p#paper"]
 
-    def test_source_weights_apply_to_paper_votes(self):
-        run_a = [result("a#c0", "a", source="bm25s")]
-        run_b = [result("b#c0", "b", source="faiss")]
-        fused = paper_rrf_fuse([run_a, run_b], top_k=10, weights={"bm25s": 2.0, "faiss": 1.0})
-        assert to_gold_papers(fused) == ["a", "b"]
-
     def test_ties_are_broken_deterministically(self):
         """実行のたびに並びが変わらないこと（bib_coupling で踏んだ事故の予防）。"""
         run = [result("b#c0", "b"), result("a#c0", "a")]

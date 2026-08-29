@@ -286,7 +286,6 @@ class HybridRetriever:
 def to_gold_papers(
     results: list[RetrievalResult],
     max_papers: int | None = None,
-    agg: str = "max",
     skip_chunk_types: Collection[str] = (),
 ) -> list[str]:
     """Collapse a chunk ranking into a paper ranking.
@@ -309,40 +308,23 @@ def to_gold_papers(
     confirmation rate (71% vs 51%).
 
     Dropping `figure` / `equation_algorithm` alongside makes things **worse**, so
-    only `table` is skipped. With `agg="sum"` the effect nearly vanishes, which is
-    the tell that this is a distortion specific to max aggregation.
+    only `table` is skipped. **A paper is represented by its single best chunk**
+    (max), which is what makes the distortion possible in the first place: summing
+    the chunks instead makes the effect nearly vanish. That was measured, not left
+    behind as a knob — there is no aggregation parameter.
 
     **Do not add a "use the table score for papers that only have tables"
     fallback.** It looks kind and loses in measurement (multi@5 0.758 -> 0.720).
     488 papers have nothing but tables, and **sinking them is precisely what helps**.
     """
-    scores = paper_scores(results, agg=agg, skip_chunk_types=skip_chunk_types)
+    skip = set(skip_chunk_types)
+    scores: dict[str, float] = {}
+    for result in results:
+        value = 0.0 if result.chunk_type in skip else result.score
+        scores[result.paper_id] = max(scores.get(result.paper_id, value), value)
+
     # Ties break by insertion order (i.e. order in the fused ranking) since sorted is stable.
     papers = sorted(scores, key=lambda paper_id: scores[paper_id], reverse=True)
     if max_papers is not None:
         papers = papers[:max_papers]
     return papers
-
-
-def paper_scores(
-    results: list[RetrievalResult],
-    agg: str = "max",
-    skip_chunk_types: Collection[str] = (),
-) -> dict[str, float]:
-    """Each paper's representative score, before `to_gold_papers()` ranks them.
-
-    Kept separate so the aggregation rule lives in one place: **`to_gold_papers()`
-    only sorts this function's output**, so the definition of a representative
-    score can never split into two.
-    """
-    skip = set(skip_chunk_types)
-    scores: dict[str, float] = {}
-    for result in results:
-        value = 0.0 if result.chunk_type in skip else result.score
-        if agg == "max":
-            scores[result.paper_id] = max(scores.get(result.paper_id, value), value)
-        elif agg == "sum":
-            scores[result.paper_id] = scores.get(result.paper_id, 0.0) + value
-        else:
-            raise ValueError(f"unknown agg: {agg!r}")
-    return scores

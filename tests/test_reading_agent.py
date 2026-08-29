@@ -99,7 +99,7 @@ def test_loop_iterates_when_llm_says_insufficient():
             _judge(["p0", "pX"], sufficient=True),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=3, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=3, retrieve_top_k=5))
     prediction = agent.run(_query())
 
     assert len(prediction.trace) == 2, "2ステップ回っていない"
@@ -116,7 +116,7 @@ def test_loop_iterates_when_llm_says_insufficient():
 def test_stops_as_soon_as_llm_says_sufficient():
     retriever = _StubRetriever()
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=3, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=3, retrieve_top_k=5))
     prediction = agent.run(_query())
 
     assert len(prediction.trace) == 1
@@ -133,7 +133,7 @@ def test_respects_max_steps():
             _subqueries("sq2"),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=2, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=2, retrieve_top_k=5))
     prediction = agent.run(_query())
     assert len(prediction.trace) == 2
 
@@ -149,7 +149,7 @@ def test_builds_evidence_from_cited_chunks():
         }
     )
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
     prediction = agent.run(_query())
 
     assert len(prediction.evidence) == 1
@@ -167,7 +167,11 @@ def test_reads_full_chunk_text_not_a_200_char_stub():
     result.text = long_text
     retriever = _StubRetriever({"sq": [result]})
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5, snippet_chars=1800)
+    agent = ReadingAgent(
+        retriever,
+        llm=llm,
+        config=ReadingConfig(max_steps=1, retrieve_top_k=5, snippet_chars=1800),
+    )
     agent.run(_query())
 
     judge_prompt = llm.calls[1]
@@ -193,7 +197,7 @@ def test_drops_hallucinated_paper_and_chunk_ids():
             ),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
     prediction = agent.run(_query())
 
     assert [p["paper_id"] for p in prediction.gold_papers] == ["p0"]
@@ -218,7 +222,7 @@ def test_duplicate_chunk_keeps_the_higher_score():
     llm = FakeLLM(
         responses=[_subqueries("sq-a", "sq-b"), _judge(["pA"], sufficient=True)]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
     agent.run(_query())
 
     # 候補一覧は _read_and_judge のプロンプトに関連度順で並ぶ。pA が 9.0 を
@@ -234,7 +238,11 @@ def test_falls_back_to_the_ranking_when_llm_output_is_unusable():
     """
     retriever = _StubRetriever()
     llm = FakeLLM(responses=["not json"])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5, max_papers=3)
+    agent = ReadingAgent(
+        retriever,
+        llm=llm,
+        config=ReadingConfig(max_steps=1, retrieve_top_k=5, max_papers=3),
+    )
     prediction = agent.run(_query())
 
     assert [p["paper_id"] for p in prediction.gold_papers] == ["p0", "p1", "p2"]
@@ -252,7 +260,9 @@ def test_candidate_papers_records_ranking_before_cutoff():
     )
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
     agent = ReadingAgent(
-        retriever, llm=llm, max_steps=1, retrieve_top_k=8, max_papers=3,
+        retriever,
+        llm=llm,
+        config=ReadingConfig(max_steps=1, retrieve_top_k=8, max_papers=3),
     )
     prediction = agent.run(_query())
 
@@ -268,7 +278,7 @@ def test_candidate_papers_is_capped():
         {"sq": [_result(0, f"p{i:03d}", float(n - i)) for i in range(n)]}
     )
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p000"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=n)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=n))
     prediction = agent.run(_query())
 
     assert len(prediction.candidate_papers) == CANDIDATE_PAPERS_LIMIT
@@ -315,7 +325,7 @@ def test_attribute_filter_comes_from_the_question_not_the_subquery():
             _judge(["p0"], sufficient=True),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
     agent.run(_query(question="Which NAACL 2025 papers explicitly mention MCTS?"))
 
     assert retriever.calls == ["MCTS in method figure"]
@@ -330,7 +340,7 @@ def test_no_attribute_filter_argument_when_nothing_is_extracted():
     """
     retriever = _StubRetriever()  # attribute_filter を受け取れない
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
 
     prediction = agent.run(_query(question="Which papers report FID on CIFAR-10?"))
 
@@ -359,7 +369,7 @@ def test_subquery_prompts_forbid_web_search_operators():
             _judge(["p0"], sufficient=True),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=2, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=2, retrieve_top_k=5))
     agent.run(_query())
 
     prompts = _subquery_prompts(llm)
@@ -388,7 +398,9 @@ def test_subquery_count_is_enforced_on_the_return_value_not_just_the_prompt():
         ]
     )
     agent = ReadingAgent(
-        retriever, llm=llm, max_steps=2, retrieve_top_k=5, subquery_count=4
+        retriever,
+        llm=llm,
+        config=ReadingConfig(max_steps=2, retrieve_top_k=5, subquery_count=4),
     )
     agent.run(_query())
 
@@ -407,7 +419,9 @@ def test_refine_prompt_states_the_subquery_budget():
         ]
     )
     agent = ReadingAgent(
-        retriever, llm=llm, max_steps=2, retrieve_top_k=5, subquery_count=3
+        retriever,
+        llm=llm,
+        config=ReadingConfig(max_steps=2, retrieve_top_k=5, subquery_count=3),
     )
     agent.run(_query())
 
@@ -432,7 +446,7 @@ def test_subquery_prompts_carry_the_venue_tag():
             _judge(["p0"], sufficient=True),
         ]
     )
-    agent = ReadingAgent(retriever, llm=llm, max_steps=2, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=2, retrieve_top_k=5))
     agent.run(_query(question="Which NAACL 2025 papers explicitly mention MCTS?"))
 
     prompts = _subquery_prompts(llm)
@@ -445,7 +459,7 @@ def test_no_venue_tag_without_a_constraint():
     """制約が無い質問ではプロンプトに会議名の指示を混ぜないこと。"""
     retriever = _StubRetriever()
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
     agent.run(_query(question="Which papers report FID on CIFAR-10?"))
 
     assert all("limits the search to" not in p for p in _subquery_prompts(llm))
@@ -454,7 +468,7 @@ def test_no_venue_tag_without_a_constraint():
 def test_no_expander_means_identical_behavior():
     """paper_expander を渡さなければ候補列に一切手を付けない（既定経路の保全）。"""
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(_StubRetriever(), llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(_StubRetriever(), llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
     prediction = agent.run(_query())
     assert all("paper_expansion" not in step for step in prediction.trace)
     assert len(prediction.candidate_papers) <= CANDIDATE_PAPERS_LIMIT
@@ -477,12 +491,9 @@ def _rrf_agent(ranking: list[str], **combine_kwargs) -> ReadingAgent:
     return ReadingAgent(
         _StubRetriever(),
         llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
-        max_steps=1,
-        retrieve_top_k=5,
-        max_candidates=2,
         paper_expander=_StubRelated(ranking),
         combine=CombineConfig(**combine_kwargs),
-        max_papers=1,
+        config=ReadingConfig(max_steps=1, retrieve_top_k=5, max_candidates=2, max_papers=1),
     )
 
 
@@ -519,8 +530,10 @@ def test_expander_receives_only_the_anchors():
     """
     expander = _StubRelated(["pE1"])
     agent = ReadingAgent(
-        _StubRetriever(), llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
-        max_steps=1, retrieve_top_k=5, max_candidates=2, paper_expander=expander,
+        _StubRetriever(),
+        llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)]),
+        paper_expander=expander,
+        config=ReadingConfig(max_steps=1, retrieve_top_k=5, max_candidates=2),
     )
     agent.run(_query())
     # 候補列は p0..p4 だが、渡るのは起点1本だけ。
@@ -531,9 +544,11 @@ def test_verdict_anchor_adds_the_llm_confirmed_papers():
     """`anchor_from: verdict` は候補1位に読解 LLM の確認済み論文を足す。"""
     expander = _StubRelated(["pE1"])
     agent = ReadingAgent(
-        _StubRetriever(), llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p1"], sufficient=True)]),
-        max_steps=1, retrieve_top_k=5, max_candidates=2, paper_expander=expander,
+        _StubRetriever(),
+        llm=FakeLLM(responses=[_subqueries("sq"), _judge(["p1"], sufficient=True)]),
+        paper_expander=expander,
         combine=CombineConfig(anchor_from="verdict"),
+        config=ReadingConfig(max_steps=1, retrieve_top_k=5, max_candidates=2),
     )
     agent.run(_query())
     # 候補1位（p0）は必ず残す。外すと single の cr@1 が落ちる。
@@ -561,7 +576,9 @@ def test_pool_is_max_merged_across_subqueries():
     """サブクエリをまたいだプールは chunk ごとの最高スコア順に並ぶ。"""
     llm = FakeLLM(responses=[_subqueries("sqA", "sqB"), _judge(["pA"], sufficient=True)])
     agent = ReadingAgent(
-        _two_subquery_retriever(), llm=llm, max_steps=1, retrieve_top_k=5,
+        _two_subquery_retriever(),
+        llm=llm,
+        config=ReadingConfig(max_steps=1, retrieve_top_k=5),
     )
     assert agent.run(_query()).candidate_papers == ["pA", "pX", "pB1"]
 
@@ -577,7 +594,11 @@ def _depth_agent(**depth):
 def test_last_runs_is_exposed_for_dumping():
     """--dump-runs 用に、サブクエリ単位の結果が run() の後に残る。"""
     llm = FakeLLM(responses=[_subqueries("sqA", "sqB"), _judge(["pA"], sufficient=True)])
-    agent = ReadingAgent(_two_subquery_retriever(), llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(
+        _two_subquery_retriever(),
+        llm=llm,
+        config=ReadingConfig(max_steps=1, retrieve_top_k=5),
+    )
     agent.run(_query())
     assert [(r.step, r.subquery) for r in agent.last_runs] == [(0, "sqA"), (0, "sqB")]
     assert [r.paper_id for r in agent.last_runs[1].results] == ["pB1", "pX"]
@@ -592,7 +613,7 @@ def test_submission_is_the_candidate_ranking_not_the_llm_selection():
     """
     retriever = _StubRetriever({"sq": [_result(0, f"p{i}", 10.0 - i) for i in range(8)]})
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p5"], sufficient=True)])
-    agent = ReadingAgent(retriever, llm=llm, max_steps=1, retrieve_top_k=8)
+    agent = ReadingAgent(retriever, llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=8))
     prediction = agent.run(_query())
 
     # LLM は p5 だけを選んだが、提出は候補列の順位（max_papers で頭打ち）。
@@ -607,39 +628,18 @@ def test_submission_is_the_candidate_ranking_not_the_llm_selection():
 # ---- 設定（ReadingConfig）--------------------------------------------------
 
 
-def test_config_rejects_unknown_params_by_name():
-    """yaml の綴り間違いを既定値のまま黙って走らせない。
-
-    `agent.params` は registry.build が **kwargs で展開してくるので、キーの正しさを
-    見張れるのは ReadingConfig だけ。削除済みの ablation フラグを書いた古い yaml も
-    ここで止まる（黙って無視されると、効いていない設定で実験してしまう）。
-    """
-    with pytest.raises(ValueError, match=r"unknown agent params: \['retrive_top_k'\]"):
-        ReadingConfig.from_params({"retrive_top_k": 20})
-    # エラーには正しいキーの一覧が入る。
-    with pytest.raises(ValueError, match="valid params:.*retrieve_top_k"):
-        ReadingAgent(_StubRetriever(), llm=FakeLLM(responses=[]), retrive_top_k=20)
-
-
-def test_config_is_frozen_and_normalizes_list_params():
-    """設定は不変。yaml がリストで書く項目はタプルに寄せる。"""
-    config = ReadingConfig.from_params({"paper_score_skip_chunk_types": ["table"]})
+def test_config_is_frozen():
+    """設定は不変（走行の途中で書き換わらない）。"""
+    config = ReadingConfig(paper_score_skip_chunk_types=("table",))
     assert config.paper_score_skip_chunk_types == ("table",)
     with pytest.raises(dataclasses.FrozenInstanceError):
         config.max_steps = 99
 
 
-def test_config_can_be_passed_as_an_object():
-    """設定オブジェクトを直接渡せる（個別 params との併用は弾く）。"""
-    agent = ReadingAgent(
-        _StubRetriever(), llm=FakeLLM(responses=[]), config=ReadingConfig(max_steps=1)
-    )
-    assert agent.config.max_steps == 1
-    with pytest.raises(ValueError, match="同時に渡せない"):
-        ReadingAgent(
-            _StubRetriever(), llm=FakeLLM(responses=[]),
-            config=ReadingConfig(), max_steps=1,
-        )
+def test_config_defaults_when_omitted():
+    """config を省くと既定値の ReadingConfig が入る。"""
+    agent = ReadingAgent(_StubRetriever(), llm=FakeLLM(responses=[]))
+    assert agent.config == ReadingConfig()
 
 
 def test_production_config_matches_what_was_measured():
@@ -678,7 +678,7 @@ def test_decompose_asks_for_a_fixed_number_of_subqueries():
 
     for task_family in ("hidden_source_single_paper", "multi_paper"):
         llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-        agent = ReadingAgent(_StubRetriever(), llm=llm, max_steps=1, retrieve_top_k=5)
+        agent = ReadingAgent(_StubRetriever(), llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
         agent.run(_query(task_family=task_family))
         decompose_prompt = llm.calls[0]
         assert f"into {SUBQUERY_COUNT} short" in decompose_prompt
@@ -694,7 +694,7 @@ def test_decompose_does_not_call_the_task_family_classifier():
     クエリ1件につき LLM が3回になっていた。
     """
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
-    agent = ReadingAgent(_StubRetriever(), llm=llm, max_steps=1, retrieve_top_k=5)
+    agent = ReadingAgent(_StubRetriever(), llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
     # task_family を持たない（= --production-input 相当の）クエリ
     agent.run(Query(query_id="q_prod", question="Which papers report FID?", answer_types=[]))
 

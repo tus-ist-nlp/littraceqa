@@ -76,7 +76,8 @@ agent/reading.py     反復エージェント（分解 → 読解 → 再検索 
 `configs/paths/*.yaml` にある（マシンによって置き場所が違うため）。
 
 - エージェントのつまみ … `ReadingConfig`（`agent/reading.py`）。**存在する param の
-  定義はこの dataclass だけ**で、`from_params()` が未知のキーを名前を挙げて弾く
+  定義はこの dataclass だけ**で、`ReadingAgent` には `config=ReadingConfig(...)` の
+  形で1つのオブジェクトとして渡す（綴り間違いはコンストラクタの TypeError で止まる）
 - A/B 統合のつまみ … `CombineConfig`（同上）
 - 検索のつまみ … `build_retriever()` の引数
 
@@ -244,7 +245,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 
 ### 表チャンクを「論文の代表スコア」に使わない（`paper_score_skip_chunk_types: [table]`）
 
-`to_gold_papers(agg="max")` は論文の最高スコアのチャンク1つで論文を代表させる。
+`to_gold_papers()` は論文の最高スコアのチャンク1つ（max）で論文を代表させる。
 **そこに表チャンクが選ばれると論文の順位が壊れる。** 表チャンクは数値と短いラベルが密なので、
 BM25 も reranker も語の重なりだけで高いスコアを出しやすく、論文が質問の主題でなくても
 表1枚で代表スコアが跳ね上がる。
@@ -253,7 +254,8 @@ BM25 も reranker も語の重なりだけで高いスコアを出しやすく�
 `w = 0` ＝「表チャンクは代表にしない」と書けて、**自由パラメータが無い**。
 
 **`figure` / `equation_algorithm` を一緒に下げると悪化する。** 落とすのは `table` だけ。
-`agg="sum"` にすると効果がほぼ消えるのが傍証で、**これは max 集約に固有の歪み**。
+チャンクを合算（sum）すると効果がほぼ消えるのが傍証で、**これは max 集約に固有の歪み**。
+（sum は測っただけで、集約を切り替える引数は持たない。）
 
 **「表しか無い論文には表スコアを使う」というフォールバックを入れてはいけない。**
 親切に見えるが実測で負ける（multi@5 0.758 -> 0.720）。表しか手掛かりが無い論文が488本あり、

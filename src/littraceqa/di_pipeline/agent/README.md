@@ -195,11 +195,12 @@ cutoff で落ちた論文の evidence は出さない。
 
 ## 主要パラメータ（`ReadingConfig`）
 
-yaml の `agent.params` は `ReadingConfig`（`agent/reading.py`）になる。**どの param が
-存在するかの定義はこの dataclass だけ**で、`ReadingConfig.from_params()` が未知のキーを
-名前を挙げて弾く（綴り間違いや削除済みフラグを書いた古い yaml が、既定値のまま黙って
-走ることがない）。`ReadingAgent.__init__` が名前付きで受けるのは協働オブジェクト
-（`retriever` / `llm` / `paper_expander`）だけ。
+つまみは `ReadingConfig`（`agent/reading.py`）に集めてあり、`ReadingAgent` には
+`config=ReadingConfig(...)` の形で1つのオブジェクトとして渡す。**どの param が存在するかの
+定義はこの dataclass だけ**で、綴り間違いはコンストラクタの TypeError で止まる。
+`ReadingAgent.__init__` が名前付きで受けるのは協働オブジェクト
+（`retriever` / `llm` / `paper_expander`）と、設定オブジェクト2つ
+（`config` / `combine`）だけ。
 
 | param | 既定 | 意味 |
 |---|---|---|

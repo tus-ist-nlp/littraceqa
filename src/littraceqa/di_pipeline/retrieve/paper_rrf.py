@@ -59,11 +59,14 @@ def paper_rrf_fuse(
     runs: list[list[RetrievalResult]],
     top_k: int,
     k: int = 60,
-    weights: dict[str, float] | None = None,
     chunks_per_paper: int = 3,
 ) -> list[RetrievalResult]:
-    """Paper-level RRF. The body of `PaperRRFFuser.fuse()`, exposed as a function."""
-    weights = weights or {}
+    """Paper-level RRF. The body of `PaperRRFFuser.fuse()`, exposed as a function.
+
+    **Every run counts the same.** There used to be a per-source `weights` dict for
+    weighting one index above another; sweeping it never beat equal weights, and
+    the final configuration passes nothing, so the ranks alone decide.
+    """
     paper_scores: dict[str, float] = {}
     # Chunk-level RRF scores, used only to order chunks within a paper.
     chunk_scores: dict[str, float] = {}
@@ -71,11 +74,10 @@ def paper_rrf_fuse(
     chunks_of_paper: dict[str, list[str]] = {}
 
     for run in runs:
-        # paper_id -> (dense rank in this run, source of the chunk that first surfaced it)
-        seen_papers: dict[str, tuple[int, str]] = {}
+        # paper_id -> dense rank in this run
+        seen_papers: dict[str, int] = {}
         for rank, result in enumerate(run):
-            weight = weights.get(result.source, 1.0)
-            chunk_scores[result.chunk_id] = chunk_scores.get(result.chunk_id, 0.0) + weight / (
+            chunk_scores[result.chunk_id] = chunk_scores.get(result.chunk_id, 0.0) + 1.0 / (
                 k + rank + 1
             )
             if result.chunk_id not in chunk_of:
@@ -83,12 +85,11 @@ def paper_rrf_fuse(
                 chunks_of_paper.setdefault(result.paper_id, []).append(result.chunk_id)
             # **One vote per paper per run.** Only its first appearance sets the rank.
             if result.paper_id not in seen_papers:
-                seen_papers[result.paper_id] = (len(seen_papers), result.source)
-        for paper_id, (paper_rank, source) in seen_papers.items():
-            # A paper's vote is weighted by the index that produced the run (1 run = 1 index).
-            paper_scores[paper_id] = paper_scores.get(paper_id, 0.0) + weights.get(
-                source, 1.0
-            ) / (k + paper_rank + 1)
+                seen_papers[result.paper_id] = len(seen_papers)
+        for paper_id, paper_rank in seen_papers.items():
+            paper_scores[paper_id] = paper_scores.get(paper_id, 0.0) + 1.0 / (
+                k + paper_rank + 1
+            )
 
     ordered_papers = sorted(paper_scores, key=lambda p: (-paper_scores[p], p))
 
@@ -112,23 +113,13 @@ def paper_rrf_fuse(
 
 
 class PaperRRFFuser:
-    def __init__(
-        self,
-        k: int = 60,
-        weights: dict[str, float] | None = None,
-        chunks_per_paper: int = 3,
-    ):
+    def __init__(self, k: int = 60, chunks_per_paper: int = 3):
         self.k = k
-        self.weights = weights or {}
         self.chunks_per_paper = chunks_per_paper
 
     def fuse(
         self, runs: list[list[RetrievalResult]], top_k: int
     ) -> list[RetrievalResult]:
         return paper_rrf_fuse(
-            runs,
-            top_k,
-            k=self.k,
-            weights=self.weights,
-            chunks_per_paper=self.chunks_per_paper,
+            runs, top_k, k=self.k, chunks_per_paper=self.chunks_per_paper
         )
