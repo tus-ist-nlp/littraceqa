@@ -150,3 +150,49 @@ def test_agent_is_assembled_with_the_measured_settings(tmp_path):
 
 def test_preprocessor_reads_mineru_output(tmp_path):
     assert type(build_preprocessor(_paths(tmp_path))).__name__ == "MinerUChunker"
+
+
+def test_index_names_are_defined_once_and_do_not_collide():
+    """An index name is a contract between the builder and whoever reads it back.
+
+    pipeline.py builds `bm25s_paper`; expander.py's BM25MLTExpander reads the same
+    directory. **A rename on one side alone leaves the reader on an empty directory
+    with no error**, so both sides go through one constant.
+    """
+    from littraceqa.search.expander import BIB_COUPLING_CACHE_NAME, BM25_MLT_CACHE_NAME
+    from littraceqa.search.faiss_qwen3 import INDEX_NAME as QWEN3
+    from littraceqa.search.indexes import (
+        BM25_INDEX_NAME,
+        BM25_PAPER_INDEX_NAME,
+        SPECTER2_INDEX_NAME,
+    )
+
+    names = [
+        BM25_INDEX_NAME, BM25_PAPER_INDEX_NAME, SPECTER2_INDEX_NAME, QWEN3,
+        BIB_COUPLING_CACHE_NAME, BM25_MLT_CACHE_NAME,
+    ]
+    # The built indexes are what the existing corpus was written under.
+    assert names[:4] == ["bm25s", "bm25s_paper", "faiss_specter2_abstract", "faiss_qwen3_8b"]
+    # Caches sit apart from the indexes, so a name can never overwrite a build.
+    assert len(set(names)) == len(names)
+
+
+def test_embedding_defaults_match_the_production_constant():
+    """The constructor defaults and PRODUCTION_PARAMS cannot drift apart.
+
+    PRODUCTION_PARAMS exists so that the distributed build and search never
+    disagree; the values used to be spelled out in both it and the signature, so the
+    mechanism could itself drift. **Five tests construct this index without passing
+    PRODUCTION_PARAMS** and would have quietly tested a stale configuration.
+    """
+    import inspect
+
+    from littraceqa.search.faiss_qwen3 import PRODUCTION_PARAMS, Qwen3FAISSIndex
+
+    signature = inspect.signature(Qwen3FAISSIndex.__init__)
+    defaults = {
+        name: parameter.default
+        for name, parameter in signature.parameters.items()
+        if name in PRODUCTION_PARAMS
+    }
+    assert defaults == PRODUCTION_PARAMS

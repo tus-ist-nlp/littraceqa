@@ -61,14 +61,26 @@ _ADD_ROWS = 100_000
 # in both places — that is what makes a model or prefix mismatch impossible.
 # `devices` is deliberately not among them: a build takes every free GPU, while
 # search uses devices[0] only and leaves the rest to the reranker.
+# **Each value is written once and used twice** — here and as the matching
+# constructor default below. They used to be spelled out in both places, which left
+# the mechanism that exists to prevent a mismatch able to drift into one: the five
+# tests that construct this index without PRODUCTION_PARAMS would have gone on
+# testing a configuration production no longer used.
 INDEX_NAME = "faiss_qwen3_8b"
+_MODEL = "Qwen/Qwen3-Embedding-8B"
+_FP16 = True
+_MAX_TOKENS = 8192
+_DOC_PREFIX = "passage: "
+_QUERY_PREFIX = "query: "
+_BATCH_SIZE = 8
+
 PRODUCTION_PARAMS: dict = {
-    "model": "Qwen/Qwen3-Embedding-8B",
-    "fp16": True,
-    "max_tokens": 8192,
-    "doc_prefix": "passage: ",
-    "query_prefix": "query: ",
-    "batch_size": 8,
+    "model": _MODEL,
+    "fp16": _FP16,
+    "max_tokens": _MAX_TOKENS,
+    "doc_prefix": _DOC_PREFIX,
+    "query_prefix": _QUERY_PREFIX,
+    "batch_size": _BATCH_SIZE,
 }
 
 
@@ -78,11 +90,11 @@ class Qwen3FAISSIndex:
     def __init__(
         self,
         index_dir: str,
-        model: str = "Qwen/Qwen3-Embedding-8B",
-        batch_size: int = 8,
+        model: str = _MODEL,
+        batch_size: int = _BATCH_SIZE,
         device: str = "cuda",
         devices: str | None = None,
-        fp16: bool = True,
+        fp16: bool = _FP16,
         # torch.compile the build's hot loop. Worth it over millions of chunks; a
         # single query-time embedding never earns back the warmup, so it is not
         # compiled there.
@@ -95,9 +107,9 @@ class Qwen3FAISSIndex:
         # table stops going missing from the evidence**. The long outliers are under
         # 1.5% of all chunks, and _embed_shard sorts by length before batching, so
         # the cost lands on their batch alone.
-        max_tokens: int = 8192,
-        doc_prefix: str = "passage: ",
-        query_prefix: str = "query: ",
+        max_tokens: int = _MAX_TOKENS,
+        doc_prefix: str = _DOC_PREFIX,
+        query_prefix: str = _QUERY_PREFIX,
         # **This is what actually prevents OOM.** Chunks are sorted by length before
         # batching, so a fixed count collects the long outliers into the last
         # batches, whose padded token count is batch_size x max_tokens (65,536 at

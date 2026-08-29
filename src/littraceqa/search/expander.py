@@ -66,6 +66,12 @@ from littraceqa.search.contracts import (
     PAPERS_FILENAME,
 )
 
+# Where each expander keeps what it built on its first run, under `Paths.index(...)`.
+# Neither is a search index; they are caches, and they get their own directory so a
+# name can never collide with a real index's.
+BIB_COUPLING_CACHE_NAME = "bib_coupling"
+BM25_MLT_CACHE_NAME = "bm25_mlt"
+
 # Pulls the paper_id out of a papers.jsonl line without parsing the whole thing.
 _PAPER_ID_RE = re.compile(r'"paper_id":\s*"([^"]+)"')
 

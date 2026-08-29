@@ -32,6 +32,8 @@ from littraceqa.chunk_store import ChunkStore
 from littraceqa.common import ROOT
 from littraceqa.search.agent import CombineConfig, ReadingAgent, ReadingConfig
 from littraceqa.search.expander import (
+    BIB_COUPLING_CACHE_NAME,
+    BM25_MLT_CACHE_NAME,
     BibCouplingExpander,
     BM25MLTExpander,
     FusedPaperExpander,
@@ -40,7 +42,14 @@ from littraceqa.search.expander import (
 from littraceqa.search.faiss_qwen3 import INDEX_NAME as QWEN3_INDEX_NAME
 from littraceqa.search.faiss_qwen3 import PRODUCTION_PARAMS as QWEN3_PARAMS
 from littraceqa.search.faiss_qwen3 import Qwen3FAISSIndex
-from littraceqa.search.indexes import BM25Index, BM25PaperIndex, Specter2FAISSIndex
+from littraceqa.search.indexes import (
+    BM25_INDEX_NAME,
+    BM25_PAPER_INDEX_NAME,
+    SPECTER2_INDEX_NAME,
+    BM25Index,
+    BM25PaperIndex,
+    Specter2FAISSIndex,
+)
 from littraceqa.search.llm import AzureOpenAILLM, LLMClient
 from littraceqa.search.preprocess import MinerUChunker
 from littraceqa.search.reranker import Qwen3Reranker
@@ -60,14 +69,6 @@ load_dotenv(ROOT / ".env")
 # (`{index_dir}/mineru/bm25s`), so rebuilding with a different preprocessor
 # cannot clobber the existing indexes.
 PROCESS = "mineru"
-
-# Name of the SPECTER2 index. **The model works on whole papers, so only
-# title+abstract is indexed** — the proximity adapter was trained on
-# title+abstract, and embedding body fragments, tables or equations separately
-# takes the input off that distribution. The "abstract" suffix is a leftover
-# from when a whole-chunk variant existed alongside it.
-SPECTER2_INDEX_NAME = "faiss_specter2_abstract"
-
 
 @dataclass(frozen=True)
 class Paths:
@@ -114,11 +115,11 @@ def build_indexers(paths: Paths) -> list:
     (no reranker, no ChunkStore)."""
     return [
         # Strong when the question's terms land inside a single chunk.
-        BM25Index(index_dir=str(paths.index("bm25s"))),
+        BM25Index(index_dir=str(paths.index(BM25_INDEX_NAME))),
         # Treats a whole paper as one document. When the question's terms are
         # scattered across a paper, no single chunk holds them all and the chunk
         # index goes weak, so the two are used together.
-        BM25PaperIndex(index_dir=str(paths.index("bm25s_paper"))),
+        BM25PaperIndex(index_dir=str(paths.index(BM25_PAPER_INDEX_NAME))),
         # Catches paraphrases that share no vocabulary. Model settings live in
         # faiss_qwen3.py so the distributed builder can share them. Only one
         # GPU here: search uses devices[0] only, leaving the rest for the reranker.
@@ -212,15 +213,16 @@ def build_expander(paths: Paths) -> FusedPaperExpander:
             # generic citations (Adam, ResNet) that would connect everything.
             BibCouplingExpander(
                 chunks=str(paths.chunks),
-                cache_path=str(paths.index("bib_coupling") / "refs.pkl"),
+                cache_path=str(paths.index(BIB_COUPLING_CACHE_NAME) / "refs.pkl"),
                 neighbors=100,
                 min_shared=2,
             ),
             # More-like-this over full paper text, querying the prebuilt
             # bm25s_paper index.
             BM25MLTExpander(
-                index_dir=str(paths.index("bm25s_paper")),
-                cache_path=str(paths.index("bm25_mlt") / "anchor_text.pkl"),
+                # The same directory build_indexers() writes above.
+                index_dir=str(paths.index(BM25_PAPER_INDEX_NAME)),
+                cache_path=str(paths.index(BM25_MLT_CACHE_NAME) / "anchor_text.pkl"),
                 neighbors=100,
                 query_chars=1200,
             ),

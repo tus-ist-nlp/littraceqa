@@ -152,10 +152,25 @@ class _BM25Base:
         return read_chunks_jsonl(self.index_dir / self.sidecar)
 
 
+# The directory each index lives in, under `Paths.index(...)`. **A name is a
+# contract, not a label**: pipeline.py builds bm25s_paper and expander.py's
+# BM25MLTExpander reads the same directory back, so renaming one side alone leaves
+# the reader looking at an empty directory — no error, just zero neighbours.
+# CLAUDE.md's other warning applies too: two indexes sharing a name silently
+# overwrite each other, and a build takes hours.
+BM25_INDEX_NAME = "bm25s"
+BM25_PAPER_INDEX_NAME = "bm25s_paper"
+# **The SPECTER2 model works on whole papers, so only title+abstract is indexed** —
+# the proximity adapter was trained on title+abstract, and embedding body fragments,
+# tables or equations separately takes the input off that distribution. The
+# "abstract" suffix is a leftover from when a whole-chunk variant existed alongside.
+SPECTER2_INDEX_NAME = "faiss_specter2_abstract"
+
+
 class BM25Index(_BM25Base):
     """One document per chunk. Strong when a question's terms land inside one chunk."""
 
-    name = "bm25s"
+    name = BM25_INDEX_NAME
     sidecar = CHUNKS_FILENAME
 
 
@@ -208,7 +223,7 @@ class BM25PaperIndex(_BM25Base):
     chosen to represent a paper whenever a real chunk exists.
     """
 
-    name = "bm25s_paper"
+    name = BM25_PAPER_INDEX_NAME
     sidecar = PAPERS_FILENAME
 
     def _documents(self, chunks: Iterable[Chunk]) -> list[Chunk]:
