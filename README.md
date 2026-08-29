@@ -53,7 +53,7 @@ questions with the `candidate_papers` of an existing prediction file:
 
 ```bash
 uv run python scripts/build_candidate_handoff.py \
-  --predictions predictions_{識別子}.jsonl \
+  --predictions predictions_{run_id}.jsonl \
   --output data/validation_with_candidates.jsonl
 ```
 

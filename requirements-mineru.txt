@@ -1,27 +1,30 @@
-# MinerU 前処理（scripts/run_mineru.py）専用の隔離環境。
+# The isolated environment for the MinerU preprocessing (scripts/run_mineru.py).
 #
-# 本体（pyproject.toml）とは同居できない。理由:
-#   MinerU 3.x は transformers>=4.57.3 / torch<3,>=2.6 を要求する一方、本体は
-#   marker-pdf と torch>=2.11,<2.12 に固定されており、解決が衝突する。
-#   本体は requires-python >=3.13 だが MinerU は <3.14 なので余裕も無い。
+# **It cannot share a venv with the main package.** MinerU 3.x wants
+# transformers>=4.57.3 and torch>=2.6,<3, while this package pins
+# torch>=2.11,<2.12; the two do not resolve together. The Python versions leave no
+# room either: the main package requires >=3.13 and MinerU requires <3.14.
 #
-# よって MinerU 段は別 venv (.venv-mineru) に隔離し、Markdown /
-# content_list.json 経由で本体パイプライン（MinerUChunker）に受け渡す。
+# So the MinerU stage lives in its own venv (.venv-mineru) and hands its output to
+# the pipeline (MinerUChunker) as Markdown and content_list.json.
 #
-# 構築: bash scripts/setup_mineru_env.sh
-# 実行: .venv-mineru/bin/python scripts/run_mineru.py ...
+# Set up:  bash scripts/setup_mineru_env.sh
+# Run:     .venv-mineru/bin/python scripts/run_mineru.py ...
 #
-# pipeline バックエンド（layout+OCR+数式+表の専用モデル群）を使う。
-# vlm バックエンドは vllm を要求し導入コストが高いため既定では入れない。
+# The pipeline backend is the one used: dedicated models for layout, OCR,
+# equations and tables. The vlm backend needs vllm, which is not worth the setup
+# cost here.
 mineru[pipeline]==3.4.3
 
-# torch は mineru の制約（<3,>=2.6）内で明示的に固定する。無指定だと
-# torch 2.13.0+cu130 が入り、同時に入る nvidia-cudnn-cu13 9.20 と噛み合わず
-# conv2d が CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH で落ちる。
-# 2.8.0 は PyPI 既定が cu128 ビルドで、RTX3090(sm_86) で問題なく動く。
+# torch is pinned explicitly, inside mineru's own range (>=2.6,<3). Left
+# unspecified, torch 2.13.0+cu130 arrives, does not match the nvidia-cudnn-cu13
+# 9.20 that comes with it, and conv2d dies with
+# CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. 2.8.0's PyPI default is the cu128
+# build, which works on an RTX 3090 (sm_86).
 torch==2.8.0
 torchvision==0.23.0
 
-# mineru 3.4.3 の同梱 pytorchocr（mineru/model/utils/pytorchocr）が import する。
-# mineru 側の依存宣言から漏れているため明示的に足す。
+# Imported by the pytorchocr bundled with mineru 3.4.3
+# (mineru/model/utils/pytorchocr). It is missing from mineru's own dependency
+# declaration, so it is added here.
 six

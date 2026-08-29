@@ -1,8 +1,22 @@
 # src/littraceqa/di_pipeline/retrieve/
 
-複数Indexerの検索結果を統合する層。`HybridRetriever` が全体を束ね、`Fuser`/`Reranker`は差し替え可能。
+Fusing several indexers' results into one ranking. `HybridRetriever` ties it
+together.
 
-- `hybrid.py` — `HybridRetriever`: 各Indexerで検索→`PaperRRFFuser`で統合→`Qwen3Reranker`で再ランク。`to_gold_papers()`でchunk単位の結果をpaper_id単位のランキングに集約。`rerank_blend`（既定オフ）を渡すと reranker に順位を置き換えさせず、融合前の順位と RRF で混ぜ、`protect_top` 件の集合を保護する。融合結果は `score` に書き戻す（下流が score で並べ直すため）
-- `paper_expander.py` — 論文→論文展開（`specter2` / `bib_coupling` / `bm25_mlt` / `fused`）。`rank(anchors)` が「渡された起点の近傍を関連度順に返す」。**起点を決めるのも A/B 統合の設定を持つのも `ReadingAgent` 側**（`CombineConfig`）
-- `attribute_filter.py` — `AttributeExtractor` / `AttributeFilter`: 質問が明示した会議名・年（「Which NAACL 2025 papers ...」）を取り出して検索結果を絞る。索引は無改修（`RetrievalResult.metadata`にvenue/yearが既に載っているため）。会議名が一意に取れたときだけ発火し、取れなければ従来と完全に同一の動作に戻る。`LLMAttributeExtractor` は正規表現が空のときだけ LLM に判定させる後段（`llm_extract: true` で有効、既定オフ）。返答はコーパスに実在する (会議名, 年) の組しか採用しない
-- `paper_rrf.py` — `PaperRRFFuser`（"paper_rrf"）: **論文単位**の Reciprocal Rank Fusion。1つの run の中では同じ論文に何チャンク当たっても1票
+- `hybrid.py` — `HybridRetriever`: query each index, fuse with `PaperRRFFuser`,
+  re-rank with `Qwen3Reranker`. `to_gold_papers()` collapses a chunk ranking into a
+  paper ranking. With `rerank_blend`, the reranker no longer replaces the order:
+  its ranking is blended into the pre-rerank one with RRF, and the top
+  `protect_top` are kept as a set at the front. **The blended rank is written back
+  into `score`**, because everything downstream re-sorts by score.
+- `paper_expander.py` — paper-to-paper expansion (`specter2` / `bib_coupling` /
+  `bm25_mlt`, fused). `rank(anchors)` returns the neighbours of the anchors it is
+  handed, in relevance order. **Choosing the anchors, and the settings for the A/B
+  fusion, belong to `ReadingAgent`** (`CombineConfig`).
+- `attribute_filter.py` — `AttributeExtractor` / `AttributeFilter`: take the venue
+  and year a question states ("Which NAACL 2025 papers ...") and narrow the results
+  by them. **The indexes need no changes**, since venue and year are already in
+  `RetrievalResult.metadata`. It fires only when exactly one venue can be
+  extracted; otherwise the code path is identical to having no filter at all.
+- `paper_rrf.py` — `PaperRRFFuser`: **paper-level** Reciprocal Rank Fusion. Within
+  one run, a paper gets one vote however many of its chunks were hit.

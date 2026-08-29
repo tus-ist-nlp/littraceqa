@@ -1,4 +1,5 @@
 # src/littraceqa/di_pipeline/preprocess/
 
-論文1件（`paper: dict`）からChunk列を作るPreprocessor。前処理ごとに担当範囲が異なり、本文と図表は別々に処理してマージする想定（`scripts/merge_chunks.py`）。
-
+Preprocessors: turn one paper (`paper: dict`) into a stream of Chunks. Where the
+body text and the figures are produced separately, the results are joined with
+`scripts/merge_chunks.py`.

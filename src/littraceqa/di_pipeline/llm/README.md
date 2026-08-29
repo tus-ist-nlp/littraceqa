@@ -1,21 +1,21 @@
 # src/littraceqa/di_pipeline/llm/
 
-`ReadingAgent` / `TaskFamilyClassifier` が使う LLM クライアント。
-`__call__(prompt: str) -> str` の形に統一してある。
+The LLM client `ReadingAgent` uses, reduced to one shape:
+`__call__(prompt: str) -> str`.
 
-- `base.py` — `LLMClient` Protocol（このメソッド1つだけ）
-- `azure_openai.py` — `AzureOpenAILLM`: 本番。Azure OpenAI の実クライアント
-- `fake.py` — `FakeLLM`: テスト用。渡した応答を順番に返すだけ
+- `base.py` — the `LLMClient` Protocol (that one method, and nothing else)
+- `azure_openai.py` — `AzureOpenAILLM`: production, a real Azure OpenAI client
+- `fake.py` — `FakeLLM`: for tests; returns the responses it was given, in order
 
-`pipeline.build_agent()` が既定で `AzureOpenAILLM(reasoning_effort="medium")` を渡す。
-テストは第2引数に `FakeLLM` を渡して差し替える。
+`pipeline.build_agent()` passes `AzureOpenAILLM(reasoning_effort="medium")` by
+default; a test hands `ReadingAgent` a `FakeLLM` instead.
 
-## 認証
+## Credentials
 
-APIキー等はリポジトリ直下の `.env` から読む（コードにも構成にも書かない）。
-必要な環境変数は `.env.example` を参照。
+API keys and the like come from `.env` at the repository root — never from code or
+configuration. `.env.example` lists what is required.
 
-キーが無い状態でクライアントを構築すると、その場で例外になる。**エージェントは
-LLM 呼び出しを try/except で囲んでフォールバックする作り**なので、実行中に認証で
-失敗すると「LLM が動いていないのに静かに劣化する」状態になってしまう。それを避けるため、
-認証の失敗はパイプライン組み立て時に必ず表面化させる。
+**Constructing the client without a key raises immediately.** The agent wraps every
+LLM call in try/except and falls back, so an authentication failure during a run
+would show up as quietly degraded retrieval rather than an error. Surfacing it
+while the pipeline is being assembled is what makes that impossible.

@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# MinerU 用の隔離 venv (.venv-mineru) を構築し、pipeline バックエンドの
-# モデル一式をダウンロードする。
-# 本体の .venv とは torch / transformers のバージョンが両立しないため分ける。
-# 詳細は requirements-mineru.txt の先頭コメントを参照。
+# Build the isolated venv for MinerU (.venv-mineru) and download the pipeline
+# backend's models.
+# It is separate from the main .venv because their torch and transformers versions
+# cannot coexist; see the comment at the top of requirements-mineru.txt.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# MinerU は requires-python <3.14。本体の 3.13 とは別に立てる。
+# MinerU requires-python is <3.14, so this stands apart from the main venv's 3.13.
 uv venv .venv-mineru --python 3.12
 uv pip install --python .venv-mineru -r requirements-mineru.txt
 
-# pipeline バックエンドのモデル（layout / OCR / 数式 / 表）を取得する。
-# 未取得なら初回実行時に落ちてくるが、4シャードが同時に取りに行くと競合するので
-# ここで1度だけ取っておく。
+# Fetch the pipeline backend's models (layout / OCR / equations / tables). They
+# would download on first use anyway, but four shards fetching at once collide, so
+# it happens once, here.
 .venv-mineru/bin/mineru-models-download -s huggingface -m pipeline
 
 echo
-echo "完了: .venv-mineru"
-echo "実行例:"
+echo "done: .venv-mineru"
+echo "for example:"
 echo "  .venv-mineru/bin/python scripts/run_mineru.py \\"
 echo "    --paths configs/paths/default.yaml --gpus 0,1,2,3"
