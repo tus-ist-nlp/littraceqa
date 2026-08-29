@@ -1,30 +1,30 @@
-"""paper_id から MinerU コーパスの全チャンクを引くローダー。
+"""Every chunk of a paper, by paper_id.
 
-検索パイプライン（di_pipeline）は「検索がヒットしたチャンク」しか返さないので、
-「候補論文の本文をまるごと読む」タイプの読解エージェントには本文を引く経路が無い。
-ここが唯一の入口になる。
+The retrieval pipeline (di_pipeline) hands back only the chunks a search hit, so a
+reading agent that wants to read a candidate paper **whole** has no way to get at
+the text. This is that way in.
 
-コーパス（mineru_chunks.jsonl, 3.8GB / 2,564,545 chunks / 27,487 papers）は
-**paper_id ごとに行が連続している**（全走査して確認済み、途中で他論文が割り込む
-切り替わりは0回）。つまり1論文＝ファイル上の1つの連続バイト範囲なので、
-paper_id -> (開始オフセット, バイト長) の dict だけ持てば seek 一発で読める。
-3.8GB をメモリに載せる必要も DB を立てる必要もない。
+The corpus (mineru_chunks.jsonl, 3.8GB / 2,564,545 chunks / 27,487 papers) keeps
+**each paper's lines contiguous** — verified by walking the whole file; another
+paper interrupts zero times. One paper is therefore one contiguous byte range, and
+a dict of paper_id -> (offset, length) is enough to read it with a single seek.
+Neither loading 3.8GB into memory nor standing up a database is necessary.
 
-実測: 索引の構築 23秒（初回のみ）/ 索引サイズ 1.0MB / 1論文のロード 0.7ms。
+Measured: 23s to build the index (once), 1.0MB of index, 0.7ms to load a paper.
 
-使い方:
+Usage:
     from littraceqa.chunk_store import ChunkStore
 
     store = ChunkStore("/data2/iseakira/pdfs/chunks/mineru_chunks.jsonl")
     for chunk in store.load_paper("acl2025_00005"):
         print(chunk["chunk_id"], chunk["chunk_type"], chunk["text"][:80])
 
-    # 図表の画像は metadata["image_path"] にある（table/figure のみ）
+    # A figure's image is at metadata["image_path"] (table/figure only)
     for chunk in store.figures("acl2025_00005"):
         print(chunk["metadata"]["image_path"])
 
-コーパスを別マシンへ転送した場合は image_path が壊れる（絶対パスで焼き込まれて
-いるため）。転送先の mineru 出力ディレクトリを image_root に渡すと差し替わる。
+**Moving the corpus to another machine breaks image_path**, which is stored
+absolute. Passing that machine's MinerU output directory as image_root rewrites it.
 """
 
 from __future__ import annotations
@@ -36,19 +36,21 @@ from typing import Any, Iterator
 
 Record = dict[str, Any]
 
-# 画像を持つのはこの2種だけ（equation_algorithm は image_path を持たない）。
+# The only two chunk types with an image (equation_algorithm has no image_path).
 IMAGE_CHUNK_TYPES = ("table", "figure")
 
-# 索引ファイルのフォーマット版。構造を変えたら上げる（古い索引は自動で作り直す）。
+# Format version of the index file. Raise it when the structure changes; an index
+# written by an older version is rebuilt automatically.
 _INDEX_VERSION = 1
 
 
 class ChunkStore:
-    """MinerU チャンク JSONL を paper_id で引くための読み取り専用ストア。
+    """Read-only access to the MinerU chunk JSONL, keyed by paper_id.
 
-    索引はコーパスの隣に `{chunks_path}.offsets.json` として置き、無ければ
-    初回アクセス時に作る。コーパスのサイズか mtime が索引作成時と変わっていたら
-    作り直す（前処理をやり直したのに古い索引を使い続ける事故を防ぐ）。
+    The index lives beside the corpus as `{chunks_path}.offsets.json` and is built
+    on first access if absent. **It is rebuilt whenever the corpus's size or mtime
+    differs from what it was built against**, so re-running the preprocessing can
+    never leave a stale index silently in use.
     """
 
     def __init__(
@@ -68,7 +70,7 @@ class ChunkStore:
         self.image_root = Path(image_root) if image_root is not None else None
         self._offsets: dict[str, tuple[int, int]] | None = None
 
-    # ---- 索引 ---------------------------------------------------------------
+    # ---- the index ----------------------------------------------------------
 
     @property
     def offsets(self) -> dict[str, tuple[int, int]]:
@@ -85,7 +87,7 @@ class ChunkStore:
             try:
                 payload = json.loads(self.index_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
-                payload = None  # 壊れた索引は黙って作り直す
+                payload = None  # a corrupt index is simply rebuilt
             if payload is not None and _index_is_fresh(payload, self._stat()):
                 return {k: (v[0], v[1]) for k, v in payload["offsets"].items()}
         offsets = self._build_index()
@@ -93,19 +95,20 @@ class ChunkStore:
         return offsets
 
     def _build_index(self) -> dict[str, tuple[int, int]]:
-        """全走査して paper_id ごとのバイト範囲を求める（約23秒）。"""
+        """Walk the whole file for each paper's byte range (about 23 seconds)."""
         offsets: dict[str, list[int]] = {}
         previous: str | None = None
         position = 0
         with self.chunks_path.open("rb") as handle:
             for line in handle:
-                # paper_id だけ要るが、部分パースは text 中の改行やエスケープで
-                # 壊れるので素直に json.loads する（走査は1回きりなので割に合う）。
+                # Only paper_id is needed, but parsing part of the line breaks on
+                # newlines and escapes inside text, so the line is parsed properly.
+                # The walk happens once, so it is worth it.
                 paper_id = json.loads(line)["paper_id"]
                 if paper_id != previous:
                     if paper_id in offsets:
-                        # 連続でなくなった＝この設計の前提が崩れている。黙って
-                        # 壊れた索引を返すより落とす。
+                        # No longer contiguous, so the premise of this whole design
+                        # is gone. Better to fail than to hand back a broken index.
                         raise ValueError(
                             f"paper_id {paper_id!r} の行が連続していない。"
                             "ChunkStore は1論文=1連続ブロックを前提にしている。"
@@ -127,11 +130,11 @@ class ChunkStore:
             tmp.write_text(json.dumps(payload), encoding="utf-8")
             os.replace(tmp, self.index_path)
         except OSError:
-            # コーパスが読み取り専用の場所にあるだけなら、索引を残せなくても
-            # そのセッションでは動く。次回また23秒かかるだけ。
+            # The corpus simply sits somewhere read-only. Not being able to keep the
+            # index costs nothing this session — only another 23 seconds next time.
             tmp.unlink(missing_ok=True)
 
-    # ---- 取り出し -----------------------------------------------------------
+    # ---- reading it out -----------------------------------------------------
 
     def __contains__(self, paper_id: str) -> bool:
         return paper_id in self.offsets
@@ -143,10 +146,11 @@ class ChunkStore:
         return list(self.offsets)
 
     def load_paper(self, paper_id: str) -> list[Record]:
-        """1論文の全チャンクをコーパス上の順序（＝本文の順序）で返す。
+        """A paper's chunks, in corpus order — which is the order of the paper.
 
-        存在しない paper_id は空リスト。読解エージェントは検索結果から
-        paper_id を受け取るので、欠損で落ちるより空で進めるほうが扱いやすい。
+        **An unknown paper_id gives an empty list, not an error.** A reading agent
+        receives its paper_ids from retrieval, so carrying on with nothing is easier
+        to handle there than an exception.
         """
         location = self.offsets.get(paper_id)
         if location is None:
@@ -172,12 +176,13 @@ class ChunkStore:
                 yield chunk
 
     def figures(self, paper_id: str) -> list[Record]:
-        """画像ファイルが実在する table/figure チャンクだけを返す。
+        """The table/figure chunks whose image file actually exists.
 
-        実測では候補論文の table/figure の 99.3% が image_path を持ち、
-        指す先の欠損は0件だった（残り0.7%はテキスト表として抽出され画像の
-        切り出しが無かった table）。存在チェックを通すのは、転送や
-        image_root の指定ミスに気づかず空画像を VLM に渡さないため。
+        Measured over the candidate papers, 99.3% of table/figure chunks carry an
+        image_path and none of those paths were missing; the other 0.7% are tables
+        extracted as text, with no image cut out. **The existence check is there so
+        that a bad transfer or a wrong image_root does not go unnoticed** and end up
+        handing a VLM an image that is not there.
         """
         found: list[Record] = []
         for chunk in self.iter_chunks(paper_id, IMAGE_CHUNK_TYPES):
@@ -187,10 +192,11 @@ class ChunkStore:
         return found
 
     def paper_text(self, paper_id: str, separator: str = "\n\n") -> str:
-        """全チャンクの text を連結した論文全文。
+        """The whole paper: every chunk's text, joined.
 
-        1論文の実測は中央値78チャンク / 114KB（約24k tok）。候補50本を
-        まとめて渡すと 1.1M tok になり、どのモデルにも入らない点に注意。
+        A paper is a median of 78 chunks and 114KB, about 24k tokens. **Fifty
+        candidates at once is 1.1M tokens** and fits in no model, so this is for one
+        paper at a time.
         """
         return separator.join(
             chunk["text"] for chunk in self.load_paper(paper_id) if chunk.get("text")
@@ -204,11 +210,12 @@ def _index_is_fresh(payload: Any, source: dict[str, int]) -> bool:
 
 
 def _rebase_image_path(chunk: Record, image_root: Path) -> None:
-    """image_path の `{mineru出力}/{paper_id}/...` の前半を差し替える。
+    """Rewrite the `{mineru output}/` half of an image_path.
 
-    パスは `{root}/{paper_id}/auto/images/{sha256}.jpg` の形をしているので、
-    paper_id のディレクトリ成分を探して、その手前を丸ごと入れ替える。
-    root の文字列を前方一致で削るより、転送先の階層が違っても効く。
+    The path has the shape `{root}/{paper_id}/auto/images/{sha256}.jpg`, so the
+    paper_id component is located and everything before it is replaced. **That works
+    even when the directory layout on the new machine differs**, which stripping a
+    known root prefix would not.
     """
     metadata = chunk.get("metadata")
     if not isinstance(metadata, dict):
