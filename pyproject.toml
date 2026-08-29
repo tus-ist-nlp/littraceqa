@@ -11,32 +11,27 @@ dependencies = [
 
 [project.optional-dependencies]
 # DIハイブリッド検索パイプライン(src/littraceqa/di_pipeline)本体。
-# `uv sync --extra di_pipeline` でインストールする。azure extra とは
-# 推移依存(marker-pdf -> pdftext -> pypdfium2==4.30.0固定)が衝突するため
-# 同時インストール不可（下の [tool.uv] conflicts 参照）。
+# `uv sync --extra di_pipeline` でインストールする。
+#
+# **ここに書いてよいのは import されているものだけ。** 以前は marker-pdf /
+# beautifulsoup4 / pylate / tiktoken が残っていたが、どれも最終構成のコードからは
+# 1行も import されていなかった（MarkerChunker は削除済み）。marker-pdf は
+# pdftext 経由で pypdfium2==4.30.0 を固定するので、azure extra(pypdfium2>=5.11.0)
+# との同時インストール禁止と anthropic の override-dependencies を1つで引き起こしていた。
 di_pipeline = [
     "PyYAML>=6.0",
-    "marker-pdf>=1.10.2",
-    "beautifulsoup4>=4.15.0",
     "markdownify>=1.2.3",
     "torch>=2.11.0,<2.12",
     "bm25s>=0.3.9",
     "faiss-cpu",
+    # index/ と retrieve/ が AutoModel / AutoTokenizer を直接呼ぶ。adapters が
+    # 推移的に持ってくるが、直接 import する以上ここに明示する。
+    "transformers>=4.45",
     # SPECTER2 のアダプタ (allenai/specter2, specter2_adhoc_query) は peft ではなく
     # adapters ライブラリ形式（adapter_config.json に peft_type を持たない）。
     "adapters>=1.3.0",
-    "pylate",
     "openai>=1.109.1",
     "python-dotenv>=1.2.2",
-    "tiktoken>=0.8.0",
-]
-# 図表前処理（FigureVLMChunker）用。GPUを持つホスト（nlp-01/nlp-03等）でのみ
-# `uv sync --extra di_pipeline --extra figures` でインストールする想定。
-figures = [
-    "docling",
-    "transformers>=4.45",
-    "qwen-vl-utils",
-    "accelerate",
 ]
 azure = [
     "azure-ai-documentintelligence>=1.0.2",
@@ -63,21 +58,6 @@ package = true
 # 提供してしまい、first-index-match だと解決不能になるため best-match にする。
 index-strategy = "unsafe-best-match"
 
-# marker-pdf は anthropic>=0.46,<0.47 を固定しているが、これは marker 自身の
-# LLM補助モード(use_llm)のためだけの依存で、MarkerChunker は use_llm=false で使う
-# （configs/process_style/marker.yaml 参照）ので marker が anthropic に触ることはない。
-# 本体は anthropic を使わない（LLM は Azure OpenAI）ので、この古いピンが他の依存の
-# 解決を邪魔しないよう新しい版に寄せておく。
-override-dependencies = ["anthropic>=0.69"]
-
-# di_pipeline (marker-pdf 経由で pypdfium2==4.30.0 に固定) と azure
-# (pypdfium2>=5.11.0 を要求) は依存が両立しないため、同時インストールを禁止する。
-conflicts = [
-    [
-        { extra = "di_pipeline" },
-        { extra = "azure" },
-    ],
-]
 
 [[tool.uv.index]]
 url = "https://download.pytorch.org/whl/cu121"
