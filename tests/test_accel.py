@@ -6,7 +6,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from littraceqa.di_pipeline.accel import (
+from littraceqa.search.accel import (
     best_attn_implementation,
     load_with_best_attn,
     maybe_compile,

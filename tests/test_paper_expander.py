@@ -17,7 +17,7 @@ import faiss
 import numpy as np
 import pytest
 
-from littraceqa.di_pipeline.expander import Specter2PaperExpander
+from littraceqa.search.expander import Specter2PaperExpander
 
 
 @pytest.fixture()
@@ -90,7 +90,7 @@ def _bib_corpus(tmp_path: Path) -> Path:
 
 
 def test_bib_coupling_ranks_by_shared_references(tmp_path: Path) -> None:
-    from littraceqa.di_pipeline.expander import BibCouplingExpander
+    from littraceqa.search.expander import BibCouplingExpander
 
     ex = BibCouplingExpander(
         chunks=str(_bib_corpus(tmp_path)), cache_path=str(tmp_path / "refs.pkl"),
@@ -109,7 +109,7 @@ def test_bib_coupling_ranks_by_shared_references(tmp_path: Path) -> None:
 
 
 def test_bib_coupling_min_shared_one_includes_weak_links(tmp_path: Path) -> None:
-    from littraceqa.di_pipeline.expander import BibCouplingExpander
+    from littraceqa.search.expander import BibCouplingExpander
 
     ex = BibCouplingExpander(
         chunks=str(_bib_corpus(tmp_path)), cache_path=str(tmp_path / "refs1.pkl"),
@@ -121,7 +121,7 @@ def test_bib_coupling_min_shared_one_includes_weak_links(tmp_path: Path) -> None
 
 
 def test_fused_expander_rrf_merges_sources(index_dir: Path, tmp_path: Path) -> None:
-    from littraceqa.di_pipeline.expander import (
+    from littraceqa.search.expander import (
         BibCouplingExpander, FusedPaperExpander, Specter2PaperExpander,
     )
 
@@ -160,7 +160,7 @@ def _bm25_paper_index(tmp_path: Path) -> Path:
 
 
 def test_bm25_mlt_ranks_lexically_close_papers(tmp_path: Path) -> None:
-    from littraceqa.di_pipeline.expander import BM25MLTExpander
+    from littraceqa.search.expander import BM25MLTExpander
 
     index_dir = _bm25_paper_index(tmp_path)
     ex = BM25MLTExpander(str(index_dir), cache_path=str(tmp_path / "mlt.pkl"), neighbors=5)
@@ -177,7 +177,7 @@ def test_bm25_mlt_ranks_lexically_close_papers(tmp_path: Path) -> None:
 
 def test_fused_rank_keeps_existing_candidates() -> None:
     """Existing candidates are not dropped; a paper in both sources comes first."""
-    from littraceqa.di_pipeline.expander import FusedPaperExpander
+    from littraceqa.search.expander import FusedPaperExpander
 
     class _Fixed:
         def __init__(self, ids): self.ids = ids

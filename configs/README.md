@@ -2,7 +2,7 @@
 
 **Only what differs per machine belongs here.** The method's settings — model
 names, k=60, per_index_k=100 — live in
-`src/littraceqa/di_pipeline/pipeline.py`.
+`src/littraceqa/search/pipeline.py`.
 
 ```
 configs/

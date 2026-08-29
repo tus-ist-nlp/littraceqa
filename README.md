@@ -16,20 +16,20 @@ uv sync
 The base install covers the dataset scripts (`scripts/`) and the
 provider-agnostic tools (`littraceqa.extract_pdf_archives`,
 `littraceqa.fix_chunk_locators`, `littraceqa.validate_submission`,
-`littraceqa.compare_runs`). The two RAG pipelines each need their own
-optional extra, and **the two are mutually exclusive in one environment**
-(`di_pipeline` pins `pypdfium2==4.30.0` transitively via `marker-pdf`, which
-conflicts with `azure`'s `pypdfium2>=5.11.0`; `uv` will refuse to resolve
-both extras together):
+`littraceqa.compare_runs`). The two pipelines each have their own optional
+extra. **They can now share one environment**: the `search` extra used to pin
+`pypdfium2==4.30.0` transitively through `marker-pdf`, which conflicted with
+`azure`'s `pypdfium2>=5.11.0`, but marker-pdf is no longer a dependency (nothing
+imported it) and the ban on installing both was lifted with it.
 
 ```bash
-uv sync --extra azure         # Azure RAG pipeline (baseline)
-uv sync --extra di_pipeline   # DI-based hybrid retrieval pipeline
+uv sync --extra azure          # the Azure RAG baseline
+uv sync --extra search         # the hybrid retrieval system
 ```
 
 ## Hybrid retrieval pipeline
 
-The whole system is wired up in `src/littraceqa/di_pipeline/pipeline.py` — read that
+The whole system is wired up in `src/littraceqa/search/pipeline.py` — read that
 file to see every stage and every tuned value in one place (`CLAUDE.md` explains why
 each value was chosen). Only machine-dependent paths live in `configs/paths/*.yaml`.
 It is run via `scripts/run_search.py`, e.g.:

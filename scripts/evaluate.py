@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from littraceqa.di_pipeline.contracts import MULTI, SINGLE
+from littraceqa.search.contracts import MULTI, SINGLE
 
 # Whether the gold papers are among the top k candidates. paper_recall_macro mixes
 # "how the LLM narrowed things down" with "whether retrieval had them at all"; this

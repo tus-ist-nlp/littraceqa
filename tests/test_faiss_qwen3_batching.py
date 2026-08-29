@@ -9,7 +9,7 @@ needlessly small.**
 
 from __future__ import annotations
 
-from littraceqa.di_pipeline.faiss_qwen3 import (
+from littraceqa.search.faiss_qwen3 import (
     _estimate_tokens,
     _token_budget_batches,
 )
@@ -76,7 +76,7 @@ def test_estimate_tokens_is_capped_at_max_tokens():
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from littraceqa.di_pipeline.faiss_qwen3 import Qwen3FAISSIndex  # noqa: E402
+from littraceqa.search.faiss_qwen3 import Qwen3FAISSIndex  # noqa: E402
 
 
 def test_flush_every_defaults_to_batching_not_every_batch(tmp_path):

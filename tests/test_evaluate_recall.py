@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from littraceqa.di_pipeline.contracts import MULTI, SINGLE
+from littraceqa.search.contracts import MULTI, SINGLE
 from evaluate import CANDIDATE_RECALL_KS, evaluate
 
 # The headline k, matching ReadingConfig.max_candidates in pipeline.py. The curve

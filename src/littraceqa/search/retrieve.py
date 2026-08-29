@@ -23,8 +23,8 @@ from collections.abc import Collection
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.reranker import Qwen3Reranker
+from littraceqa.search.contracts import RetrievalResult
+from littraceqa.search.reranker import Qwen3Reranker
 
 
 # ============================================================================

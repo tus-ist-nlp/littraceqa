@@ -13,8 +13,8 @@ from dataclasses import replace
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from littraceqa.di_pipeline.accel import load_with_best_attn, maybe_compile
-from littraceqa.di_pipeline.contracts import RetrievalResult
+from littraceqa.search.accel import load_with_best_attn, maybe_compile
+from littraceqa.search.contracts import RetrievalResult
 
 _DEFAULT_INSTRUCTION = (
     "Given a scientific question, retrieve passages from research papers that "

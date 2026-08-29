@@ -31,7 +31,7 @@ from adapters import AutoAdapterModel
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult, filter_chunk_types
+from littraceqa.search.contracts import Chunk, RetrievalResult, filter_chunk_types
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _PAPERS_FILENAME = "papers.jsonl"

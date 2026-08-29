@@ -64,14 +64,14 @@ from pathlib import Path
 
 import yaml
 
-from littraceqa.di_pipeline.contracts import Chunk
+from littraceqa.search.contracts import Chunk
 
-# Importing di_pipeline.pipeline drags in the reranker (torch), the expanders
+# Importing search.pipeline drags in the reranker (torch), the expanders
 # (faiss/bm25s) and the LLM client, which fails on a machine that has none of them
 # installed — nlp02, where this build runs. Only the embedding index is needed, so
 # that module is imported directly. **The model settings are still the same shared
 # constant**, never a second copy.
-from littraceqa.di_pipeline.faiss_qwen3 import (
+from littraceqa.search.faiss_qwen3 import (
     INDEX_NAME,
     PRODUCTION_PARAMS,
     Qwen3FAISSIndex,

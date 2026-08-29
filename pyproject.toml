@@ -10,8 +10,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The hybrid retrieval pipeline itself (src/littraceqa/di_pipeline).
-# Install it with `uv sync --extra di_pipeline`.
+# The hybrid retrieval pipeline itself (src/littraceqa/search).
+# Install it with `uv sync --extra search`.
 #
 # **Only what is actually imported belongs here.** marker-pdf, beautifulsoup4,
 # pylate and tiktoken used to sit in this list without a single import anywhere in
@@ -19,7 +19,7 @@ dependencies = [
 # pypdfium2==4.30.0 through pdftext, and that one dependency was the sole cause of
 # both the ban on installing this alongside the azure extra (pypdfium2>=5.11.0) and
 # the anthropic override-dependencies.
-di_pipeline = [
+search = [
     "PyYAML>=6.0",
     "markdownify>=1.2.3",
     "torch>=2.11.0,<2.12",

@@ -1,4 +1,4 @@
-"""The configuration itself (`di_pipeline.pipeline`).
+"""The configuration itself (`search.pipeline`).
 
 **There is no mechanism for swapping methods, so what is tested is whether the one
 configuration is what it is meant to be.** This pins down how the index paths are
@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import yaml
 
-from littraceqa.di_pipeline.faiss_qwen3 import INDEX_NAME, PRODUCTION_PARAMS
-from littraceqa.di_pipeline.llm import FakeLLM
-from littraceqa.di_pipeline.pipeline import (
+from littraceqa.search.faiss_qwen3 import INDEX_NAME, PRODUCTION_PARAMS
+from littraceqa.search.llm import FakeLLM
+from littraceqa.search.pipeline import (
     PROCESS,
     Paths,
     build_agent,

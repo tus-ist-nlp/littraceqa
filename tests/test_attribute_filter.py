@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve import (
+from littraceqa.search.contracts import RetrievalResult
+from littraceqa.search.retrieve import (
     AttributeExtractor,
     AttributeFilter,
     HybridRetriever,

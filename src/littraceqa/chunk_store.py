@@ -1,6 +1,6 @@
 """Every chunk of a paper, by paper_id.
 
-The retrieval pipeline (di_pipeline) hands back only the chunks a search hit, so a
+The retrieval pipeline (search) hands back only the chunks a search hit, so a
 reading agent that wants to read a candidate paper **whole** has no way to get at
 the text. This is that way in.
 

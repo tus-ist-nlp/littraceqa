@@ -34,7 +34,7 @@ from pathlib import Path
 
 from markdownify import markdownify
 
-from littraceqa.di_pipeline.contracts import Chunk
+from littraceqa.search.contracts import Chunk
 
 # Pulls the number off the front of a caption (`Figure 3`, `Table 12a`). It used to
 # live with the figure_vlm preprocessor; that was deleted, so it moved to its only

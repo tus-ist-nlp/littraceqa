@@ -30,21 +30,21 @@ from dotenv import load_dotenv
 
 from littraceqa.chunk_store import ChunkStore
 from littraceqa.common import ROOT
-from littraceqa.di_pipeline.agent import CombineConfig, ReadingAgent, ReadingConfig
-from littraceqa.di_pipeline.expander import (
+from littraceqa.search.agent import CombineConfig, ReadingAgent, ReadingConfig
+from littraceqa.search.expander import (
     BibCouplingExpander,
     BM25MLTExpander,
     FusedPaperExpander,
     Specter2PaperExpander,
 )
-from littraceqa.di_pipeline.faiss_qwen3 import INDEX_NAME as QWEN3_INDEX_NAME
-from littraceqa.di_pipeline.faiss_qwen3 import PRODUCTION_PARAMS as QWEN3_PARAMS
-from littraceqa.di_pipeline.faiss_qwen3 import Qwen3FAISSIndex
-from littraceqa.di_pipeline.indexes import BM25Index, BM25PaperIndex, Specter2FAISSIndex
-from littraceqa.di_pipeline.llm import AzureOpenAILLM, LLMClient
-from littraceqa.di_pipeline.preprocess import MinerUChunker
-from littraceqa.di_pipeline.reranker import Qwen3Reranker
-from littraceqa.di_pipeline.retrieve import (
+from littraceqa.search.faiss_qwen3 import INDEX_NAME as QWEN3_INDEX_NAME
+from littraceqa.search.faiss_qwen3 import PRODUCTION_PARAMS as QWEN3_PARAMS
+from littraceqa.search.faiss_qwen3 import Qwen3FAISSIndex
+from littraceqa.search.indexes import BM25Index, BM25PaperIndex, Specter2FAISSIndex
+from littraceqa.search.llm import AzureOpenAILLM, LLMClient
+from littraceqa.search.preprocess import MinerUChunker
+from littraceqa.search.reranker import Qwen3Reranker
+from littraceqa.search.retrieve import (
     AttributeExtractor,
     HybridRetriever,
     PaperRRFFuser,

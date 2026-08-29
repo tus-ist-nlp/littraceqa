@@ -36,8 +36,8 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModel, AutoTokenizer
 
-from littraceqa.di_pipeline.accel import load_with_best_attn, maybe_compile
-from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult, filter_chunk_types
+from littraceqa.search.accel import load_with_best_attn, maybe_compile
+from littraceqa.search.contracts import Chunk, RetrievalResult, filter_chunk_types
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"
@@ -49,7 +49,7 @@ _DONE_FILENAME = "_embeddings.done"
 _ADD_ROWS = 100_000
 
 
-# The production embedding settings, shared by `di_pipeline.pipeline` and by
+# The production embedding settings, shared by `search.pipeline` and by
 # `scripts/build_faiss_qwen3_shard.py` (the distributed build). **A rebuild has to
 # use exactly the values search uses**, so they are written once, here, rather than
 # in both places — that is what makes a model or prefix mismatch impossible.

@@ -60,7 +60,7 @@ from typing import Protocol
 import bm25s
 import faiss
 
-from littraceqa.di_pipeline.contracts import RetrievalResult
+from littraceqa.search.contracts import RetrievalResult
 
 _INDEX_FILENAME = "index.faiss"
 _CHUNKS_FILENAME = "chunks.jsonl"

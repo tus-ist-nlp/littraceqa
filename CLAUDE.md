@@ -5,7 +5,7 @@
 
 ## プロジェクト概要
 - LitTraceQA コンペ（EMNLP 2026）の検索システム
-- **構成は `di_pipeline/pipeline.py` 1ファイルに書き下してある。**
+- **構成は `search/pipeline.py` 1ファイルに書き下してある。**
   質問1件が候補50本になるまでの全段と、その全パラメータがそこで読める
 - `contracts.py` が各段の入出力契約（dataclass）
 - **手法を差し替える仕組みは持たない。** 以前は registry + 4分割 yaml で
@@ -36,7 +36,7 @@
 | `iseakira/paper-repro` | + 論文 Table 2/3 の残り3構成 (a)(b)(c) と、それを測る道具 |
 | `iseakira/paper-ablation` | + 選定の過程で試した ablation すべて |
 
-最終構成の全体は `src/littraceqa/di_pipeline/pipeline.py` にある。
+最終構成の全体は `src/littraceqa/search/pipeline.py` にある。
 **サブパッケージは持たない**（各段1モジュール）。以前は agent / index / llm /
 preprocess / retrieve の5つに分かれていたが、手法を比べるための分割だったので、
 構成が1つに定まった段階では「段ごとにディレクトリがある＝選択肢がある」と
@@ -58,7 +58,7 @@ validation 55件の `candidate_recall@k`（macro, total）:
 
 ## コードの歩き方
 
-**`src/littraceqa/di_pipeline/pipeline.py` を読めば全体が分かる。** 各段の構成と、
+**`src/littraceqa/search/pipeline.py` を読めば全体が分かる。** 各段の構成と、
 振ったつまみの実効値がすべてそこに書いてある。個々の機構の根拠は下の「各機構の設計根拠」と
 各モジュールの docstring にある。
 

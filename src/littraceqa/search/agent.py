@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 import json
 import re
 
-from littraceqa.di_pipeline.contracts import (
+from littraceqa.search.contracts import (
     Answer,
     Evidence,
     EvidenceLocator,
@@ -42,9 +42,9 @@ from littraceqa.di_pipeline.contracts import (
     Query,
     RetrievalResult,
 )
-from littraceqa.di_pipeline.expander import PaperExpander
-from littraceqa.di_pipeline.llm import LLMClient
-from littraceqa.di_pipeline.retrieve import HybridRetriever, to_gold_papers
+from littraceqa.search.expander import PaperExpander
+from littraceqa.search.llm import LLMClient
+from littraceqa.search.retrieve import HybridRetriever, to_gold_papers
 
 
 # How many candidate papers to keep in the prediction file. The headline metric is

@@ -1,2 +1,2 @@
-"""LitTraceQA: Azure RAG pipeline baseline (littraceqa.azure) and the
-DI-based hybrid retrieval pipeline (littraceqa.di_pipeline)."""
+"""LitTraceQA: the Azure RAG baseline (littraceqa.azure) and the hybrid retrieval
+system (littraceqa.search)."""

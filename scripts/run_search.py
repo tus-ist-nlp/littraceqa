@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the search and write the prediction jsonl.
 
-**The system itself is `littraceqa.di_pipeline.pipeline`.** What this takes is the
+**The system itself is `littraceqa.search.pipeline`.** What this takes is the
 locations for this machine (paths) and the input and output — none of the method's
 knobs appear as arguments.
 
@@ -37,8 +37,8 @@ except ImportError:
     def tqdm(iterable, **kwargs):
         return iterable
 
-from littraceqa.di_pipeline.contracts import Chunk, Query
-from littraceqa.di_pipeline.pipeline import (
+from littraceqa.search.contracts import Chunk, Query
+from littraceqa.search.pipeline import (
     Paths,
     build_agent,
     build_expander_index,

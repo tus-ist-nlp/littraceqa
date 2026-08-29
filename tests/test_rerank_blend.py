@@ -10,8 +10,8 @@ Two things matter above the rest:
 
 from __future__ import annotations
 
-from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve import HybridRetriever, PaperRRFFuser, RerankBlend
+from littraceqa.search.contracts import RetrievalResult
+from littraceqa.search.retrieve import HybridRetriever, PaperRRFFuser, RerankBlend
 
 
 def _result(name: str, score: float) -> RetrievalResult:

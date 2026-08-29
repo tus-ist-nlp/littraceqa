@@ -1,4 +1,4 @@
-# src/littraceqa/di_pipeline/
+# src/littraceqa/search/
 
 The retrieval system. **`pipeline.py` is the entry point** — reading it gives the
 whole configuration and every value that was tuned; this file explains why the
@@ -270,7 +270,7 @@ indexer, the fuser, the reranker or the attribute filter does.
 
 The search that **step 2** above
 (`self.retriever.retrieve(subquery, retrieve_top_k, ...)`) actually calls. It lives
-in `src/littraceqa/di_pipeline/retrieve/` rather than in the agent layer, but it is
+in `src/littraceqa/search/retrieve/` rather than in the agent layer, but it is
 described here because it is part of the loop. In goes **one subquery**; out comes
 a list of **chunk-level `RetrievalResult`s** — collapsing those to papers is the
 agent's job (`_candidate_papers`, `to_gold_papers`).

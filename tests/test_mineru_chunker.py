@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from littraceqa.di_pipeline.preprocess import MinerUChunker
+from littraceqa.search.preprocess import MinerUChunker
 
 
 def _paper(paper_id: str = "p1") -> dict:
