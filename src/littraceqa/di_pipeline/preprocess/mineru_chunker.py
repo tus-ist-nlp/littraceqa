@@ -185,7 +185,7 @@ class MinerUChunker:
             with path.open(encoding="utf-8") as f:
                 return json.load(f)
         except Exception as exc:
-            print(f"警告: {paper_id}: content_list.json の読み込みに失敗しました: {exc}", file=sys.stderr)
+            print(f"warning: {paper_id}: could not read content_list.json: {exc}", file=sys.stderr)
             return None
 
     def _build_chunks(

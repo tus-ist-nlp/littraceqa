@@ -85,9 +85,9 @@ class Specter2FAISSIndex:
         self._chunks = filter_chunk_types(chunks, self.chunk_types)
         if not self._chunks:
             raise ValueError(
-                f"chunk_types={self.chunk_types} に一致するチャンクが1件もありません"
+                f"no chunk matches chunk_types={self.chunk_types}"
             )
-        print(f"  {self.name}: {len(self._chunks):,} 件を埋め込み (chunk_types={self.chunk_types or '全部'})")
+        print(f"  {self.name}: embedding {len(self._chunks):,} chunks (chunk_types={self.chunk_types or 'all'})")
         embeddings = self._embed(
             [chunk.text for chunk in self._chunks], adapter=self.doc_adapter
         )

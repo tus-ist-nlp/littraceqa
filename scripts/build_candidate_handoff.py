@@ -218,23 +218,23 @@ def main(argv: list[str] | None = None) -> int:
     no_title = sum(
         1 for row in rows for c in row["candidate_papers"] if c["title"] is None
     )
-    print(f"{args.output}: {len(rows)}件（入力 {len(inputs)}件）")
+    print(f"{args.output}: {len(rows)} rows (from {len(inputs)} inputs)")
     print(
-        f"  候補論文: 合計{sum(counts)}本 / 1クエリあたり最小{min(counts, default=0)} "
-        f"最大{max(counts, default=0)}"
+        f"  candidate papers: {sum(counts)} in total / per query "
+        f"min {min(counts, default=0)}, max {max(counts, default=0)}"
     )
     if no_title:
-        print(f"  警告: metadata に無く title が引けなかった候補 {no_title}件")
+        print(f"  warning: {no_title} candidate(s) not in the metadata, so no title")
     if missing:
         print(
-            f"  警告: 予測に無く候補を付けられなかったクエリ {len(missing)}件: "
-            f"{', '.join(missing[:10])}",
+            f"  warning: {len(missing)} query/queries absent from the predictions, "
+            f"so they got no candidates: {', '.join(missing[:10])}",
             file=sys.stderr,
         )
     if not args.no_gold:
         without_gold = sum(1 for row in rows if not row.get("_gold"))
         if without_gold:
-            print(f"  警告: gold が見つからなかったクエリ {without_gold}件", file=sys.stderr)
+            print(f"  warning: no gold found for {without_gold} query/queries", file=sys.stderr)
     return 0
 
 

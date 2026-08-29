@@ -88,7 +88,7 @@ def shard_bounds(n: int, shard_index: int, num_shards: int) -> tuple[int, int]:
     """This shard's range [start, end), by the same integer split as _embed_shard."""
     if not (0 <= shard_index < num_shards):
         raise ValueError(
-            f"shard_index={shard_index} は 0..{num_shards - 1} の範囲で指定してください"
+            f"shard_index={shard_index} is out of range; expected 0..{num_shards - 1}"
         )
     start = n * shard_index // num_shards
     end = n * (shard_index + 1) // num_shards
@@ -158,22 +158,22 @@ def main() -> None:
     # of the name** so that a slice can never overwrite the real index by mistake.
     index_dir = f"{index_dir}__shard{args.shard_index}of{args.num_shards}"
 
-    print(f"chunks を読み込み中: {chunks_path}")
+    print(f"loading chunks: {chunks_path}")
     chunks = load_chunks(chunks_path)
     n = len(chunks)
     start, end = shard_bounds(n, args.shard_index, args.num_shards)
     shard = chunks[start:end]
     print(
-        f"全 {n:,} 件のうち、shard {args.shard_index}/{args.num_shards} = "
-        f"[{start:,}, {end:,}) の {len(shard):,} 件を {index_dir} に構築します"
+        f"of {n:,} chunks, shard {args.shard_index}/{args.num_shards} = "
+        f"[{start:,}, {end:,}), {len(shard):,} chunks, building into {index_dir}"
     )
 
     indexer = Qwen3FAISSIndex(index_dir=index_dir, **params)
     indexer.build(shard)
-    print(f"完了: {index_dir}")
+    print(f"done: {index_dir}")
     print(
-        "全マシンのスライスが揃ったら scripts/merge_faiss_qwen3.py で"
-        f" shard0..{args.num_shards - 1} を順番にマージしてください。"
+        "once every machine's slice is here, merge shard0.."
+        f"{args.num_shards - 1} in order with scripts/merge_faiss_qwen3.py"
     )
 
 

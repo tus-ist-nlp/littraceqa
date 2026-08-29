@@ -402,10 +402,10 @@ tmux attach -t littrace-exp    # 進捗を直接見る（抜けるのは Ctrl-b 
 ```
 
 **`PYTHONUNBUFFERED=1` を付ける。** stdout がパイプ（`tee`）に繋がると Python は
-ブロックバッファリングになり、`N/55 完了` の進捗が数十分ぶん溜まってから一気に出る。
+ブロックバッファリングになり、`N/55 done` の進捗が数十分ぶん溜まってから一気に出る。
 
 予測ファイルは全55件が終わってから一括で書き出される実装なので、**途中経過は
-`wc -l predictions_*.jsonl` では測れない**——進捗はログの `N/55 完了` で見る。
+`wc -l predictions_*.jsonl` では測れない**——進捗はログの `N/55 done` で見る。
 
 **評価は `--production-input` を付けて回す。** `data/validation_inputs.jsonl` は55件すべてに
 `task_family` が入っているが、本番入力には無い。与えたまま評価すると「正解を教えてもらった

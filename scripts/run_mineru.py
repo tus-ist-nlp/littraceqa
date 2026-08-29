@@ -89,7 +89,7 @@ def run_shard(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     failure_path = log_dir / f"failures_shard{args.shard}.jsonl"
 
-    print(f"[shard {args.shard}] 未処理 {len(pdfs)} 件", flush=True)
+    print(f"[shard {args.shard}] {len(pdfs)} PDFs left to convert", flush=True)
     failures = 0
     done = 0
     start = time.time()
@@ -100,7 +100,7 @@ def run_shard(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> int:
             parse_batch(batch, mineru_dir)
         except Exception as exc:
             # One broken PDF must not take its batch down with it: retry one by one.
-            print(f"[shard {args.shard}] バッチ失敗、1件ずつ再試行します: {exc}", file=sys.stderr, flush=True)
+            print(f"[shard {args.shard}] batch failed, retrying one by one: {exc}", file=sys.stderr, flush=True)
             for pdf in batch:
                 try:
                     parse_batch([pdf], mineru_dir)
@@ -108,19 +108,19 @@ def run_shard(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> int:
                     failures += 1
                     with failure_path.open("a", encoding="utf-8") as f:
                         f.write(json.dumps({"paper_id": pdf.stem, "error": str(inner)}, ensure_ascii=False) + "\n")
-                    print(f"[shard {args.shard}] 失敗 {pdf.stem}: {inner}", file=sys.stderr, flush=True)
+                    print(f"[shard {args.shard}] failed {pdf.stem}: {inner}", file=sys.stderr, flush=True)
 
         done += len(batch)
         elapsed = time.time() - start
         rate = done / elapsed if elapsed else 0.0
         remaining = (len(pdfs) - done) / rate / 3600 if rate else float("nan")
         print(
-            f"[shard {args.shard}] {done}/{len(pdfs)} 件 "
-            f"({rate * 3600:.0f} 件/時, 残り {remaining:.1f} 時間, 失敗 {failures})",
+            f"[shard {args.shard}] {done}/{len(pdfs)} done "
+            f"({rate * 3600:.0f}/hour, {remaining:.1f} hours left, {failures} failed)",
             flush=True,
         )
 
-    print(f"[shard {args.shard}] 完了: {done - failures} 件成功 / {failures} 件失敗", flush=True)
+    print(f"[shard {args.shard}] finished: {done - failures} converted / {failures} failed", flush=True)
     return failures
 
 
@@ -132,7 +132,7 @@ def orchestrate(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> in
     """
     gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
     todo = len(select_pdfs(pdf_dir, mineru_dir, 0, 1, args.overwrite))
-    print(f"未処理 {todo} 件を GPU {gpus} の {len(gpus)} シャードで処理します", flush=True)
+    print(f"converting {todo} PDFs across {len(gpus)} shards on GPU {gpus}", flush=True)
 
     log_dir = mineru_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -156,16 +156,16 @@ def orchestrate(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> in
         log_path = log_dir / f"shard{shard}.log"
         log_file = log_path.open("w", encoding="utf-8")
         procs.append((gpu, subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)))
-        print(f"  GPU {gpu} -> shard {shard} (ログ: {log_path})", flush=True)
+        print(f"  GPU {gpu} -> shard {shard} (log: {log_path})", flush=True)
 
     exit_codes = [(gpu, proc.wait()) for gpu, proc in procs]
     failed = [gpu for gpu, code in exit_codes if code != 0]
     if failed:
-        print(f"エラー: GPU {failed} のシャードが異常終了しました", file=sys.stderr)
+        print(f"error: the shard on GPU {failed} died", file=sys.stderr)
         return 1
 
     remaining = len(select_pdfs(pdf_dir, mineru_dir, 0, 1, overwrite=False))
-    print(f"全シャード完了。未処理として残っているのは {remaining} 件です")
+    print(f"every shard finished; {remaining} PDFs are still unconverted")
     return 0
 
 

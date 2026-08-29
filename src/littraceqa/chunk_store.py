@@ -61,7 +61,7 @@ class ChunkStore:
     ) -> None:
         self.chunks_path = Path(chunks_path)
         if not self.chunks_path.exists():
-            raise FileNotFoundError(f"コーパスが見つからない: {self.chunks_path}")
+            raise FileNotFoundError(f"corpus not found: {self.chunks_path}")
         self.index_path = (
             Path(index_path)
             if index_path is not None
@@ -110,8 +110,9 @@ class ChunkStore:
                         # No longer contiguous, so the premise of this whole design
                         # is gone. Better to fail than to hand back a broken index.
                         raise ValueError(
-                            f"paper_id {paper_id!r} の行が連続していない。"
-                            "ChunkStore は1論文=1連続ブロックを前提にしている。"
+                            f"the lines for paper_id {paper_id!r} are not "
+                            "contiguous; ChunkStore requires one paper to be one "
+                            "contiguous block"
                         )
                     offsets[paper_id] = [position, 0]
                     previous = paper_id

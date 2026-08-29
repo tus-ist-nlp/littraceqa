@@ -80,27 +80,27 @@ def main() -> None:
         index_path = part / _INDEX_FILENAME
         chunks_path = part / _CHUNKS_FILENAME
         if not index_path.exists() or not chunks_path.exists():
-            raise FileNotFoundError(f"{part} に index.faiss か chunks.jsonl がありません")
+            raise FileNotFoundError(f"{part} has no index.faiss or no chunks.jsonl")
         index = faiss.read_index(str(index_path))
         n_chunks = count_lines(chunks_path)
         if index.ntotal != n_chunks:
             raise ValueError(
-                f"{part}: index のベクトル数 {index.ntotal:,} と "
-                f"chunks 行数 {n_chunks:,} が一致しません(索引がずれます)"
+                f"{part}: the index holds {index.ntotal:,} vectors but chunks.jsonl "
+                f"has {n_chunks:,} lines; merging these would misalign the index"
             )
         if dim is None:
             dim = index.d
         elif index.d != dim:
             raise ValueError(
-                f"{part}: 次元 {index.d} が他スライス({dim})と違います"
+                f"{part}: dimension {index.d} differs from the other slices ({dim})"
             )
         part_indexes.append(index)
         total_vectors += index.ntotal
         total_chunks += n_chunks
-        print(f"  {part.name}: {index.ntotal:,} ベクトル / {n_chunks:,} チャンク OK")
+        print(f"  {part.name}: {index.ntotal:,} vectors / {n_chunks:,} chunks OK")
 
     print(
-        f"合計 {total_vectors:,} ベクトル({dim}次元)を {output_dir} に合体します"
+        f"merging {total_vectors:,} vectors ({dim} dims) into {output_dir}"
     )
 
     # Concatenate the vectors in shard order into a fresh IndexFlatIP.
@@ -111,10 +111,10 @@ def main() -> None:
             count = min(_ADD_ROWS, n - start)
             vectors = index.reconstruct_n(start, count)
             merged.add(np.ascontiguousarray(vectors))
-        print(f"  {part.name}: ベクトル追加済み(累計 {merged.ntotal:,})")
+        print(f"  {part.name}: vectors added (running total {merged.ntotal:,})")
 
     faiss.write_index(merged, str(output_dir / _INDEX_FILENAME))
-    print(f"index.faiss を書き出しました({merged.ntotal:,} ベクトル)")
+    print(f"wrote index.faiss ({merged.ntotal:,} vectors)")
 
     # Concatenate the chunks.jsonl files in the same shard order.
     out_chunks = output_dir / _CHUNKS_FILENAME
@@ -125,11 +125,11 @@ def main() -> None:
     written = count_lines(out_chunks)
     if written != merged.ntotal:
         raise ValueError(
-            f"合体後の chunks 行数 {written:,} と ベクトル数 {merged.ntotal:,} が"
-            "一致しません(マージが壊れています)"
+            f"the merged chunks.jsonl has {written:,} lines but the index has "
+            f"{merged.ntotal:,} vectors; the merge is broken"
         )
-    print(f"chunks.jsonl を書き出しました({written:,} 行)")
-    print("完了。run_search.py から通常の索引として読めます。")
+    print(f"wrote chunks.jsonl ({written:,} lines)")
+    print("done; run_search.py can now read this as an ordinary index")
 
 
 if __name__ == "__main__":

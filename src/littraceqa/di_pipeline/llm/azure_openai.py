@@ -88,14 +88,14 @@ class AzureOpenAILLM:
         ]
         if missing:
             raise RuntimeError(
-                "Azure OpenAI の設定が足りません: " + ", ".join(missing) + "\n"
-                ".env に次を書いてください（値はコードに書かない）:\n"
+                "Azure OpenAI is not configured; missing: " + ", ".join(missing) + "\n"
+                "Put these in .env (never in code):\n"
                 "    AZURE_OPENAI_ENDPOINT=https://xxx.openai.azure.com\n"
                 "    AZURE_OPENAI_API_KEY=...\n"
                 "    AZURE_OPENAI_API_VERSION=2025-04-01-preview\n"
                 "    AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-5.4\n"
-                "LLM 無しで動かせるのはテストだけで（llm/fake.py の FakeLLM を"
-                "ReadingAgent に直接渡す）、本番の検索は LLM 必須。"
+                "Only tests can run without an LLM (hand ReadingAgent the FakeLLM "
+                "from llm/fake.py directly); a real search requires one."
             )
 
         self.deployment = deployment
@@ -135,7 +135,7 @@ class AzureOpenAILLM:
             response = self.client.chat.completions.create(**kwargs)
         except openai.AuthenticationError as exc:
             raise RuntimeError(
-                "Azure OpenAI の認証に失敗しました。AZURE_OPENAI_API_KEY を確認してください。"
+                "Azure OpenAI rejected the credentials. Check AZURE_OPENAI_API_KEY."
             ) from exc
 
         return response.choices[0].message.content or ""

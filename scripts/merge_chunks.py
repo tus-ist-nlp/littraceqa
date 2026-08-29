@@ -48,12 +48,11 @@ def merge_chunks(chunk_lists: list[list[Chunk]], strict: bool = False) -> list[C
 
     if duplicate_ids:
         message = (
-            f"重複した chunk_id が {len(duplicate_ids)} 件見つかりました: "
-            f"{duplicate_ids[:5]}"
+            f"{len(duplicate_ids)} repeated chunk_id(s) found: {duplicate_ids[:5]}"
         )
         if strict:
             raise ValueError(message)
-        print(f"警告: {message}", file=sys.stderr)
+        print(f"warning: {message}", file=sys.stderr)
 
     return merged
 
@@ -81,8 +80,8 @@ def main() -> None:
             f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
 
     print(
-        f"{len(merged)} チャンクを {output_path} に書き出しました"
-        f"（入力 {len(args.inputs)} ファイル）"
+        f"wrote {len(merged)} chunks to {output_path} "
+        f"(from {len(args.inputs)} input file(s))"
     )
 
 

@@ -177,8 +177,8 @@ class Qwen3FAISSIndex:
 
         if memmap_path.exists() or done_path.exists():
             print(
-                f"  {self.name}: 前回の中間ファイルは件数が合わないので作り直します"
-                f"（期待 {expected_bytes:,} バイト）"
+                f"  {self.name}: the scratch files from last time have the wrong "
+                f"row count, rebuilding them (expected {expected_bytes:,} bytes)"
             )
         # Allocate the 42GB on disk. It never goes into RAM.
         np.memmap(memmap_path, dtype="float32", mode="w+", shape=(n, dim)).flush()
@@ -190,7 +190,7 @@ class Qwen3FAISSIndex:
         n = len(self._chunks)
         if n == 0:
             raise ValueError(
-                f"chunk_types={self.chunk_types} に一致するチャンクが1件もありません"
+                f"no chunk matches chunk_types={self.chunk_types}"
             )
 
         # Each worker reads its own share from this file. Pickling 2.5M texts across
@@ -205,13 +205,13 @@ class Qwen3FAISSIndex:
         already = int(np.memmap(done_path, dtype="uint8", mode="r", shape=(n,)).sum())
 
         print(
-            f"  {self.name}: {n:,} 件 x {dim}次元 "
-            f"({n * dim * 4 / 1e9:.1f}GB) を {len(self.devices)} GPU で埋め込み"
+            f"  {self.name}: embedding {n:,} chunks x {dim} dims "
+            f"({n * dim * 4 / 1e9:.1f}GB) across {len(self.devices)} GPU(s)"
         )
         if resumed:
             print(
-                f"  {self.name}: 中断した構築を再開します"
-                f"（{already:,} / {n:,} 件 = {already / n * 100:.1f}% は完了済みで飛ばします）"
+                f"  {self.name}: resuming an interrupted build "
+                f"({already:,} / {n:,} = {already / n * 100:.1f}% already done, skipping)"
             )
         self._embed_to_memmap(memmap_path, n, dim)
 
@@ -265,7 +265,7 @@ class Qwen3FAISSIndex:
             process.join()
         failed = [p.exitcode for p in processes if p.exitcode != 0]
         if failed:
-            raise RuntimeError(f"埋め込みワーカーが異常終了しました (exitcode={failed})")
+            raise RuntimeError(f"an embedding worker died (exitcode={failed})")
 
     # ---- search -----------------------------------------------------------
 
@@ -434,7 +434,7 @@ def _embed_with_oom_retry(
             raise
         middle = len(texts) // 2
         print(
-            f"  OOM: {len(texts)} 件のバッチを {middle} + {len(texts) - middle} に割って再試行します",
+            f"  OOM: splitting a batch of {len(texts)} into {middle} + {len(texts) - middle} and retrying",
             flush=True,
         )
         first = _embed_with_oom_retry(
@@ -494,7 +494,7 @@ def _embed_shard(
         remaining = [i for i in order if not done[start + i]]
         if len(remaining) != len(order):
             print(
-                f"  {device}: {len(order) - len(remaining):,} 件は完了済みなので飛ばします",
+                f"  {device}: {len(order) - len(remaining):,} rows already done, skipping",
                 flush=True,
             )
         order = remaining

@@ -89,14 +89,14 @@ def merge_predictions(output_path: Path, others: list[str]) -> tuple[Path, list[
     for other in others:
         other_path = Path(other)
         if not other_path.exists():
-            print(f"エラー: --merge-with に指定した {other_path} が存在しません", file=sys.stderr)
+            print(f"error: {other_path}, given to --merge-with, does not exist", file=sys.stderr)
             sys.exit(1)
         records = read_predictions(other_path)
         overlap = sorted(set(records) & set(merged))
         if overlap:
             print(
-                f"警告: {other_path} は今回の予測と {len(overlap)} 件重複しています"
-                f"（例: {', '.join(overlap[:3])}）。今回の実行の予測を優先します。",
+                f"warning: {other_path} shares {len(overlap)} query_id(s) with this "
+                f"run (e.g. {', '.join(overlap[:3])}); this run's predictions win.",
                 file=sys.stderr,
             )
         for query_id, record in records.items():
@@ -106,7 +106,7 @@ def merge_predictions(output_path: Path, others: list[str]) -> tuple[Path, list[
     with merged_path.open("w", encoding="utf-8") as f:
         for _, record in sorted(merged.items()):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"{len(merged)} 件に結合して {merged_path} に書き出しました（採点はこちらを使います）")
+    print(f"joined into {len(merged)} queries and wrote {merged_path} (score this one)")
     return merged_path, others
 
 
@@ -158,18 +158,20 @@ def check_coverage(scored_path: Path) -> dict[str, Any]:
     total = len(gold_ids)
     if covered == 0:
         print(
-            f"\n{GOLD_PATH} の gold と重なる query_id が1件もありません。"
-            "本番入力の走行として扱い、採点は案内しません。\n"
-            "        次は scripts/build_candidate_handoff.py --no-gold で"
-            "受け渡しファイルを作ってください。\n"
+            f"\nNo query_id here appears in {GOLD_PATH}. Treating this as a run on "
+            "production input, so no scoring is suggested.\n"
+            "        Next, build the handoff file with "
+            "scripts/build_candidate_handoff.py --no-gold\n"
         )
         return {"covered": 0, "gold_total": total}
     if covered < total:
         print(
-            f"\n警告: gold {total}件のうち {covered}件しか予測がありません。"
-            f"macro 指標は約 {covered / total:.0%} に薄まった値になります。\n"
-            f"        残りの分割を回してから --merge-with {scored_path} を付けて実行すると"
-            f"{total}件で採点されます。この行の数字を別構成と比べないでください。\n",
+            f"\nwarning: only {covered} of the {total} gold queries have a "
+            f"prediction, so every macro metric is diluted to about "
+            f"{covered / total:.0%}.\n"
+            f"        Run the remaining split with --merge-with {scored_path} to "
+            f"score all {total}. Do not compare this run's numbers against another "
+            f"configuration.\n",
             file=sys.stderr,
         )
     return {"covered": covered, "gold_total": total}
@@ -266,41 +268,44 @@ def main() -> None:
         # agent is assembled here.
         papers = load_papers(paths.paper_metadata)
         chunks = []
-        for paper in tqdm(papers, desc="前処理中"):
+        for paper in tqdm(papers, desc="preprocessing"):
             chunks.extend(build_preprocessor(paths).process(paper))
 
         paths.chunks.parent.mkdir(parents=True, exist_ok=True)
         with paths.chunks.open("w", encoding="utf-8") as f:
             for chunk in chunks:
                 f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
-        print(f"{len(chunks)} チャンクを {paths.chunks} に保存しました")
+        print(f"saved {len(chunks)} chunks to {paths.chunks}")
 
         # The three search indexes, plus the SPECTER2 index ranking B reads. The
         # latter never reaches the fuser, but without building it here there would be
         # no way to rebuild it at all.
         for indexer in [*build_indexers(paths), build_expander_index(paths)]:
-            print(f"  {indexer.name} を構築中...")
+            print(f"  building {indexer.name}...")
             indexer.build(chunks)
-        print("索引構築完了")
+        print("indexes built")
 
     agent = build_agent(paths)
-    print("既存の索引を読み込み中...")
+    print("loading the existing indexes...")
     for indexer in agent.retriever.indexers:
         try:
             indexer.load()
         except Exception as exc:
             print(
-                f"エラー: {indexer.name} の索引読み込みに失敗しました: {exc}\n"
-                f"先に --build を付けて索引を構築してください。",
+                f"error: could not load the {indexer.name} index: {exc}\n"
+                f"Build the indexes first, with --build.",
                 file=sys.stderr,
             )
             sys.exit(1)
-    print("読み込み完了")
+    print("indexes loaded")
 
     queries = load_queries(Path(args.queries), production_input=args.production_input)
     if args.production_input:
-        print("本番と同じ4フィールド（query_id/question/answer_types/table_schema）で走らせます")
-    print(f"{len(queries)} 件の質問に対して検索中...")
+        print(
+            "running on the same fields production gives "
+            "(query_id / question / answer_types / table_schema)"
+        )
+    print(f"searching for {len(queries)} questions...")
 
     # --dump-runs writes each subquery's results to a separate file. Deliberately
     # not in Prediction.trace, which would bloat the submission — this is the basis
@@ -314,17 +319,17 @@ def main() -> None:
         if runs_file is not None:
             dump_runs(runs_file, query.query_id, getattr(agent, "last_runs", []))
         if (i + 1) % 10 == 0:
-            print(f"  {i + 1}/{len(queries)} 完了")
+            print(f"  {i + 1}/{len(queries)} done")
 
     if runs_file is not None:
         runs_file.close()
-        print(f"サブクエリ単位の検索結果を {args.dump_runs} に書き出しました")
+        print(f"wrote the per-subquery results to {args.dump_runs}")
 
     output_path = Path(args.output)
     with output_path.open("w", encoding="utf-8") as f:
         for pred in predictions:
             f.write(json.dumps(pred, ensure_ascii=False) + "\n")
-    print(f"予測結果を {output_path} に書き出しました")
+    print(f"wrote the predictions to {output_path}")
 
     # Scoring a split run on its own dilutes the macro metrics by the coverage.
     scored_path = output_path
@@ -335,7 +340,7 @@ def main() -> None:
     # On a production run (no overlap) scoring is itself the mistake; do not suggest it.
     if coverage.get("covered", 0):
         print(
-            "\n採点するには:\n"
+            "\nTo score:\n"
             f"  uv run python scripts/evaluate.py --gold {GOLD_PATH} --pred {scored_path}"
         )
 
