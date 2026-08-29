@@ -1,1 +1,1 @@
-"""検索エージェント（Query から Prediction を生成する段）を実装するモジュール群。"""
+"""The search agent: the stage that turns a Query into a Prediction."""

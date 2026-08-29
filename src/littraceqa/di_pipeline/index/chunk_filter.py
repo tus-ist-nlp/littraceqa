@@ -1,15 +1,16 @@
-"""indexer ごとに「どの chunk_type を索引に入れるか」を絞るヘルパ。
+"""Which chunk_types an index takes in.
 
-同じチャンク集合を全 indexer に流しつつ、indexer ごとに粒度を変えられるようにする。
-モデルには設計上の想定粒度があり、そこから外すと性能が出ない:
+The same set of chunks is handed to every index; this lets each one keep the
+granularity its model was built for. **A model taken off its design granularity
+does not perform:**
 
-* SPECTER2 の proximity アダプタは title+abstract（論文まるごと）で学習された
-  **論文単位**のモデル。本文の断片・表・数式を個別に埋め込むのは学習時の入力分布から
-  外れる。chunk_types: [title_abstract] にすると設計どおりの使い方になる。
-* BM25 は語彙一致なので粒度を選ばない。LitTraceQA の質問は手法名・データセット名・
-  指標名（PointLoRA, ModelNet40, ECM-XL …）だらけで、稀語の完全一致に強い BM25 とは
-  相性が良い。全チャンクに掛けてよい。
-* passage 単位の密ベクトル（Qwen3 等）は本文チャンクに掛ける。
+* SPECTER2's proximity adapter was trained on title+abstract — a **whole-paper**
+  model. Embedding body fragments, tables or equations separately takes the input
+  off that distribution, so it is given `title_abstract` only.
+* BM25 matches on vocabulary, so granularity does not matter to it. LitTraceQA's
+  questions are full of method, dataset and metric names (PointLoRA, ModelNet40,
+  ECM-XL), which is exactly where exact rare-term matching wins — every chunk.
+* Passage-level dense vectors (Qwen3 and the like) go on body chunks.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from collections.abc import Iterable
 
 from littraceqa.di_pipeline.contracts import Chunk
 
-# MinerUChunker が出す chunk_type の観測値。
+# The chunk_type values MinerUChunker actually emits.
 ALL_CHUNK_TYPES = (
     "title_abstract",
     "text_span",
@@ -32,7 +33,7 @@ ALL_CHUNK_TYPES = (
 def filter_chunk_types(
     chunks: Iterable[Chunk], chunk_types: list[str] | None
 ) -> list[Chunk]:
-    """chunk_types に含まれる chunk_type のチャンクだけを返す。None なら全部。"""
+    """Keep only the chunks whose chunk_type is listed; None keeps everything."""
     if not chunk_types:
         return list(chunks)
 

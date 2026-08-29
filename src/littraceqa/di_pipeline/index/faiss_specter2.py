@@ -1,21 +1,23 @@
-"""FAISS + SPECTER2 による dense 検索インデックス。
+"""Dense retrieval with SPECTER2, over FAISS.
 
-Chunk のテキストを SPECTER2 でベクトル化し、FAISS の内積 (IndexFlatIP)
-インデックスを構築する。埋め込みは L2 正規化してあるため、内積がそのまま
-コサイン類似度になる。
+Embeds a Chunk's text with SPECTER2 into a FAISS inner-product index
+(`IndexFlatIP`). The embeddings are L2-normalised, so the inner product *is* cosine
+similarity.
 
-SPECTER2 は文書側/クエリ側をアダプタ切り替えで区別する
-（doc側 "proximity" / query側 "adhoc_query"）。プーリングは CLS トークン
-（SPECTER2 は BERT 系エンコーダ）。
+SPECTER2 tells the document side from the query side by swapping adapters
+("proximity" for documents, "adhoc_query" for queries). Pooling is the CLS token —
+SPECTER2 is a BERT-family encoder.
 
-アダプタは peft ではなく adapters ライブラリ形式で配布されている
-（allenai/specter2 の adapter_config.json は peft_type を持たない）。peft で読むと
-KeyError: 'peft_type' で落ちるため、AutoAdapterModel を使う。
+**The adapters ship in the `adapters` library's format, not peft's**
+(allenai/specter2's adapter_config.json has no `peft_type`), so loading them
+through peft dies with `KeyError: 'peft_type'`. `AutoAdapterModel` is what reads
+them.
 
-_MAX_TOKENS は 512 から動かさないこと。SPECTER2 は max_position_embeddings=512 の
-BERT だが、tokenizer の model_max_length が未設定なので、これより大きい値を渡すと
-truncation=True でも切り詰められず、位置埋め込みの範囲外になって forward が落ちる
-（MinerU のチャンクは約8%が512トークンを超える）。
+**Do not move `_MAX_TOKENS` off 512.** SPECTER2 is a BERT with
+max_position_embeddings=512, but its tokenizer leaves model_max_length unset, so a
+larger value is not truncated even with `truncation=True` — the input runs past the
+position embeddings and forward crashes. About 8% of MinerU's chunks are longer
+than 512 tokens, so this is hit routinely, not rarely.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from littraceqa.di_pipeline.index.chunk_filter import filter_chunk_types
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"
 
-# SPECTER2 (BERT) の max_position_embeddings。上記の通り増やしてはいけない。
+# SPECTER2 (BERT)'s max_position_embeddings. Never raise it; see the module docstring.
 _MAX_TOKENS = 512
 
 
@@ -61,13 +63,13 @@ class Specter2FAISSIndex:
         self.model_name = model
         self.batch_size = batch_size
         self.device = device
-        # 索引に入れる chunk_type を絞る。None なら全部。
-        # SPECTER2 は proximity アダプタが title+abstract 前提の「論文単位」モデルなので、
-        # chunk_types: [title_abstract] にすると設計どおりの使い方になる。
-        # 本文チャンクを個別に埋め込むのは学習時の入力分布から外れる。
+        # Which chunk_types go into the index; None takes them all.
+        # **SPECTER2's proximity adapter is a whole-paper model trained on
+        # title+abstract**, so `["title_abstract"]` is the designed use. Embedding
+        # body chunks separately takes the input off that training distribution.
         self.chunk_types = chunk_types
-        # 埋め込みはどうせ L2 正規化するので fp16 でも精度への影響は無視できる。
-        # RTX 3090 実測で fp32 134 chunks/s に対し fp16 476 chunks/s（約3.6倍）。
+        # The embeddings get L2-normalised anyway, so fp16 costs no measurable
+        # accuracy. Measured on an RTX 3090: 134 chunks/s at fp32, 476 at fp16 (3.6x).
         self.fp16 = fp16 and device.startswith("cuda")
         self.doc_adapter = doc_adapter
         self.query_adapter = query_adapter
@@ -129,8 +131,8 @@ class Specter2FAISSIndex:
         self._ensure_model()
         self._model.set_active_adapters(adapter)
 
-        # 索引構築では 250万件規模を回すので、進捗が見えないと生きているのか
-        # 判断できない。クエリ1件の埋め込みでは出さない。
+        # A build runs through millions of chunks; without progress there is no way
+        # to tell it apart from a hang. Not printed when embedding a single query.
         starts = range(0, len(texts), self.batch_size)
         if len(texts) > self.batch_size:
             starts = tqdm(starts, desc=f"{self.name} embedding", unit="batch")
@@ -147,7 +149,7 @@ class Specter2FAISSIndex:
             ).to(self.device)
             with torch.no_grad():
                 outputs = self._model(**encoded)
-            pooled = outputs.last_hidden_state[:, 0]  # CLS トークン
+            pooled = outputs.last_hidden_state[:, 0]  # the CLS token
             all_embeddings.append(pooled.float().cpu().numpy())
 
         embeddings = np.concatenate(all_embeddings, axis=0).astype("float32")

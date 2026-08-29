@@ -1,10 +1,12 @@
-"""BM25 による疎検索インデックス。
+"""Sparse retrieval over chunks, with BM25.
 
-chunks.jsonl 由来の Chunk 列から bm25s (https://github.com/xhluca/bm25s) の
-BM25 インデックスを構築し、クエリに対して RetrievalResult を返す。
-索引本体は bm25s.BM25.save/load で index_dir に永続化するが、bm25s は
-Chunk のメタデータ（paper_id, chunk_type, metadata など）までは持たないため、
-検索結果を Chunk に戻すための chunks.jsonl も同じディレクトリに保存する。
+Builds a bm25s (https://github.com/xhluca/bm25s) index from the Chunks in
+chunks.jsonl and answers a query with RetrievalResults.
+
+The index itself persists to `index_dir` through `bm25s.BM25.save/load`, but bm25s
+stores only the terms — none of a Chunk's metadata (paper_id, chunk_type, ...) —
+so a copy of chunks.jsonl is written beside it. That copy is what turns a hit back
+into a Chunk.
 """
 
 from __future__ import annotations
@@ -32,18 +34,19 @@ class BM25Index:
         stopwords: str | None = "en",
         stemmer: str | None = None,
     ):
-        """BM25 のスコアリング・トークナイズ系パラメータ。実効値は
-        `pipeline.build_indexers()` にあり、そこでは全部既定のまま使っている。
+        """BM25's scoring and tokenisation parameters. The values actually used are
+        in `pipeline.build_indexers()`, which leaves every one of them at its default.
 
-        - k1 / b / method: bm25s.BM25 のスコアリングパラメータ。**既定値のまま使っている**
-          （validation の recall で振って既定を超えなかった）。build 時にスコア行列へ
-          焼き込まれるので、変えたら索引を作り直すこと。
-        - stopwords / stemmer: bm25s.tokenize のトークナイズ系。build と search で
-          同じ設定を使う必要があるため、この2つはインスタンスに保持して両方で使う
-          （構築時と検索時で同じインスタンス生成コード＝`build_indexers()` を通る）。
-        - stemmer は言語名（例: "english"）を渡すと PyStemmer で語幹化する。
-          省略時は語幹化しない。PyStemmer 未導入の環境で stemmer を指定すると
-          build/load 時に ImportError になる。
+        - k1 / b / method: bm25s.BM25's scoring parameters. **Left at their
+          defaults** — sweeping them against validation recall never beat the
+          default. They are baked into the score matrix at build time, so changing
+          one means rebuilding the index.
+        - stopwords / stemmer: bm25s.tokenize's side. **Build and search must
+          tokenise identically**, so these two are held on the instance and used by
+          both (construction and search go through the same `build_indexers()`).
+        - stemmer takes a language name (e.g. "english") and stems with PyStemmer;
+          omitted, nothing is stemmed. Naming one where PyStemmer is not installed
+          raises ImportError at build or load.
         """
         self.index_dir = Path(index_dir)
         self.index_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +62,7 @@ class BM25Index:
     def _build_stemmer(stemmer: str | None):
         if not stemmer:
             return None
-        import Stemmer  # PyStemmer。指定時のみ必要にして通常構成の依存を増やさない。
+        import Stemmer  # PyStemmer; imported here so it is only needed when asked for.
 
         return Stemmer.Stemmer(stemmer)
 

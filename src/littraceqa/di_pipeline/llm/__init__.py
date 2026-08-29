@@ -1,1 +1,1 @@
-"""LLM クライアントの Protocol と実装群を配置するモジュール群。"""
+"""The LLM client Protocol and its implementations."""

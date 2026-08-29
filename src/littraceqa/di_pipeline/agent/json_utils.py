@@ -1,7 +1,8 @@
-"""LLM 応答から JSON を安全に取り出すヘルパ。
+"""Pull a JSON object out of an LLM response without trusting its shape.
 
-読解ループの各所が共有するため、独立したモジュールに置く
-（agent 同士が互いを import して循環参照になるのを避ける）。
+Several places in the reading loop need this, so it lives in a module of its own
+rather than on one of them (importing each other would make the agent modules
+circular).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
 def parse_json_object(text: str) -> dict | None:
-    """LLM の出力から JSON オブジェクトを安全に取り出す。失敗したら None。"""
+    """Extract a JSON object from an LLM response; None if there is none."""
     fence_match = _JSON_FENCE_RE.search(text)
     if fence_match:
         candidate = fence_match.group(1)

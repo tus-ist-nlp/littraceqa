@@ -1,4 +1,4 @@
-"""LitTraceQA パイプラインのパッケージ。"""
+"""The LitTraceQA retrieval pipeline."""
 
 from littraceqa.di_pipeline.contracts import (
     Answer,

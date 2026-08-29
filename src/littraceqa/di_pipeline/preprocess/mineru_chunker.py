@@ -1,25 +1,28 @@
-"""MinerU が書き出した content_list.json を読んで Chunk 化する Preprocessor。
+"""Turn the content_list.json MinerU wrote into Chunks.
 
-PDF の変換自体はここでは行わない。MinerU は本体と依存が両立しないため
-隔離 venv (.venv-mineru) の scripts/run_mineru.py で先に走らせておき、
-本 Preprocessor はその成果物（content_list.json）を読むだけにする。
-詳細は requirements-mineru.txt の先頭コメントを参照。
+**The PDF conversion does not happen here.** MinerU's dependencies cannot coexist
+with this package's, so it runs first in an isolated venv (.venv-mineru) via
+scripts/run_mineru.py, and this preprocessor only reads what it produced. See the
+comment at the top of requirements-mineru.txt.
 
     bash scripts/setup_mineru_env.sh
     .venv-mineru/bin/python scripts/run_mineru.py --paths configs/paths/default.yaml --gpus 0,1,2,3
 
-content_list.json は本文・見出し・数式・表・図をブロック単位で持ち、各ブロックに
-page_idx が付く。ページ内をサイズで機械的に割るだけの単純な抽出と違い、以下ができる。
+content_list.json holds body text, headings, equations, tables and figures as
+blocks, each carrying a page_idx. **That structure is what this can use, and a
+plain size-based split of the page cannot:**
 
-* 見出し(text_level)を節として引き継ぎ、本文を節・ページ単位でまとめる。
-* 数式は LaTeX(``$$...$$``)のまま本文の読み順に埋め込む。数式だけのチャンクは
-  文脈が無く根拠にならないため作らない。ただし ``\\tag{N}`` が付いた採番済みの
-  数式は evidence の equation_id で参照されうるので、直前の本文を文脈として
-  付けた equation_algorithm チャンクを別途立てる。
-* 表は table_body(HTML)を Markdown に、図は caption を本文にする。
+* A heading (text_level) becomes the section carried by the body that follows, and
+  the body is grouped per section and page.
+* Equations stay as LaTeX (``$$...$$``) inline, in reading order. An equation on
+  its own is **not** made into a chunk — with no context it cannot serve as
+  evidence. A numbered one (``\\tag{N}``) is the exception: gold evidence can point
+  at it by equation_id, so it gets its own equation_algorithm chunk with the
+  preceding body text attached as context.
+* A table's table_body (HTML) becomes Markdown; a figure's caption becomes its text.
 
-MinerU の page_idx は 0-indexed だが、littraceqa.di_pipeline の既存規約(gold の
-evidence.locator.page)は 1-indexed なので +1 して変換する。
+MinerU's page_idx is 0-indexed while the convention everywhere else here (gold's
+evidence.locator.page) is 1-indexed, so it is converted with +1.
 """
 
 from __future__ import annotations
@@ -33,23 +36,25 @@ from markdownify import markdownify
 
 from littraceqa.di_pipeline.contracts import Chunk
 
-# 図表番号の抽出。figure_vlm プリプロセッサを削除したので、唯一の利用者である
-# ここへ移した（`Figure 3` / `Table 12a` のような caption 先頭の番号を取る）。
+# Pulls the number off the front of a caption (`Figure 3`, `Table 12a`). It used to
+# live with the figure_vlm preprocessor; that was deleted, so it moved to its only
+# remaining caller.
 _VISIBLE_ID_RE = re.compile(r"(?:Figure|Table|Fig\.?)\s*(\d+[a-zA-Z]?)", re.IGNORECASE)
 
 
 def _extract_number(caption: str) -> str | None:
-    """caption から図表番号（例: "3", "12a"）を抽出する。マッチしなければ None。"""
+    """The figure/table number in a caption (e.g. "3", "12a"); None if there is none."""
     if not caption:
         return None
     match = _VISIBLE_ID_RE.search(caption)
     return match.group(1) if match else None
 
 
-# MinerU は採番済み数式を "$$ ... \tag{12} $$" の形で出す。
+# MinerU writes a numbered equation as "$$ ... \tag{12} $$".
 _EQUATION_TAG_RE = re.compile(r"\\tag\{(\d+[a-zA-Z]?)\}")
 
-# 本文として拾わないブロック。ページ番号・ヘッダ・フッタは検索の雑音にしかならない。
+# Blocks that are never taken as body text: page numbers, headers and footers are
+# nothing but noise to retrieval.
 _SKIPPED_TYPES = frozenset({"page_number", "header", "footer", "discarded"})
 
 _FIGURE_TYPES = frozenset({"image", "chart"})
@@ -74,10 +79,11 @@ def _join(parts: list[str]) -> str:
 
 
 def _split_paragraphs(paragraphs: list[str], max_chars: int) -> list[str]:
-    """段落を max_chars を目安にまとめる。
+    """Group paragraphs up to roughly max_chars.
 
-    段落の境界で切るので ``$$...$$`` の数式が途中で割れない。1段落だけで
-    max_chars を超える場合のみ、数式でなければ単語境界で割る。
+    **Cutting on paragraph boundaries is what keeps a ``$$...$$`` equation whole.**
+    Only when a single paragraph is longer than max_chars is it split, on a word
+    boundary, and never if it is an equation.
     """
     chunks: list[str] = []
     current: list[str] = []
@@ -97,8 +103,8 @@ def _split_paragraphs(paragraphs: list[str], max_chars: int) -> list[str]:
             continue
         if current and current_len + 2 + len(paragraph) > max_chars:
             flush()
-        # 区切り("\n\n")の分は current が空でなくなってから数える。flush() の前に
-        # 決めてしまうと、空になった current に対しても2文字を足してしまう。
+        # Count the separator ("\n\n") only once `current` is non-empty. Deciding
+        # before flush() would charge two characters against an emptied `current`.
         separator = 2 if current else 0
         current.append(paragraph)
         current_len += len(paragraph) + separator
@@ -108,7 +114,7 @@ def _split_paragraphs(paragraphs: list[str], max_chars: int) -> list[str]:
 
 
 def _split_oversized(paragraph: str, max_chars: int) -> list[str]:
-    """max_chars を超える1段落を単語境界で割る。数式は割らずにそのまま返す。"""
+    """Split one over-long paragraph on word boundaries; equations are returned whole."""
     if paragraph.lstrip().startswith("$$"):
         return [paragraph]
 
@@ -134,9 +140,9 @@ class MinerUChunker:
         max_chars_per_chunk: int = 2000,
     ):
         self.pdf_dir = Path(pdf_dir)
-        # scripts/run_mineru.py の既定の出力先と合わせる。pdf_dir と衝突しない
-        # 兄弟ディレクトリに自動導出する(構成にパスを直書きしない方針。
-        # configs/paths/*.yaml に載るのは pdf_dir までで、mineru/ は書かない)。
+        # Matches scripts/run_mineru.py's default output location: a sibling of
+        # pdf_dir, derived rather than configured (paths are not written into the
+        # configuration; configs/paths/*.yaml names pdf_dir and stops there).
         self.mineru_dir = Path(mineru_dir) if mineru_dir else self.pdf_dir.parent / "mineru"
         self.max_chars_per_chunk = max_chars_per_chunk
 
@@ -173,7 +179,7 @@ class MinerUChunker:
     def _load_blocks(self, paper_id: str) -> list[dict] | None:
         path = self.content_list_path(paper_id)
         if not path.exists():
-            # まだ scripts/run_mineru.py を通していない論文。title/abstract だけ返す。
+            # A paper scripts/run_mineru.py has not converted yet: title/abstract only.
             return None
         try:
             with path.open(encoding="utf-8") as f:
@@ -188,11 +194,11 @@ class MinerUChunker:
         chunks: list[Chunk] = []
         counters = {"text": 0, "table": 0, "figure": 0, "equation": 0}
 
-        # 本文は「同じ節・同じページ」のあいだ溜めてから max_chars で割る。
+        # Body text accumulates while section and page hold, then splits at max_chars.
         buffer: list[str] = []
         buffer_page: int | None = None
         section: str | None = None
-        last_text: str | None = None  # 数式チャンクに付ける文脈
+        last_text: str | None = None  # context to attach to an equation chunk
 
         def flush() -> None:
             nonlocal buffer, buffer_page
@@ -221,14 +227,15 @@ class MinerUChunker:
             if block_type in _SKIPPED_TYPES:
                 continue
 
-            page = block.get("page_idx", 0) + 1  # MinerU は0-indexed → 1-indexedへ変換
+            page = block.get("page_idx", 0) + 1  # MinerU is 0-indexed; gold is 1-indexed
 
             if block_type == "text":
                 text = (block.get("text") or "").strip()
                 if not text:
                     continue
                 if block.get("text_level"):
-                    # 見出し自体はチャンクにせず、以降の本文の section として持つ。
+                    # The heading is not a chunk of its own; it becomes the section
+                    # of the body that follows.
                     flush()
                     section = text
                     continue
@@ -285,7 +292,8 @@ class MinerUChunker:
         metadata["page"] = page
         metadata["section"] = section
         metadata["equation_id"] = equation_id
-        # 数式単独では検索でヒットしても根拠にならないので直前の本文を文脈として付ける。
+        # An equation alone cannot serve as evidence even when retrieved, so the
+        # preceding body text comes with it as context.
         body = _join([context or "", equation])
         return Chunk(
             chunk_id=f"{paper_id}#eq{counters['equation']:04d}",
@@ -327,11 +335,12 @@ class MinerUChunker:
         kind = "chart" if block.get("type") == "chart" else "image"
         caption = _join(block.get(f"{kind}_caption") or [])
         footnote = _join(block.get(f"{kind}_footnote") or [])
-        # chart は MinerU が中身をテキスト化してくれることがある。
+        # For a chart, MinerU sometimes transcribes the contents as text.
         content = (block.get("content") or "").strip()
         body = _join([caption, content, footnote])
         if not body:
-            # キャプションも中身も無い図は検索対象にならない（装飾画像など）。
+            # A figure with neither caption nor contents is not searchable at all
+            # (decorative images and the like).
             return None
 
         counters["figure"] += 1
@@ -352,10 +361,11 @@ class MinerUChunker:
         )
 
     def _image_path(self, paper_id: str, img_path: str | None) -> str | None:
-        """content_list.json 内の相対パスを絶対パスに直す。
+        """Resolve a content_list.json relative path to an absolute one.
 
-        siglip_image.py のように画像を直接 embedding する indexer が
-        chunks.jsonl 経由で参照する。
+        It reaches the reading team through chunks.jsonl:
+        `ChunkStore.figures()` hands back the table/figure chunks whose
+        `metadata["image_path"]` still exists on disk.
         """
         if not img_path:
             return None

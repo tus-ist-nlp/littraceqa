@@ -1,13 +1,14 @@
-"""テスト・ドライラン用の固定応答 LLM クライアント。"""
+"""A canned-response LLM client, for tests and dry runs."""
 
 from __future__ import annotations
 
 
 
 class FakeLLM:
-    """呼び出すたびに ``responses`` を順番に返すフェイク LLM クライアント。
+    """Returns ``responses`` one per call, in order.
 
-    ``responses`` を使い切った後は最後の応答を返し続ける。
+    Once ``responses`` runs out it keeps returning the last one, so a test only has
+    to spell out the calls it actually cares about.
     """
 
     def __init__(self, responses: list[str] | None = None):

@@ -1,16 +1,19 @@
-"""BM25 による疎検索インデックス（論文単位版）。
+"""Sparse retrieval over whole papers, with BM25.
 
-通常の bm25_index.py は chunk 単位でドキュメントを作るが、こちらは Chunk 列を
-paper_id ごとにまとめ、論文1本を1ドキュメントとして bm25s の BM25 インデックスを
-構築する。chunk単位版との比較用 ablation indexer。
+Where bm25_index.py makes one document per chunk, this groups the Chunks by
+paper_id and makes **one document per paper**. Both are used together: when a
+question's terms are scattered across a paper, no single chunk holds them all and
+the chunk index goes weak.
 
-各 Chunk の text は "[{venue} {year}] {title}\n{body}" という形式で、全チャンクに
-同じ prefix が付いている。そのまま連結すると venue/title の語が chunk 数だけ水増し
-されて BM25 スコアが歪むため、prefix は論文ごとに1回だけ残し、body だけを連結する。
+Every Chunk's text carries the same prefix, `"[{venue} {year}] {title}\n{body}"`.
+Concatenating them as they are would repeat the venue and title words once per
+chunk and skew the BM25 score, so the prefix is kept once per paper and only the
+bodies are joined.
 
-論文単位の検索結果は chunk_id を持たない（chunk_id は "{paper_id}#paper" という
-擬似IDを充てる）ため、ReadingAgent の根拠チャンク特定には使わない想定。
-gold paper（正解論文ID）の特定精度だけを見る用途に限定する。
+**A hit here has no real chunk_id** — it gets the pseudo id `"{paper_id}#paper"` —
+so it is never handed to ReadingAgent as evidence. It ranks papers and nothing
+else; `PAPER_LEVEL_SOURCES` in retrieve/paper_rrf.py keeps these pseudo chunks from
+being chosen to represent a paper whenever a real chunk exists.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ def _paper_prefix(metadata: dict) -> str:
 
 
 def _build_paper_chunks(chunks: Iterable[Chunk]) -> list[Chunk]:
-    """paper_id ごとに Chunk をまとめ、prefix を1回だけ残した「論文1本 = 1 Chunk」に潰す。"""
+    """Collapse the Chunks of each paper into one, keeping the prefix only once."""
     bodies: dict[str, list[str]] = {}
     metadata: dict[str, dict] = {}
     for chunk in chunks:

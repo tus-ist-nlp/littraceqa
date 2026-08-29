@@ -1,7 +1,8 @@
-"""LLM クライアントの契約。
+"""The LLM client contract.
 
-本番は `llm/azure_openai.py` の `AzureOpenAILLM`、テストは `llm/fake.py` の `FakeLLM`。
-`ReadingAgent` はこの1メソッドしか使わないので、テストで差し替えられる。
+Production uses `AzureOpenAILLM` (llm/azure_openai.py); tests use `FakeLLM`
+(llm/fake.py). **`ReadingAgent` calls nothing but this one method**, which is what
+makes the substitution possible.
 """
 
 from __future__ import annotations

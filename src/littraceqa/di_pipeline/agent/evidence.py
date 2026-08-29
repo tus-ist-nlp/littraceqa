@@ -1,13 +1,15 @@
-"""RetrievalResult から提出用の Evidence を組み立てるヘルパ。
+"""Turn a RetrievalResult into the Evidence record that gets submitted.
 
-MinerU のチャンクは metadata に page / table_id / figure_id / section / equation_id を
-持っており、chunk_type の語彙（table / figure / text_span / equation_algorithm /
-citation_context）は Evidence.source_type の観測値とそのまま一致する。
-つまり「どのチャンクが根拠か」さえ決まれば Evidence は機械的に組める。
+A MinerU chunk already carries page / table_id / figure_id / section / equation_id
+in its metadata, and the chunk_type vocabulary (table / figure / text_span /
+equation_algorithm / citation_context) matches the values observed in
+Evidence.source_type exactly. **So once it is settled which chunk is the evidence,
+building the Evidence is mechanical** — nothing has to be inferred.
 
-scripts/evaluate.py の採点キーは (paper_id, source_type, page, object_id) の4つ組で、
-table なら table_id、figure なら figure_id しか見ない（coarse_evidence_key）。
-gold にある row / column / sentence_start などは埋めなくても evidence F1 は取れる。
+Scoring keys on the 4-tuple (paper_id, source_type, page, object_id), where
+object_id is table_id for a table and figure_id for a figure and nothing else
+(`coarse_evidence_key` in scripts/evaluate.py). The finer gold fields — row,
+column, sentence_start — can be left empty and evidence F1 still scores.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from littraceqa.di_pipeline.contracts import Evidence, EvidenceLocator, Retrieva
 
 
 def evidence_from_result(result: RetrievalResult) -> Evidence:
-    """検索でヒットしたチャンク1件を、提出用の Evidence 1件に変換する。"""
+    """One retrieved chunk becomes one submitted Evidence."""
     metadata = result.metadata or {}
     locator = EvidenceLocator(
         page=metadata.get("page"),

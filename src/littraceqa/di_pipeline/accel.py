@@ -1,16 +1,15 @@
-"""Transformer 推論の高速化ヘルパー（Flash Attention / torch.compile）。
+"""Speeding up transformer inference: Flash Attention and torch.compile.
 
-このリポジトリの環境では standalone の `flash-attn` パッケージは導入できない
-（nvcc が無く、torch も cu13 と新しいためビルド済みホイールも無い）。しかし
-**PyTorch 2.x の SDPA には Flash Attention v2 カーネルが内蔵**されており、
-Ampere 以降 + fp16 なら `scaled_dot_product_attention` がそのまま Flash カーネルに
-ディスパッチされる。したがって `attn_implementation="sdpa"` を指定すれば追加依存
-ゼロで実質的な Flash Attention が効く。`flash-attn` が入っている環境なら
-`"flash_attention_2"` を優先する。
+The standalone `flash-attn` package cannot be installed on these machines (no
+nvcc, and torch is new enough — cu13 — that no prebuilt wheel exists). It does not
+have to be: **PyTorch 2.x ships the Flash Attention v2 kernel inside SDPA**, and on
+Ampere or later with fp16 `scaled_dot_product_attention` dispatches straight to it.
+So `attn_implementation="sdpa"` buys real Flash Attention with no extra dependency.
+Where `flash-attn` does exist, `"flash_attention_2"` is preferred.
 
-torch.compile は**大量のバッチを流す索引構築のホットループでのみ**効く。
-クエリ時の単発推論では初回コンパイルの warmup（数十秒）が回収できず逆に遅く
-なるので、呼び出し側で `enabled` を切り替える前提。
+**torch.compile only pays off in the index-building hot loop**, where batches keep
+coming. A single embedding at query time never earns back the tens of seconds of
+first-call warmup, so the caller decides with `enabled`.
 """
 
 from __future__ import annotations
@@ -23,10 +22,11 @@ import torch
 
 
 def best_attn_implementation(device: str | list[str]) -> str:
-    """その環境で最速の attention 実装名を返す。
+    """Name the fastest attention implementation available here.
 
-    CUDA(Ampere+) では Flash カーネルが使える。`flash-attn` パッケージがあれば
-    それを、無ければ PyTorch 内蔵の SDPA(Flash v2 を含む)を選ぶ。CPU では eager。
+    On CUDA (Ampere+) a Flash kernel is available: the `flash-attn` package if it is
+    installed, otherwise PyTorch's built-in SDPA (which contains Flash v2). On CPU,
+    eager.
     """
     devices = device if isinstance(device, list) else [device]
     on_cuda = any(str(d).startswith("cuda") for d in devices)
@@ -40,10 +40,10 @@ def best_attn_implementation(device: str | list[str]) -> str:
 def load_with_best_attn(
     loader: Callable[..., Any], model_name: str, device: str | list[str], **kwargs: Any
 ) -> Any:
-    """`attn_implementation` を付けてモデルをロードする。
+    """Load a model with `attn_implementation` set.
 
-    モデルやライブラリが未対応で例外になったら、指定なしで素直に読み直す
-    （既存パイプラインを壊さないためのフォールバック）。
+    If the model or the library does not accept it, load again without it — an
+    unsupported attention kernel must never be the reason a build fails.
     """
     attn = best_attn_implementation(device)
     try:
@@ -53,8 +53,12 @@ def load_with_best_attn(
 
 
 def maybe_compile(model: Any, enabled: bool) -> Any:
-    """`enabled` なら torch.compile する。可変長入力で再コンパイルが頻発しない
-    よう `dynamic=True`。コンパイルに失敗しても eager のまま返す。"""
+    """torch.compile the model when `enabled`.
+
+    `dynamic=True` because the inputs are variable-length; without it dynamo
+    recompiles on nearly every new shape. A compile failure returns the eager model
+    rather than raising.
+    """
     if not enabled:
         return model
     try:

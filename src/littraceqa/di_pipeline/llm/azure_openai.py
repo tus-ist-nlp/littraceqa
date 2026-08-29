@@ -1,33 +1,36 @@
-"""Azure OpenAI を呼び出す LLM クライアント。
+"""The LLM client that calls Azure OpenAI.
 
-`LLMClient` Protocol（base.py）を満たす。組み立てているのは
-`pipeline.build_agent()` の1箇所だけで、そこから ReadingAgent に渡される。
+Satisfies the `LLMClient` Protocol (base.py). It is constructed in exactly one
+place, `pipeline.build_agent()`, and handed to ReadingAgent from there.
 
-設定は .env から読む（値はコードに書かない）:
+Configuration comes from .env — **never from code or config**:
 
     AZURE_OPENAI_ENDPOINT=https://xxx.openai.azure.com
     AZURE_OPENAI_API_KEY=...
     AZURE_OPENAI_API_VERSION=2025-04-01-preview
-    AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-5.4     # Azure は「デプロイ名」で呼ぶ
+    AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-5.4     # Azure is called by *deployment* name
 
-Azure は本家 OpenAI と違い、モデル名ではなく**自分で付けたデプロイ名**を model に渡す。
+Unlike OpenAI proper, Azure takes **the deployment name you chose**, not a model
+name, in `model`.
 
-デプロイ 'gpt-5.4'（実体 gpt-5.4-2026-03-05）で実測した制約:
+What the deployment 'gpt-5.4' (really gpt-5.4-2026-03-05) actually accepts,
+measured:
 
-    max_tokens              -> 400 Unsupported parameter（使えない）
+    max_tokens              -> 400 Unsupported parameter (unusable)
     max_completion_tokens   -> OK
     temperature             -> OK
-    response_format         -> OK（json_object で JSON を強制できる）
+    response_format         -> OK (json_object forces JSON)
     reasoning_effort        -> OK
 
-このパイプラインでの用途（task_family 判定・サブクエリ分解・候補論文の選定）は
-どれも短い JSON を返すだけなので、response_format=json_object を既定で有効にする。
-これでエージェント側の JSON パース失敗（= 静かにフォールバック）を大幅に減らせる。
+Every use in this pipeline (splitting the question into subqueries, reading the
+candidates) returns nothing but a short JSON object, so `response_format=
+json_object` is on by default. That is what keeps the agent's JSON parsing from
+failing — and a parse failure there is silent, it just falls back.
 
-資格情報が無い状態でこのクラスを構築すると、その場で例外を投げる。エージェント側は
-LLM 呼び出しを try/except で囲んでフォールバックする作りなので、実行中に例外を投げると
-「LLMが動いていないのに静かに劣化する」状態になる。それを避けるため、設定の不足は
-必ずパイプライン組み立て時（build_pipeline）に表面化させる。
+**Missing credentials raise here, at construction.** The agent wraps every LLM call
+in try/except and falls back, so an exception raised mid-run would show up as
+quietly degraded retrieval rather than an error. Surfacing it while the pipeline is
+being assembled is what makes it impossible to miss.
 """
 
 from __future__ import annotations
@@ -38,6 +41,8 @@ import openai
 from openai import AzureOpenAI
 
 
+# Kept in Japanese deliberately: this is the prompt the measured system ran with,
+# and rewording it would change the model's output.
 _SYSTEM = (
     "あなたは科学論文の検索システムの一部として動作しています。"
     "指示された出力フォーマットに厳密に従ってください。"
@@ -53,7 +58,7 @@ _REQUIRED = (
 
 
 class AzureOpenAILLM:
-    """Azure OpenAI の Chat Completions を1往復だけ呼ぶクライアント。"""
+    """One round-trip to Azure OpenAI's Chat Completions, and nothing else."""
 
     def __init__(
         self,
@@ -94,7 +99,7 @@ class AzureOpenAILLM:
             )
 
         self.deployment = deployment
-        # gpt-5.4 は max_tokens を受け付けない（400 Unsupported parameter）。実測済み。
+        # gpt-5.4 rejects max_tokens (400 Unsupported parameter); measured.
         self.max_completion_tokens = max_completion_tokens
         self.temperature = temperature
         self.reasoning_effort = reasoning_effort
@@ -110,9 +115,9 @@ class AzureOpenAILLM:
         )
 
     def __call__(self, prompt: str) -> str:
-        """プロンプトを投げて、応答のテキストを返す。"""
+        """Send the prompt, return the response text."""
         kwargs: dict = {
-            "model": self.deployment,  # Azure ではデプロイ名を渡す
+            "model": self.deployment,  # Azure takes the deployment name here
             "messages": [
                 {"role": "system", "content": self.system},
                 {"role": "user", "content": prompt},

@@ -1,1 +1,1 @@
-"""PDF やテキスト本文からチャンクを抽出する Preprocessor を実装するモジュール群。"""
+"""Preprocessors: cut a paper's PDF or text into chunks."""

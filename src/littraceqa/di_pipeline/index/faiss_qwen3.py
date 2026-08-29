@@ -1,22 +1,25 @@
-"""FAISS + Qwen3-Embedding による dense 検索インデックス。
+"""Dense retrieval with Qwen3-Embedding, over FAISS.
 
-Chunk のテキストを Qwen3-Embedding でベクトル化し、FAISS の内積 (IndexFlatIP)
-インデックスを構築する。埋め込みは L2 正規化してあるため、内積がそのまま
-コサイン類似度になる。
+Embeds a Chunk's text with Qwen3-Embedding into a FAISS inner-product index
+(`IndexFlatIP`). The embeddings are L2-normalised, so the inner product *is* cosine
+similarity.
 
-Qwen3-Embedding は文書側/クエリ側を prefix (「passage: 」/「query: 」) で
-区別し、プーリングは最後の非パディングトークンを使う。
+Qwen3-Embedding tells the document side from the query side by prefix
+("passage: " / "query: ") and pools on the last non-padding token.
 
-SPECTER2 (110M, 768次元) とは規模が桁違いなので、索引構築の実装が違う:
+**At this scale the build works differently from SPECTER2's** (110M params, 768
+dimensions):
 
-* **fp16 必須。** Qwen3-Embedding-8B は fp32 だと約32GBで、RTX 3090 (24GB) に載らない。
-  fp16 なら重み15.1GB・ピーク19.3GB で載る。
-* **埋め込みは RAM に貯めずディスクの memmap に直接書く。** 4096次元 × 256万件 = 42GB。
-  「全部リストに貯める → np.concatenate → faiss にコピー」だとピーク126GBになり、
-  実RAM 125GB を超えて落ちる。memmap に書いてから faiss へスライス投入する。
-* **複数GPUにデータ並列で分散する。** 実測 5.7 chunks/s（1GPU）なので、256万件は
-  1GPUで約124時間かかる。各GPUがモデル全体（15GB）を持ち、チャンクを分担する。
-  モデル分割（device_map="auto"）ではスループットは上がらないので使わない。
+* **fp16 is not optional.** Qwen3-Embedding-8B is about 32GB at fp32 and does not
+  fit an RTX 3090 (24GB). At fp16 the weights are 15.1GB and the peak is 19.3GB.
+* **The embeddings are written straight to a memmap on disk, never held in RAM.**
+  4096 dimensions x 2.56M chunks is 42GB. Collecting them in a list, then
+  np.concatenate, then copying into faiss peaks at 126GB and dies on a 125GB
+  machine. They go to the memmap and enter faiss a slice at a time.
+* **The work is split across GPUs, data-parallel.** At the measured 5.7 chunks/s
+  one GPU needs about 124 hours for 2.56M chunks. Each GPU holds the whole model
+  (15GB) and takes a share of the chunks; splitting the model itself
+  (device_map="auto") does not raise throughput, so it is not used.
 """
 
 from __future__ import annotations
@@ -39,19 +42,20 @@ from littraceqa.di_pipeline.index.chunk_filter import filter_chunk_types
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"
-_EMBEDDINGS_FILENAME = "_embeddings.memmap"  # 構築中の一時ファイル
-# 行ごとの埋め込み完了フラグ(uint8)。中断したビルドを続きから再開するために使う。
+_EMBEDDINGS_FILENAME = "_embeddings.memmap"  # scratch file, only during a build
+# Per-row "this row is embedded" flags (uint8), so an interrupted build can resume.
 _DONE_FILENAME = "_embeddings.done"
 
-# faiss に投入するときのスライス幅。42GB を一度に触らないための刻み。
+# How many rows enter faiss at a time — the whole 42GB is never touched at once.
 _ADD_ROWS = 100_000
 
 
-# 本番構成の埋め込み設定。`di_pipeline.pipeline` と
-# `scripts/build_faiss_qwen3_shard.py`（分散ビルド）が共有する。**索引を作り直すときは
-# 検索時と同じ値でなければならない**ので、2箇所に書かない。
-# `devices` だけは含めない——構築は空いている全GPUを使い、検索は devices[0] しか
-# 使わないので1枚に絞る（残りを reranker に空ける）。
+# The production embedding settings, shared by `di_pipeline.pipeline` and by
+# `scripts/build_faiss_qwen3_shard.py` (the distributed build). **A rebuild has to
+# use exactly the values search uses**, so they are written once, here, rather than
+# in both places — that is what makes a model or prefix mismatch impossible.
+# `devices` is deliberately not among them: a build takes every free GPU, while
+# search uses devices[0] only and leaves the rest to the reranker.
 INDEX_NAME = "faiss_qwen3_8b"
 PRODUCTION_PARAMS: dict = {
     "model": "Qwen/Qwen3-Embedding-8B",
@@ -74,45 +78,51 @@ class Qwen3FAISSIndex:
         device: str = "cuda",
         devices: str | None = None,
         fp16: bool = True,
-        # 索引構築のホットループを torch.compile する。数百万チャンクの埋め込みで
-        # 効く。クエリ時の単発埋め込みは warmup が回収できないので compile しない。
+        # torch.compile the build's hot loop. Worth it over millions of chunks; a
+        # single query-time embedding never earns back the warmup, so it is not
+        # compiled there.
         compile: bool = True,
         chunk_types: list[str] | None = None,
-        # 実測(サンプリング)では1024トークンで切ると表(table)チャンクの
-        # p99=3497・最大6310トークンが打ち切られる(text_span/equation/figureは
-        # ほぼ全て1024未満で影響が小さい)。Qwen3-Embeddingはネイティブ32Kコンテキスト
-        # なので余裕を持って8192に上げ、表の後半が根拠から欠落するのを防ぐ。
-        # 長い外れ値はチャンク全体の1.5%未満で、_embed_shard は長さ順ソートしてから
-        # バッチ化するため、影響は該当バッチのみに限定される。
+        # Sampling the corpus, a 1024-token cut truncates table chunks badly
+        # (p99 = 3497 tokens, max 6310); text_span / equation / figure are almost
+        # all under 1024, so they barely notice. Qwen3-Embedding has a native 32K
+        # context, so this sits at 8192 with room to spare and **the back half of a
+        # table stops going missing from the evidence**. The long outliers are under
+        # 1.5% of all chunks, and _embed_shard sorts by length before batching, so
+        # the cost lands on their batch alone.
         max_tokens: int = 8192,
         doc_prefix: str = "passage: ",
         query_prefix: str = "query: ",
-        # **OOM 対策の本命。** チャンクは長さ順にソートしてからバッチ化されるので、
-        # 件数固定のバッチだと末尾に長い外れ値が集まり「batch_size × max_tokens」の
-        # パディング後トークン数になる（batch_size=8, max_tokens=8192 なら 65,536）。
-        # 実測では全チャンクの99%が738トークン以下・8192に張り付くのは0.002%なので、
-        # 件数ではなく「バッチ件数 × バッチ内最長トークン数」を予算で抑えたほうが、
-        # ピークVRAMが一定になるうえ大多数のバッチはむしろ大きくできて速い。
-        # None なら従来どおり batch_size 固定。
+        # **This is what actually prevents OOM.** Chunks are sorted by length before
+        # batching, so a fixed count collects the long outliers into the last
+        # batches, whose padded token count is batch_size x max_tokens (65,536 at
+        # batch_size=8, max_tokens=8192). Measured, 99% of chunks are 738 tokens or
+        # fewer and only 0.002% reach 8192 — so budgeting "rows x longest row in the
+        # batch" instead of rows alone holds peak VRAM constant *and* lets the vast
+        # majority of batches grow larger, which is faster. None keeps the old
+        # fixed batch_size.
         max_batch_tokens: int | None = None,
-        # 1バッチが OOM したときに、バッチを半分に割って再試行する回数。
-        # 30時間級のビルドが末尾の1バッチで全滅するのを防ぐ。
+        # How many times a batch that OOMs is halved and retried. Insurance against
+        # a 30-hour build being lost to one batch near the end.
         oom_retries: int = 4,
-        # 途中まで書けた memmap を再利用して続きから埋める。行ごとの完了フラグを
-        # _embeddings.done に持ち、既に埋めた行は飛ばす。
+        # Reuse a partly written memmap and carry on. Per-row completion flags live
+        # in _embeddings.done, and finished rows are skipped.
         resume: bool = True,
-        # 完了フラグ(_embeddings.done, 数百KB)を書き出す間隔（バッチ数）。
+        # How often (in batches) the completion flags — _embeddings.done, a few
+        # hundred KB — are written out.
         #
-        # **埋め込み本体(14GB級)の msync はここでは行わず、最後に1回だけにする。**
-        # np.memmap.flush() はマッピング「全体」に msync を掛ける。書き込む行は
-        # 長さ順ソートの結果ファイル全体に散っているので、HDD だとヘッドが14GBを
-        # 飛び回り、blk-wbt のライトバックスロットリング(rq_qos_wait)で
-        # **21分以上ブロックした**（nlp02 の /data は TOSHIBA MQ04ABD2、rotational=1）。
-        # とくに1シャードを複数ワーカーで回すと同じファイルを同時に msync して詰まる。
+        # **The embeddings themselves (14GB+) are NOT msynced here, only once at the
+        # end.** np.memmap.flush() msyncs the *entire* mapping, and because the rows
+        # were sorted by length the written ones are scattered through the whole
+        # file. On a spinning disk the head crosses 14GB and blk-wbt's writeback
+        # throttling (rq_qos_wait) **blocked for over 21 minutes** (nlp02's /data is
+        # a TOSHIBA MQ04ABD2, rotational=1). Several workers on one shard make it
+        # worse still, msyncing the same file at once.
         #
-        # mmap への書き込みはプロセスが死んでもページキャッシュに残り、カーネルが
-        # 書き戻す。つまり msync が守るのは**電源断だけ**で、プロセスの kill や
-        # クラッシュからの再開には要らない。HDD 上でその保険に払うコストに見合わない。
+        # A write to an mmap survives the process dying — it stays in the page cache
+        # and the kernel writes it back. **msync only protects against power loss**,
+        # not against a kill or a crash, so resuming never needs it, and on an HDD
+        # that insurance is not worth its price.
         flush_every: int = 200,
     ):
         self.index_dir = Path(index_dir)
@@ -120,15 +130,15 @@ class Qwen3FAISSIndex:
         self.model_name = model
         self.batch_size = batch_size
         self.device = device
-        # "cuda:0,cuda:1,cuda:2" のようにカンマ区切りで指定する。未指定なら device 1枚。
+        # Comma-separated, e.g. "cuda:0,cuda:1,cuda:2"; unset means the single `device`.
         if devices:
             self.devices = [d.strip() for d in devices.split(",") if d.strip()]
         else:
             self.devices = [device]
         self.fp16 = fp16 and any(d.startswith("cuda") for d in self.devices)
         self.compile = compile
-        # 索引に入れる chunk_type を絞る（None なら全部）。本文だけを passage 単位で
-        # 埋め込みたい場合に使う。
+        # Which chunk_types go into the index (None takes them all) — for embedding
+        # body text alone, one passage at a time.
         self.chunk_types = chunk_types
         self.max_tokens = max_tokens
         self.doc_prefix = doc_prefix
@@ -143,15 +153,16 @@ class Qwen3FAISSIndex:
         self._index: faiss.Index | None = None
         self._chunks: list[Chunk] = []
 
-    # ---- 索引構築 ---------------------------------------------------------
+    # ---- building the index -----------------------------------------------
 
     def _prepare_memmap(
         self, memmap_path: Path, done_path: Path, n: int, dim: int
     ) -> bool:
-        """埋め込み用 memmap と完了フラグを用意する。再開できたら True。
+        """Make the embedding memmap and the completion flags; True if resuming.
 
-        resume=True で、前回の memmap と完了フラグが**同じ件数・次元**で残っていれば
-        それを引き継ぐ。件数が違う（チャンクを作り直した等）場合は作り直す。
+        With resume=True, a memmap and flag file left from last time are picked up
+        **only when the row count and dimension match**. A different count (the
+        chunks were rebuilt, say) means starting over.
         """
         expected_bytes = n * dim * 4
         can_resume = (
@@ -169,7 +180,7 @@ class Qwen3FAISSIndex:
                 f"  {self.name}: 前回の中間ファイルは件数が合わないので作り直します"
                 f"（期待 {expected_bytes:,} バイト）"
             )
-        # 42GB をディスク上に確保する。RAM には載せない。
+        # Allocate the 42GB on disk. It never goes into RAM.
         np.memmap(memmap_path, dtype="float32", mode="w+", shape=(n, dim)).flush()
         np.memmap(done_path, dtype="uint8", mode="w+", shape=(n,)).flush()
         return False
@@ -182,8 +193,8 @@ class Qwen3FAISSIndex:
                 f"chunk_types={self.chunk_types} に一致するチャンクが1件もありません"
             )
 
-        # ワーカーはこのファイルから自分の担当分を読む。2.5M件のテキストを
-        # プロセス間で pickle すると数GBの転送になるので、ファイル経由にする。
+        # Each worker reads its own share from this file. Pickling 2.5M texts across
+        # processes would move several GB, so it goes through the filesystem instead.
         self._save_chunks()
 
         dim = AutoConfig.from_pretrained(self.model_name).hidden_size
@@ -218,7 +229,7 @@ class Qwen3FAISSIndex:
         self._index = index
 
     def _embed_to_memmap(self, memmap_path: Path, n: int, dim: int) -> None:
-        """チャンクを GPU に分担させ、埋め込みを memmap に直接書き込む。"""
+        """Split the chunks across the GPUs; each writes into the memmap directly."""
         args = [
             (
                 rank,
@@ -246,7 +257,7 @@ class Qwen3FAISSIndex:
             _embed_shard(*args[0])
             return
 
-        context = mp.get_context("spawn")  # CUDA と fork は両立しない
+        context = mp.get_context("spawn")  # CUDA cannot survive a fork
         processes = [context.Process(target=_embed_shard, args=a) for a in args]
         for process in processes:
             process.start()
@@ -256,7 +267,7 @@ class Qwen3FAISSIndex:
         if failed:
             raise RuntimeError(f"埋め込みワーカーが異常終了しました (exitcode={failed})")
 
-    # ---- 検索 -------------------------------------------------------------
+    # ---- search -----------------------------------------------------------
 
     def load(self) -> None:
         self._index = faiss.read_index(str(self.index_dir / _INDEX_FILENAME))
@@ -302,7 +313,7 @@ class Qwen3FAISSIndex:
             max_tokens=self.max_tokens,
         )
 
-    # ---- チャンクの保存・読み込み ------------------------------------------
+    # ---- saving and loading the chunks -------------------------------------
 
     def _save_chunks(self) -> None:
         path = self.index_dir / _CHUNKS_FILENAME
@@ -326,7 +337,7 @@ class Qwen3FAISSIndex:
         return chunks
 
 
-# ---- ワーカー側（別プロセスで走るのでモジュール直下に置く） --------------------
+# ---- the worker side (module level, because it runs in another process) --------
 
 
 def _load_model(model_name: str, device: str, fp16: bool, compile_model: bool = False):
@@ -349,7 +360,7 @@ def _embed_texts(
     batch_size: int,
     max_tokens: int,
 ) -> np.ndarray:
-    """テキストを埋め込んで L2 正規化した float32 配列を返す。"""
+    """Embed the texts and return L2-normalised float32 vectors."""
     outputs = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
@@ -369,8 +380,9 @@ def _embed_texts(
     return embeddings
 
 
-# 文字数からトークン数を見積もる係数。実測（英語論文チャンク）では概ね4文字/トークン
-# だが、予算を割るときは**多めに見積もる**ほうが安全なので小さめの値を使う。
+# Characters per token, for estimating a batch's token count. Measured on English
+# paper chunks it is about 4, but **over-estimating tokens is the safe direction**
+# when dividing a budget, so the value used is deliberately lower.
 _CHARS_PER_TOKEN = 3.5
 
 
@@ -381,15 +393,16 @@ def _estimate_tokens(text: str, max_tokens: int) -> int:
 def _token_budget_batches(
     order: list[int], texts: list[str], max_batch_tokens: int, max_tokens: int
 ) -> list[list[int]]:
-    """長さ昇順の order を「パディング後トークン数の予算」でバッチに割る。
+    """Cut `order` (ascending by length) into batches under a padded-token budget.
 
-    パディングはバッチ内の最長系列に合わせて行われるので、実際にVRAMを食うのは
-    「バッチ件数 × バッチ内最長トークン数」。order は昇順なので、後から入る要素が
-    常にそのバッチの最長になる。よって条件は
-    ``(現在の件数 + 1) * 新要素のトークン数 <= 予算`` で足りる。
+    Padding goes to the longest sequence in the batch, so what actually costs VRAM
+    is **rows x longest row**. Because `order` ascends, whatever is added last is
+    always the longest, which makes the test simply
+    ``(current rows + 1) * the new row's tokens <= budget``.
 
-    これにより長い外れ値は自動的に1件ずつになり、短いチャンク（実測で99%が738
-    トークン以下）はむしろ件数固定より大きなバッチにまとまる。
+    The long outliers therefore end up alone in their own batch, while the short
+    chunks — 99% are 738 tokens or fewer — group into batches *larger* than a fixed
+    count would allow.
     """
     batches: list[list[int]] = []
     current: list[int] = []
@@ -407,11 +420,11 @@ def _token_budget_batches(
 def _embed_with_oom_retry(
     texts: list[str], tokenizer, model, device: str, max_tokens: int, retries: int
 ) -> np.ndarray:
-    """OOM したらバッチを半分に割って再試行する。
+    """On OOM, halve the batch and try again.
 
-    数十時間かけたビルドが末尾の1バッチで全滅するのを防ぐための保険。
-    予算方式でバッチを組んでいれば普通は発動しないが、トークン数の見積もりは
-    文字数からの近似なので外れることがある。
+    Insurance so that a build of tens of hours is not lost to a single batch near
+    the end. With the token-budget batching it normally never fires, but the token
+    count is estimated from characters and the estimate can be wrong.
     """
     try:
         return _embed_texts(texts, tokenizer, model, device, len(texts), max_tokens)
@@ -452,8 +465,8 @@ def _embed_shard(
     oom_retries: int = 4,
     flush_every: int = 200,
 ) -> None:
-    """自分の担当分だけを埋め込み、memmap の該当行に書き込む。"""
-    # 担当範囲（連続スライス）を決める
+    """Embed this worker's share alone, writing into its rows of the memmap."""
+    # Work out this worker's range (a contiguous slice).
     start = n * rank // world
     end = n * (rank + 1) // world
 
@@ -469,13 +482,13 @@ def _embed_shard(
     tokenizer, model = _load_model(model_name, device, fp16, compile_model)
     embeddings = np.memmap(memmap_path, dtype="float32", mode="r+", shape=(n, dim))
 
-    # 中断したビルドを続きから再開するための完了フラグ。既に埋めた行は飛ばす。
+    # The completion flags that let an interrupted build resume; finished rows are skipped.
     done = None
     if done_path is not None:
         done = np.memmap(done_path, dtype="uint8", mode="r+", shape=(n,))
 
-    # 長さ順に並べてからバッチにすると、パディングの無駄が減って大幅に速くなる。
-    # 書き込みは行番号で行うので、処理順が変わっても結果は変わらない。
+    # Sorting by length before batching cuts the wasted padding and is much faster.
+    # Writes go by row number, so processing order does not change the result.
     order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
     if done is not None:
         remaining = [i for i in order if not done[start + i]]
@@ -487,18 +500,19 @@ def _embed_shard(
         order = remaining
 
     if max_batch_tokens:
-        # 件数ではなくパディング後トークン数で割る（OOM 対策の本命）。
+        # Divide on padded tokens, not on row count (this is what prevents OOM).
         batches = _token_budget_batches(order, texts, max_batch_tokens, max_tokens)
     else:
         batches = [order[i : i + batch_size] for i in range(0, len(order), batch_size)]
 
     def commit(pending: list[int]) -> None:
-        """完了フラグだけを書き出す（数百KBなので安い）。
+        """Write out the completion flags only — a few hundred KB, so it is cheap.
 
-        埋め込み本体(14GB)の msync はここでは**やらない**。マッピング全体への
-        msync になり、書き込み行がファイル全体に散っているため HDD では
-        blk-wbt に捕まって長時間ブロックする（実測21分以上）。mmap 書き込みは
-        プロセスが死んでもページキャッシュに残るので、再開のためには不要。
+        **The 14GB of embeddings are not msynced here.** That would msync the whole
+        mapping, and since the written rows are scattered through the file, on an HDD
+        blk-wbt catches it and blocks for a long time (21 minutes, measured). A write
+        to an mmap stays in the page cache even if the process dies, so resuming
+        never needs it.
         """
         if not pending:
             return
@@ -527,8 +541,8 @@ def _embed_shard(
 
     if done is not None:
         commit(pending)
-    # 埋め込み本体の msync はここ1回だけ。HDD では14GBマッピング全体の同期に
-    # 時間がかかるが、担当分を全部終えたあとなので誰も待たない。
+    # The one and only msync of the embeddings. Syncing the whole 14GB mapping is
+    # slow on an HDD, but this worker's share is finished, so nothing waits on it.
     embeddings.flush()
     del embeddings
     if done is not None:
@@ -536,9 +550,9 @@ def _embed_shard(
 
 
 def _last_token_pool(hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    """パディング方向(left/right)によらず最後の非パディングトークンを取り出す。
+    """Take the last non-padding token, whichever side the padding is on.
 
-    Qwen3-Embedding が公式に採用しているプーリング方法。
+    This is the pooling Qwen3-Embedding officially uses.
     """
     left_padding = attention_mask[:, -1].sum() == attention_mask.shape[0]
     if left_padding:
@@ -548,6 +562,6 @@ def _last_token_pool(hidden_state: torch.Tensor, attention_mask: torch.Tensor) -
     return hidden_state[batch_indices, sequence_lengths]
 
 
-# 子プロセスが CUDA を初期化できるようにしておく（spawn 前提）
+# So a child process can initialise CUDA (spawn, never fork).
 if os.environ.get("TOKENIZERS_PARALLELISM") is None:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
