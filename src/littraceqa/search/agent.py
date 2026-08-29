@@ -35,6 +35,7 @@ import json
 import re
 
 from littraceqa.search.contracts import (
+    CANDIDATE_PAPERS_LIMIT,
     Answer,
     Evidence,
     EvidenceLocator,
@@ -46,10 +47,6 @@ from littraceqa.search.expander import PaperExpander
 from littraceqa.search.llm import LLMClient
 from littraceqa.search.retrieve import HybridRetriever, to_gold_papers
 
-
-# How many candidate papers to keep in the prediction file. The headline metric is
-# recall@20, but re-running is expensive, so keep enough to compute recall@50 later.
-CANDIDATE_PAPERS_LIMIT = 50
 
 # How many subqueries `_decompose()` asks for. **Not split by task_family.**
 #

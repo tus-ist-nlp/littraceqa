@@ -60,11 +60,13 @@ from typing import Protocol
 import bm25s
 import faiss
 
+from littraceqa.search.contracts import (
+    CHUNKS_FILENAME,
+    INDEX_FILENAME,
+    PAPERS_FILENAME,
+)
 
-_INDEX_FILENAME = "index.faiss"
-_CHUNKS_FILENAME = "chunks.jsonl"
-# The "one paper = one document" text the bm25s_paper index writes alongside it.
-_PAPERS_FILENAME = "papers.jsonl"
+# Pulls the paper_id out of a papers.jsonl line without parsing the whole thing.
 _PAPER_ID_RE = re.compile(r'"paper_id":\s*"([^"]+)"')
 
 # Pull arXiv IDs out of the references. MinerU output can break the characters
@@ -155,8 +157,8 @@ class Specter2PaperExpander(_AnchorExpander):
         self._chunk_of: dict[str, dict] = {}
 
     def _load(self) -> None:
-        self._index = faiss.read_index(str(self.index_dir / _INDEX_FILENAME))
-        with open(self.index_dir / _CHUNKS_FILENAME, encoding="utf-8") as handle:
+        self._index = faiss.read_index(str(self.index_dir / INDEX_FILENAME))
+        with open(self.index_dir / CHUNKS_FILENAME, encoding="utf-8") as handle:
             for row, line in enumerate(handle):
                 chunk = json.loads(line)
                 paper_id = chunk.get("paper_id", "")
@@ -349,7 +351,7 @@ class BM25MLTExpander(_AnchorExpander):
         """One streaming pass over papers.jsonl for {row -> paper_id} and title+abstract."""
         pids: list[str] = []
         text: dict[str, str] = {}
-        with open(self.index_dir / _PAPERS_FILENAME, encoding="utf-8") as handle:
+        with open(self.index_dir / PAPERS_FILENAME, encoding="utf-8") as handle:
             for line in handle:
                 match = _PAPER_ID_RE.search(line, 0, 200)
                 if match is None:

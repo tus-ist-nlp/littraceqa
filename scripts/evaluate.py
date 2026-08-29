@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from littraceqa.search.contracts import MULTI, SINGLE
+from littraceqa.search.contracts import CANDIDATE_PAPERS_LIMIT, MULTI, SINGLE
 
 # Whether the gold papers are among the top k candidates. paper_recall_macro mixes
 # "how the LLM narrowed things down" with "whether retrieval had them at all"; this
@@ -30,12 +30,14 @@ from littraceqa.search.contracts import MULTI, SINGLE
 #   recall@1 low, @20 high -> found, but ranked weakly (reranker/fusion can help)
 #   recall@20 low too      -> not being retrieved at all (an index or decomposition
 #                             problem)
-# 50 matches CANDIDATE_PAPERS_LIMIT in reading.py, the number of candidates kept in
-# a prediction.
+# **The deep end of the curve is imported, not restated.** CANDIDATE_PAPERS_LIMIT
+# is how many candidates a prediction keeps, and measuring past what was recorded
+# measures nothing — so the two cannot drift apart, which a comment promising they
+# match could not guarantee.
 #
-# 70 is "the 50 recorded plus the at most 20 the paper-to-paper expansion adds" —
-# the real length of the candidate list with expansion on. **Never put a k deeper
-# than what is recorded.** recall_at_k only looks at ranked[:k], so k=100 against a
+# The last k is "everything recorded plus the at most 20 the paper-to-paper
+# expansion adds" — the real length of the candidate list with expansion on.
+# **Never put a k deeper than what is recorded.** recall_at_k only looks at ranked[:k], so k=100 against a
 # prediction holding 50 candidates returns exactly the @50 value. That is
 # arithmetically right and factually misleading: it is not "the result of looking
 # 100 deep" but "nothing past 50 was recorded", and in a row of numbers it reads as
@@ -45,7 +47,7 @@ from littraceqa.search.contracts import MULTI, SINGLE
 # internally retrieval ranks far deeper (per_index_k / pool_k). Measuring deeper
 # means raising the limit and running again. With 50-candidate lists, @70 is short
 # of denominator and is a rough indication only.
-CANDIDATE_RECALL_KS = (1, 5, 10, 20, 50, 70)
+CANDIDATE_RECALL_KS = (1, 5, 10, 20, CANDIDATE_PAPERS_LIMIT, CANDIDATE_PAPERS_LIMIT + 20)
 CANDIDATE_RECALL_SCENARIOS = ("single", "multi", "total")
 
 # evidence_candidate_recall: candidate_recall with the denominator narrowed to the

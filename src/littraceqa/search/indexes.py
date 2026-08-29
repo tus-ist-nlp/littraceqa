@@ -31,6 +31,9 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from littraceqa.search.contracts import (
+    CHUNKS_FILENAME,
+    INDEX_FILENAME,
+    PAPERS_FILENAME,
     Chunk,
     RetrievalResult,
     filter_chunk_types,
@@ -38,8 +41,6 @@ from littraceqa.search.contracts import (
     write_chunks_jsonl,
 )
 
-_CHUNKS_FILENAME = "chunks.jsonl"
-_PAPERS_FILENAME = "papers.jsonl"
 
 
 class _BM25Base:
@@ -155,7 +156,7 @@ class BM25Index(_BM25Base):
     """One document per chunk. Strong when a question's terms land inside one chunk."""
 
     name = "bm25s"
-    sidecar = _CHUNKS_FILENAME
+    sidecar = CHUNKS_FILENAME
 
 
 # ============================================================================
@@ -208,7 +209,7 @@ class BM25PaperIndex(_BM25Base):
     """
 
     name = "bm25s_paper"
-    sidecar = _PAPERS_FILENAME
+    sidecar = PAPERS_FILENAME
 
     def _documents(self, chunks: Iterable[Chunk]) -> list[Chunk]:
         return _build_paper_chunks(chunks)
@@ -238,10 +239,6 @@ class BM25PaperIndex(_BM25Base):
 # larger value is not truncated even with `truncation=True` — the input runs past the
 # position embeddings and forward crashes. About 8% of MinerU's chunks are longer
 # than 512 tokens, so this is hit routinely, not rarely.
-
-# The sidecar written beside a faiss index, holding the chunks in row order. Same
-# name and same role as BM25Index's, hence the shared constant at the top.
-_INDEX_FILENAME = "index.faiss"
 
 # SPECTER2 (BERT)'s max_position_embeddings. Never raise it; see the module docstring.
 _MAX_TOKENS = 512
@@ -298,12 +295,12 @@ class Specter2FAISSIndex:
         )
         index = faiss.IndexFlatIP(embeddings.shape[1])
         index.add(embeddings)
-        faiss.write_index(index, str(self.index_dir / _INDEX_FILENAME))
+        faiss.write_index(index, str(self.index_dir / INDEX_FILENAME))
         self._save_chunks()
         self._index = index
 
     def load(self) -> None:
-        self._index = faiss.read_index(str(self.index_dir / _INDEX_FILENAME))
+        self._index = faiss.read_index(str(self.index_dir / INDEX_FILENAME))
         self._chunks = self._load_chunks()
 
     def search(self, query: str, top_k: int) -> list[RetrievalResult]:
@@ -379,7 +376,7 @@ class Specter2FAISSIndex:
         self._model = model
 
     def _save_chunks(self) -> None:
-        write_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME, self._chunks)
+        write_chunks_jsonl(self.index_dir / CHUNKS_FILENAME, self._chunks)
 
     def _load_chunks(self) -> list[Chunk]:
-        return read_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME)
+        return read_chunks_jsonl(self.index_dir / CHUNKS_FILENAME)

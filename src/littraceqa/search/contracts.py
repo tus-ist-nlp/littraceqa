@@ -243,3 +243,27 @@ def write_chunks_jsonl(path: str | Path, chunks: Iterable[Chunk]) -> None:
     with Path(path).open("w", encoding="utf-8") as handle:
         for chunk in chunks:
             handle.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+
+
+# ---- facts more than one module has to agree on -----------------------------
+#
+# **The writer and the reader of an index directory live in different modules**,
+# so a name changed on one side and not the other fails silently: the reader simply
+# does not find the file, or finds a stale one. These used to be private constants
+# repeated in indexes.py, expander.py and faiss_qwen3.py.
+
+# The faiss index itself: written by Specter2FAISSIndex and Qwen3FAISSIndex,
+# opened directly by Specter2PaperExpander.
+INDEX_FILENAME = "index.faiss"
+# The chunk sidecar (see read_chunks_jsonl): written by BM25Index and by both faiss
+# indexes, read back by Specter2PaperExpander.
+CHUNKS_FILENAME = "chunks.jsonl"
+# The one-document-per-paper sidecar: written by BM25PaperIndex, read by
+# BM25MLTExpander as its more-like-this source.
+PAPERS_FILENAME = "papers.jsonl"
+
+# How many candidates a Prediction keeps. **scripts/evaluate.py's recall curve
+# stops here**, so the two have to agree; importing it is what makes that true
+# rather than merely intended. It is a recording limit, not retrieval's — inside a
+# run the ranking goes much deeper.
+CANDIDATE_PAPERS_LIMIT = 50

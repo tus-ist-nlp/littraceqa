@@ -47,3 +47,42 @@ def test_all_chunk_types_matches_what_the_chunkers_emit():
     assert "title_abstract" in ALL_CHUNK_TYPES
     assert "text_span" in ALL_CHUNK_TYPES
     assert "table" in ALL_CHUNK_TYPES
+
+
+# ---- facts more than one module has to agree on -----------------------------
+
+
+def test_index_directory_layout_is_defined_once():
+    """The index filenames are a contract between modules that never import each other.
+
+    `indexes.py` and `faiss_qwen3.py` write these; `expander.py` opens them
+    directly. **A rename on one side alone fails silently** — the reader just does
+    not find the file — so the names live in one place and this pins their values.
+    """
+    from littraceqa.search import contracts
+
+    assert contracts.INDEX_FILENAME == "index.faiss"
+    assert contracts.CHUNKS_FILENAME == "chunks.jsonl"
+    assert contracts.PAPERS_FILENAME == "papers.jsonl"
+
+
+def test_candidate_papers_limit_is_what_the_recall_curve_stops_at():
+    """scripts/evaluate.py measures no deeper than a prediction records.
+
+    The curve used to end at a hard-coded 50 with a comment saying it matched
+    CANDIDATE_PAPERS_LIMIT. It now imports it, so raising the limit moves the curve
+    with it.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from littraceqa.search.contracts import CANDIDATE_PAPERS_LIMIT
+
+    assert CANDIDATE_PAPERS_LIMIT == 50
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("_ev", root / "scripts" / "evaluate.py")
+    evaluate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluate)
+    assert CANDIDATE_PAPERS_LIMIT in evaluate.CANDIDATE_RECALL_KS
+    assert max(evaluate.CANDIDATE_RECALL_KS) == CANDIDATE_PAPERS_LIMIT + 20

@@ -38,6 +38,8 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from littraceqa.search.accel import load_with_best_attn, maybe_compile
 from littraceqa.search.contracts import (
+    CHUNKS_FILENAME,
+    INDEX_FILENAME,
     Chunk,
     RetrievalResult,
     filter_chunk_types,
@@ -45,8 +47,6 @@ from littraceqa.search.contracts import (
     write_chunks_jsonl,
 )
 
-_CHUNKS_FILENAME = "chunks.jsonl"
-_INDEX_FILENAME = "index.faiss"
 _EMBEDDINGS_FILENAME = "_embeddings.memmap"  # scratch file, only during a build
 # Per-row "this row is embedded" flags (uint8), so an interrupted build can resume.
 _DONE_FILENAME = "_embeddings.done"
@@ -228,7 +228,7 @@ class Qwen3FAISSIndex:
             index.add(np.ascontiguousarray(embeddings[start : start + _ADD_ROWS]))
         del embeddings
 
-        faiss.write_index(index, str(self.index_dir / _INDEX_FILENAME))
+        faiss.write_index(index, str(self.index_dir / INDEX_FILENAME))
         memmap_path.unlink(missing_ok=True)
         done_path.unlink(missing_ok=True)
         self._index = index
@@ -240,7 +240,7 @@ class Qwen3FAISSIndex:
                 rank,
                 len(self.devices),
                 device,
-                str(self.index_dir / _CHUNKS_FILENAME),
+                str(self.index_dir / CHUNKS_FILENAME),
                 str(memmap_path),
                 n,
                 dim,
@@ -275,7 +275,7 @@ class Qwen3FAISSIndex:
     # ---- search -----------------------------------------------------------
 
     def load(self) -> None:
-        self._index = faiss.read_index(str(self.index_dir / _INDEX_FILENAME))
+        self._index = faiss.read_index(str(self.index_dir / INDEX_FILENAME))
         self._chunks = self._load_chunks()
 
     def search(self, query: str, top_k: int) -> list[RetrievalResult]:
@@ -321,10 +321,10 @@ class Qwen3FAISSIndex:
     # ---- saving and loading the chunks -------------------------------------
 
     def _save_chunks(self) -> None:
-        write_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME, self._chunks)
+        write_chunks_jsonl(self.index_dir / CHUNKS_FILENAME, self._chunks)
 
     def _load_chunks(self) -> list[Chunk]:
-        return read_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME)
+        return read_chunks_jsonl(self.index_dir / CHUNKS_FILENAME)
 
 
 # ---- the worker side (module level, because it runs in another process) --------
