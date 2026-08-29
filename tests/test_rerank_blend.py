@@ -11,7 +11,11 @@ Two things matter above the rest:
 from __future__ import annotations
 
 from littraceqa.search.contracts import RetrievalResult
-from littraceqa.search.retrieve import HybridRetriever, PaperRRFFuser, RerankBlend
+from littraceqa.search.retrieve import (
+    HybridRetriever,
+    RerankBlend,
+    RetrievalConfig,
+)
 
 
 def _result(name: str, score: float) -> RetrievalResult:
@@ -57,11 +61,8 @@ class _ReverseReranker:
 def _retriever(**kwargs) -> HybridRetriever:
     return HybridRetriever(
         indexers=[_StubIndexer(["a", "b", "c", "d", "e"])],
-        fuser=PaperRRFFuser(k=60),
         reranker=_ReverseReranker(),
-        per_index_k=10,
-        pool_k=5,
-        **kwargs,
+        config=RetrievalConfig(per_index_k=10, pool_k=5, **kwargs),
     )
 
 
@@ -112,9 +113,10 @@ def test_no_reranker_is_untouched():
     """With no reranker, writing rerank_blend does nothing."""
     retriever = HybridRetriever(
         indexers=[_StubIndexer(["a", "b", "c"])],
-        fuser=PaperRRFFuser(k=60),
         reranker=None,
-        per_index_k=10,
-        rerank_blend=RerankBlend(original_weight=0.6, rerank_weight=0.4),
+        config=RetrievalConfig(
+            per_index_k=10,
+            rerank_blend=RerankBlend(original_weight=0.6, rerank_weight=0.4),
+        ),
     )
     assert [r.paper_id for r in retriever.retrieve("q", top_k=3)] == ["a", "b", "c"]

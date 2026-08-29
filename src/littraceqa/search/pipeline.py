@@ -47,8 +47,8 @@ from littraceqa.search.reranker import Qwen3Reranker
 from littraceqa.search.retrieve import (
     AttributeExtractor,
     HybridRetriever,
-    PaperRRFFuser,
     RerankBlend,
+    RetrievalConfig,
     SeedExpansion,
 )
 
@@ -139,10 +139,6 @@ def build_retriever(paths: Paths) -> HybridRetriever:
     """
     return HybridRetriever(
         indexers=build_indexers(paths),
-        # **One vote per paper.** Fusing per chunk lets long papers and
-        # table-heavy papers occupy the top purely by chunk count, and the metric
-        # is per paper, so that distortion lands straight on the score.
-        fuser=PaperRRFFuser(k=60, chunks_per_paper=3),
         # Multi-GPU disables torch.compile automatically (dynamo breaks when a
         # compiled model is called from several threads). Weights load lazily.
         reranker=Qwen3Reranker(
@@ -153,23 +149,30 @@ def build_retriever(paths: Paths) -> HybridRetriever:
             batch_size=4,
             max_tokens=2048,
         ),
-        per_index_k=100,
-        pool_k=200,
-        # Append the top paper's vocabulary to the question and query again.
-        # **Runs before the reranker**, so inference cost does not go up.
-        seed_expansion=SeedExpansion(query_chars=512),
-        anchor_store=ChunkStore(str(paths.chunks)),
-        # Blend the reranker's ranking instead of letting it replace the order.
-        rerank_blend=RerankBlend(
-            original_weight=0.6, rerank_weight=0.4, rrf_k=60, protect_top=20
-        ),
         # Only fires when the question names a venue; otherwise the original path.
         attribute_extractor=AttributeExtractor(paths.paper_metadata),
-        fetch_safety=1.5,
-        # **Do not raise this.** Matching it to per_index_k (40000) blew up faiss
-        # search from 1.5s to 91.1s on NAACL (4.3% selectivity).
-        max_fetch_k=3000,
-        min_filtered_results=10,
+        anchor_store=ChunkStore(str(paths.chunks)),
+        config=RetrievalConfig(
+            # **One vote per paper.** Fusing per chunk lets long papers and
+            # table-heavy papers occupy the top purely by chunk count, and the
+            # metric is per paper, so that distortion lands straight on the score.
+            rrf_k=60,
+            chunks_per_paper=3,
+            per_index_k=100,
+            pool_k=200,
+            fetch_safety=1.5,
+            # **Do not raise this.** Matching it to per_index_k (40000) blew up
+            # faiss search from 1.5s to 91.1s on NAACL (4.3% selectivity).
+            max_fetch_k=3000,
+            min_filtered_results=10,
+            # Append the top paper's vocabulary to the question and query again.
+            # **Runs before the reranker**, so inference cost does not go up.
+            seed_expansion=SeedExpansion(query_chars=512),
+            # Blend the reranker's ranking instead of letting it replace the order.
+            rerank_blend=RerankBlend(
+                original_weight=0.6, rerank_weight=0.4, rrf_k=60, protect_top=20
+            ),
+        ),
     )
 
 

@@ -20,6 +20,7 @@ import json
 import re
 from collections.abc import Collection
 from dataclasses import dataclass, replace
+from typing import Protocol
 from pathlib import Path
 
 from littraceqa.search.contracts import RetrievalResult
@@ -292,19 +293,6 @@ def paper_rrf_fuse(
     return fused
 
 
-class PaperRRFFuser:
-    def __init__(self, k: int = 60, chunks_per_paper: int = 3):
-        self.k = k
-        self.chunks_per_paper = chunks_per_paper
-
-    def fuse(
-        self, runs: list[list[RetrievalResult]], top_k: int
-    ) -> list[RetrievalResult]:
-        return paper_rrf_fuse(
-            runs, top_k, k=self.k, chunks_per_paper=self.chunks_per_paper
-        )
-
-
 # ============================================================================
 # The retriever
 # ============================================================================
@@ -342,42 +330,75 @@ class SeedExpansion:
     query_chars: int = 512
 
 
+class AnchorStore(Protocol):
+    """What seed expansion needs of a chunk store: one paper's chunks by id.
+
+    `littraceqa.chunk_store.ChunkStore` is what production passes. Only this one
+    method is used, so a test can stand in with anything that has it.
+    """
+
+    def load_paper(self, paper_id: str) -> list[dict]: ...
+
+
+@dataclass(frozen=True)
+class RetrievalConfig:
+    """The numbers that shape HybridRetriever's behaviour.
+
+    **Kept apart from the collaborators (indexers / reranker / extractor / store),**
+    the same way `ReadingConfig` is kept apart from ReadingAgent's: those say *what*
+    to use, these say *how* to use it. **This dataclass is the single definition of
+    which knobs exist**, and being frozen it cannot change mid-run.
+    """
+
+    # ---- paper-level RRF ----
+    rrf_k: int = 60
+    # How many chunks of one paper survive the fusion. **Without a limit a paper
+    # with a hundred chunks eats pool_k** and the reranker sees one paper.
+    chunks_per_paper: int = 3
+
+    # ---- how much each stage fetches ----
+    per_index_k: int = 100
+    # The candidate pool handed to the reranker; None means top_k*3.
+    pool_k: int | None = None
+
+    # ---- the venue/year filter's over-fetch ----
+    fetch_safety: float = 1.5
+    max_fetch_k: int = 5000
+    # Fewer than this after filtering falls back to the unfiltered run (fail-open).
+    min_filtered_results: int = 10
+
+    # ---- the two stages that are off unless configured ----
+    # None skips seed expansion (one query per subquery); a SeedExpansion appends
+    # the top paper's vocabulary and queries again (see _seed_expand).
+    seed_expansion: SeedExpansion | None = None
+    # None lets the reranker replace the order; a RerankBlend mixes it into the
+    # pre-rerank ranking instead (see _blend_rerank).
+    rerank_blend: RerankBlend | None = None
+
+
 class HybridRetriever:
+    """Collaborators by name, every number in `config`.
+
+    The same shape as `ReadingAgent`: what it uses is named here, how it is tuned
+    lives in one frozen object.
+    """
+
     def __init__(
         self,
         indexers: list,
-        fuser: PaperRRFFuser,
         # None returns the fused ranking as is (no reranking).
         reranker: Qwen3Reranker | None = None,
-        per_index_k: int = 100,
-        pool_k: int | None = None,
+        # None disables the venue/year filter entirely.
         attribute_extractor: AttributeExtractor | None = None,
-        fetch_safety: float = 1.5,
-        max_fetch_k: int = 5000,
-        min_filtered_results: int = 10,
-        rerank_blend: RerankBlend | None = None,
-        seed_expansion: SeedExpansion | None = None,
-        anchor_store: object | None = None,
+        # Read by seed expansion to get the anchor's title+abstract.
+        anchor_store: AnchorStore | None = None,
+        config: RetrievalConfig | None = None,
     ):
         self.indexers = indexers
-        self.fuser = fuser
         self.reranker = reranker
-        self.per_index_k = per_index_k
-        # Size of the candidate pool handed to the reranker; defaults to top_k*3.
-        self.pool_k = pool_k
-        # None lets the reranker replace the order; a RerankBlend mixes it with the
-        # pre-rerank ranking instead (see _blend_rerank).
-        self.rerank_blend = rerank_blend
-        # None skips seed expansion (a single query per subquery); a SeedExpansion
-        # appends the top paper's vocabulary and queries again (see _seed_expand).
-        self.seed_expansion = seed_expansion
-        # ChunkStore used to look up the anchor's title+abstract (seed expansion only).
-        self.anchor_store = anchor_store
-        # None disables the attribute filter entirely.
         self.attribute_extractor = attribute_extractor
-        self.fetch_safety = fetch_safety
-        self.max_fetch_k = max_fetch_k
-        self.min_filtered_results = min_filtered_results
+        self.anchor_store = anchor_store
+        self.config = config or RetrievalConfig()
 
     def retrieve(
         self,
@@ -402,10 +423,10 @@ class HybridRetriever:
 
         runs = self._run_indexers(query, attribute_filter)
         if self.reranker is not None:
-            fuse_k = self.pool_k if self.pool_k is not None else top_k * 3
+            fuse_k = self.config.pool_k if self.config.pool_k is not None else top_k * 3
         else:
             fuse_k = top_k
-        fused = self.fuser.fuse(runs, top_k=fuse_k)
+        fused = self._fuse(runs, fuse_k)
         # Seed expansion goes **before** the reranker: running the reranker twice
         # would double inference, while querying the indexes twice is cheap. The
         # reranker still runs once, on the original query.
@@ -413,13 +434,22 @@ class HybridRetriever:
 
         if self.reranker is None:
             return fused[:top_k]
-        if self.rerank_blend is None:
+        if self.config.rerank_blend is None:
             return self.reranker.rerank(query, fused, top_k)
         # Blending needs the full ranking before truncation, hence len(fused).
         # **This costs no extra inference**: Qwen3Reranker already scores every
         # candidate and only then cuts to top_k (see reranker.py).
         reranked = self.reranker.rerank(query, fused, len(fused))
         return self._blend_rerank(fused, reranked)[:top_k]
+
+    def _fuse(self, runs: list[list[RetrievalResult]], top_k: int) -> list[RetrievalResult]:
+        """Paper-level RRF over the runs. **One vote per paper per run.**"""
+        return paper_rrf_fuse(
+            runs,
+            top_k,
+            k=self.config.rrf_k,
+            chunks_per_paper=self.config.chunks_per_paper,
+        )
 
     def _blend_rerank(
         self, fused: list[RetrievalResult], reranked: list[RetrievalResult]
@@ -441,7 +471,7 @@ class HybridRetriever:
         order would be thrown away. `Qwen3Reranker.rerank` overwrites score for the
         same reason.
         """
-        blend = self.rerank_blend or RerankBlend()
+        blend = self.config.rerank_blend or RerankBlend()
         k = blend.rrf_k
         w_orig = blend.original_weight
         w_rerank = blend.rerank_weight
@@ -495,26 +525,26 @@ class HybridRetriever:
         16%). Concatenating mechanically cannot fail that way, and it always keeps
         the original question.
 
-        **Fusion is left to `self.fuser`**, so with the paper-level fuser the two
+        **Fusion goes through the same `_fuse` as the first round**, so the two
         rounds mix per paper — seed expansion and paper-level RRF compose freely.
 
         **It runs before the reranker**, so reranker inference stays at one pass;
         the only added cost is one more sweep over the indexes.
         """
-        if not self.seed_expansion or not fused:
+        if not self.config.seed_expansion or not fused:
             return fused
         anchor_text = self._anchor_text(fused[0])
         if not anchor_text:
             return fused
-        query_chars = self.seed_expansion.query_chars
+        query_chars = self.config.seed_expansion.query_chars
         expanded = f"{query}\n{anchor_text[:query_chars]}"
         runs = self._run_indexers(expanded, attribute_filter)
-        expanded_fused = self.fuser.fuse(runs, top_k=fuse_k)
+        expanded_fused = self._fuse(runs, fuse_k)
         if not expanded_fused:
             return fused
         # Fuse the two rounds as two runs. Only ranks matter, so the scale
         # difference between the two RRF score sets is irrelevant.
-        return self.fuser.fuse([fused, expanded_fused], top_k=fuse_k)
+        return self._fuse([fused, expanded_fused], fuse_k)
 
     def _anchor_text(self, anchor: RetrievalResult) -> str:
         """The anchor's title+abstract, falling back to the matched chunk's text.
@@ -544,7 +574,7 @@ class HybridRetriever:
     ) -> list[list[RetrievalResult]]:
         """Query every index; with a constraint, over-fetch and then drop."""
         if attribute_filter is None or attribute_filter.is_empty():
-            return [indexer.search(query, self.per_index_k) for indexer in self.indexers]
+            return [indexer.search(query, self.config.per_index_k) for indexer in self.indexers]
 
         fetch_k = self._fetch_k(attribute_filter)
         runs = []
@@ -554,9 +584,9 @@ class HybridRetriever:
             # If filtering drains the run, fall back to the unfiltered one. Better
             # to tolerate noise than to lose recall to a misextraction or to having
             # fetched too few (fail-open).
-            if len(kept) < self.min_filtered_results:
+            if len(kept) < self.config.min_filtered_results:
                 kept = raw
-            runs.append(kept[: self.per_index_k])
+            runs.append(kept[: self.config.per_index_k])
         return runs
 
     def _fetch_k(self, attribute_filter: AttributeFilter) -> int:
@@ -565,9 +595,9 @@ class HybridRetriever:
         if self.attribute_extractor is not None:
             selectivity = self.attribute_extractor.selectivity(attribute_filter)
         if selectivity <= 0:
-            return self.max_fetch_k
-        needed = int(self.per_index_k / selectivity * self.fetch_safety)
-        return max(self.per_index_k, min(needed, self.max_fetch_k))
+            return self.config.max_fetch_k
+        needed = int(self.config.per_index_k / selectivity * self.config.fetch_safety)
+        return max(self.config.per_index_k, min(needed, self.config.max_fetch_k))
 
 
 def to_gold_papers(

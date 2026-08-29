@@ -17,7 +17,7 @@ from littraceqa.search.retrieve import (
     AttributeExtractor,
     AttributeFilter,
     HybridRetriever,
-    PaperRRFFuser,
+    RetrievalConfig,
     filter_results,
 )
 
@@ -183,10 +183,8 @@ class _StubIndexer:
 def _retriever(indexer, extractor, **kwargs) -> HybridRetriever:
     return HybridRetriever(
         indexers=[indexer],
-        fuser=PaperRRFFuser(),
-        per_index_k=10,
         attribute_extractor=extractor,
-        **kwargs,
+        config=RetrievalConfig(per_index_k=10, **kwargs),
     )
 
 

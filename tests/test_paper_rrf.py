@@ -6,7 +6,7 @@ from __future__ import annotations
 from littraceqa.search.contracts import RetrievalResult
 from littraceqa.search.retrieve import (
     HybridRetriever,
-    PaperRRFFuser,
+    RetrievalConfig,
     SeedExpansion,
     paper_rrf_fuse,
     to_gold_papers,
@@ -107,7 +107,7 @@ class TestPaperRRFFuse:
 
     def test_usable_as_a_fuser(self):
         run = [result("p#c0", "p")]
-        assert PaperRRFFuser(k=60).fuse([run], top_k=5)[0].chunk_id == "p#c0"
+        assert paper_rrf_fuse([run], top_k=5, k=60)[0].chunk_id == "p#c0"
 
 
 # The question the seed-expansion tests search with. **It has to be shorter than
@@ -152,7 +152,7 @@ class StubStore:
 
 
 class TestSeedExpansion:
-    def _retriever(self, **kwargs):
+    def _retriever(self, anchor_store=None, reranker=None, **kwargs):
         indexer = StubIndexer(
             {
                 # The question alone puts p_seed first and never reaches gold.
@@ -163,9 +163,9 @@ class TestSeedExpansion:
         )
         return HybridRetriever(
             indexers=[indexer],
-            fuser=PaperRRFFuser(),
-            per_index_k=10,
-            **kwargs,
+            reranker=reranker,
+            anchor_store=anchor_store,
+            config=RetrievalConfig(per_index_k=10, **kwargs),
         ), indexer
 
     def test_disabled_by_default_runs_one_search(self):
@@ -221,9 +221,9 @@ class TestSeedExpansion:
         retriever, _ = self._retriever(
             seed_expansion=SeedExpansion(),
             anchor_store=StubStore({"p_seed": "reward shape"}),
+            reranker=StubReranker(),
+            pool_k=20,
         )
-        retriever.reranker = StubReranker()
-        retriever.pool_k = 20
         retriever.retrieve(QUESTION, 10)
         assert calls == [QUESTION]
 

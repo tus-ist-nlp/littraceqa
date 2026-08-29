@@ -76,15 +76,17 @@ def test_retriever_wiring(tmp_path):
     assert [type(ix).__name__ for ix in retriever.indexers] == [
         "BM25Index", "BM25PaperIndex", "Qwen3FAISSIndex",
     ]
-    assert type(retriever.fuser).__name__ == "PaperRRFFuser"  # one vote per paper
     assert retriever.reranker.model_name == "Qwen/Qwen3-Reranker-8B"
     # The reranker gets two GPUs because it scores pool_k chunks on every query.
     assert retriever.reranker.devices == ["cuda:1", "cuda:2"]
-    assert (retriever.per_index_k, retriever.pool_k) == (100, 200)
-    assert retriever.seed_expansion.query_chars == 512
-    assert retriever.rerank_blend.protect_top == 20
+    config = retriever.config
+    # One vote per paper, and one paper cannot occupy the pool.
+    assert (config.rrf_k, config.chunks_per_paper) == (60, 3)
+    assert (config.per_index_k, config.pool_k) == (100, 200)
+    assert config.seed_expansion.query_chars == 512
+    assert config.rerank_blend.protect_top == 20
     # **Never raise this**: on NAACL it blew faiss search up 61x.
-    assert retriever.max_fetch_k == 3000
+    assert config.max_fetch_k == 3000
 
 
 def test_expander_uses_three_independent_sources(tmp_path):
