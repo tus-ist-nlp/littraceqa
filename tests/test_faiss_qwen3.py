@@ -15,7 +15,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from littraceqa.di_pipeline.index.faiss_qwen3 import _ADD_ROWS, Qwen3FAISSIndex
+from littraceqa.di_pipeline.faiss_qwen3 import _ADD_ROWS, Qwen3FAISSIndex
 
 
 def test_fp16_is_the_default(tmp_path):
@@ -66,7 +66,7 @@ def test_faiss_add_is_sliced_to_avoid_touching_42gb_at_once():
 
 import numpy as np  # noqa: E402
 
-from littraceqa.di_pipeline.index.faiss_qwen3 import (  # noqa: E402
+from littraceqa.di_pipeline.faiss_qwen3 import (  # noqa: E402
     _DONE_FILENAME,
     _EMBEDDINGS_FILENAME,
 )

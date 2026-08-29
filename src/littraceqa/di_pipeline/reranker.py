@@ -59,7 +59,7 @@ class Qwen3Reranker:
         # lengths mean one long outlier makes batch_size x longest eat the VRAM: at
         # 8B, batch_size=4 peaked at 22GB and 8 or 16 went straight to OOM. Budgeting
         # tokens instead packs many short documents while keeping VRAM flat (the
-        # same fix as in index/faiss_qwen3.py). None keeps the fixed batch_size.
+        # same fix as in faiss_qwen3.py). None keeps the fixed batch_size.
         max_batch_tokens: int | None = None,
     ):
         self.model_name = model
@@ -128,7 +128,7 @@ class Qwen3Reranker:
         # **Overwrite** score with the rerank score (the yes probability). A ranking
         # carried only by list order is lost downstream: ReadingAgent accumulates
         # results into a dict keyed by chunk_id and re-sorts by r.score
-        # (_candidate_papers in agent/reading.py), so keeping the original RRF score
+        # (_candidate_papers in agent.py), so keeping the original RRF score
         # would discard 100% of the reranker's ordering and reduce it to a filter
         # that picks 20 out of a pool of 100.
         # RRF scores and yes probabilities are on different scales, but with a

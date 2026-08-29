@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import yaml
 
-from littraceqa.di_pipeline.index.faiss_qwen3 import INDEX_NAME, PRODUCTION_PARAMS
-from littraceqa.di_pipeline.llm.fake import FakeLLM
+from littraceqa.di_pipeline.faiss_qwen3 import INDEX_NAME, PRODUCTION_PARAMS
+from littraceqa.di_pipeline.llm import FakeLLM
 from littraceqa.di_pipeline.pipeline import (
     PROCESS,
     Paths,
@@ -56,7 +56,7 @@ def test_every_index_has_its_own_directory(tmp_path):
 
 
 def test_embedding_index_shares_its_settings_with_the_shard_builder(tmp_path):
-    """The embedding settings come from the constant in index/faiss_qwen3.py.
+    """The embedding settings come from the constant in faiss_qwen3.py.
 
     The distributed build (scripts/build_faiss_qwen3_shard.py) reads the same
     constant, which is what makes **a model or prefix mismatch between build time

@@ -1,18 +1,31 @@
-# src/littraceqa/di_pipeline/agent/
+# src/littraceqa/di_pipeline/
 
-The agent layer: takes a `Query` and returns a `Prediction`. The retriever settles
-*which paper*; the agent settles *where in it the evidence is*. **No answer is
-generated** — freeform / multiple_choice / table, and choosing which papers to
-submit, all belong to the reading team. What this hands over is the candidate list
-and the evidence.
+The retrieval system. **`pipeline.py` is the entry point** — reading it gives the
+whole configuration and every value that was tuned; this file explains why the
+pieces are shaped the way they are.
 
-## Files
+There are no subpackages. There used to be five (`agent/`, `index/`, `llm/`,
+`preprocess/`, `retrieve/`), from when the point was to swap methods and compare
+them. With one configuration left, a directory per stage only suggested a choice
+that no longer exists, so each stage is one module.
 
-- `reading.py` — `ReadingAgent`: retrieve, read, re-search for what is missing, and
-  repeat. Its settings are `ReadingConfig` and `CombineConfig`.
-- `evidence.py` — turn a `RetrievalResult` into the submitted `Evidence`, locator
-  and all
-- `json_utils.py` — pulling JSON out of an LLM response
+| file | what is in it |
+|---|---|
+| `pipeline.py` | **the configuration itself**: Paths, build_indexers, build_retriever, build_expander, build_agent |
+| `contracts.py` | the dataclasses each stage hands the next (Query / Chunk / RetrievalResult / Prediction ...), plus `filter_chunk_types` |
+| `agent.py` | `ReadingAgent`: retrieve, read, re-search. Its settings (`ReadingConfig` / `CombineConfig`), the JSON extraction, and building the submitted `Evidence` |
+| `retrieve.py` | the venue/year attribute filter, paper-level RRF, and `HybridRetriever` — one question to a ranking of chunks |
+| `reranker.py` | `Qwen3Reranker` (Qwen3-Reranker-8B) |
+| `expander.py` | paper-to-paper expansion, ranking B: SPECTER2 / bibliographic coupling / full-text MLT, fused |
+| `indexes.py` | `BM25Index` (chunks), `BM25PaperIndex` (whole papers), `Specter2FAISSIndex` (the index ranking B reads) |
+| `faiss_qwen3.py` | `Qwen3FAISSIndex`. **Separate from indexes.py on purpose**: `scripts/build_faiss_qwen3_shard.py` imports it on machines where bm25s and the SPECTER2 adapters are not installed |
+| `preprocess.py` | `MinerUChunker`: read the content_list.json MinerU wrote and cut it into Chunks |
+| `llm.py` | the `LLMClient` contract, `AzureOpenAILLM` (production) and `FakeLLM` (tests) |
+| `accel.py` | choosing Flash Attention and torch.compile |
+
+The retrieval agent hands over **the candidate list and the evidence**. Generating
+the answer (freeform / multiple_choice / table) and choosing which papers to submit
+both belong to the reading team.
 
 ---
 
@@ -62,7 +75,7 @@ step of the loop.
   constraint behaves exactly as it did before**.
 - The extractor belongs to the retriever (`pipeline.build_retriever()` hands it an
   `AttributeExtractor`). Without one this returns None. See
-  `retrieve/attribute_filter.py`.
+  `retrieve.py`.
 
 ### 1. Splitting (`_decompose`)
 
@@ -208,7 +221,7 @@ extra LLM call per query for nothing, so the path was removed.
 
 ## The settings (`ReadingConfig`)
 
-The knobs live in `ReadingConfig` (`agent/reading.py`) and reach `ReadingAgent` as
+The knobs live in `ReadingConfig` (`agent.py`) and reach `ReadingAgent` as
 one object, `config=ReadingConfig(...)`. **This dataclass is the single definition
 of which params exist**, and a misspelling stops at the constructor with a
 TypeError. `ReadingAgent.__init__` names only the collaborators (`retriever` /
@@ -272,7 +285,7 @@ ReadingAgent.run(query)
   │   for subquery in subqueries:
   │     results = HybridRetriever.retrieve(subquery, top_k, attribute_filter)  ← here
   │       │
-  │       │  === inside retrieve() (retrieve/hybrid.py) ===
+  │       │  === inside retrieve() (retrieve.py) ===
   │       │  a. with no attribute_filter but an extractor, derive one from the
   │       │     subquery (a fallback for callers that send a raw question; the
   │       │     agent always passes step 0's value)
@@ -325,7 +338,7 @@ for indexer in indexers:
   or two venue names all skip extraction and take the unconstrained path
   (`attribute_filter.py`).
 
-## c. Fusing (`PaperRRFFuser`, `retrieve/paper_rrf.py`)
+## c. Fusing (`PaperRRFFuser`, `retrieve.py`)
 
 Several indexes' rankings become one, through **paper-level** Reciprocal Rank
 Fusion at `k=60`. Mixing on **rank** rather than absolute score is what lets BM25

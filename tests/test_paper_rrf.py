@@ -4,8 +4,13 @@ from __future__ import annotations
 
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, SeedExpansion, to_gold_papers
-from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser, paper_rrf_fuse
+from littraceqa.di_pipeline.retrieve import (
+    HybridRetriever,
+    PaperRRFFuser,
+    SeedExpansion,
+    paper_rrf_fuse,
+    to_gold_papers,
+)
 
 
 def result(chunk_id, paper_id, source="bm25s", text="body", chunk_type="text_span"):

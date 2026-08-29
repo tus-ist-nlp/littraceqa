@@ -10,7 +10,7 @@ corpus in document order and does not split usefully, so it is left to the ordin
 `run_search.py --build` on one machine. faiss_qwen3.py itself is untouched.
 
 The parameters (model / batch_size / max_tokens ...) come from PRODUCTION_PARAMS in
-index/faiss_qwen3.py, so **the build and the search can never drift apart** through
+faiss_qwen3.py, so **the build and the search can never drift apart** through
 a value retyped in two places. `devices` is the exception — which GPUs are free
 differs per machine, so it comes from the command line. The output path is derived
 by the same rule search uses, `{index_dir}/{process}/{INDEX_NAME}`.
@@ -36,7 +36,7 @@ Usage (two shards: nlp01 takes the first half, nlp02 the second):
       --shard-index 1 --num-shards 2
 
 OOM is guarded three ways (the details are on each parameter in
-index/faiss_qwen3.py):
+faiss_qwen3.py):
 
 1. **max_batch_tokens**: budget "rows x longest row in the batch" rather than a
    fixed row count. Chunks are sorted by length before batching, so a fixed count
@@ -71,7 +71,7 @@ from littraceqa.di_pipeline.contracts import Chunk
 # installed — nlp02, where this build runs. Only the embedding index is needed, so
 # that module is imported directly. **The model settings are still the same shared
 # constant**, never a second copy.
-from littraceqa.di_pipeline.index.faiss_qwen3 import (
+from littraceqa.di_pipeline.faiss_qwen3 import (
     INDEX_NAME,
     PRODUCTION_PARAMS,
     Qwen3FAISSIndex,

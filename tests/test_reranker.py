@@ -9,7 +9,7 @@ reranking was thrown away in its entirety.
 from __future__ import annotations
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker
+from littraceqa.di_pipeline.reranker import Qwen3Reranker
 
 
 def _result(chunk_id: str, score: float) -> RetrievalResult:

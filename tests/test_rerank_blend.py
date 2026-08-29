@@ -4,15 +4,14 @@ Two things matter above the rest:
 
 * **Omitting it behaves exactly as before** — the reranker replaces the order.
 * **The blended rank is written into `score`.** Everything downstream re-sorts by
-  score (the accumulation in agent/reading.py, _candidate_papers, to_gold_papers),
+  score (the accumulation in agent.py, _candidate_papers, to_gold_papers),
   so a ranking carried only by list order is thrown away every single time.
 """
 
 from __future__ import annotations
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, RerankBlend
-from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
+from littraceqa.di_pipeline.retrieve import HybridRetriever, PaperRRFFuser, RerankBlend
 
 
 def _result(name: str, score: float) -> RetrievalResult:

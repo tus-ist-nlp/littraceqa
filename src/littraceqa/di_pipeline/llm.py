@@ -1,7 +1,8 @@
-"""The LLM client that calls Azure OpenAI.
+"""The LLM client: the contract, the real one, and the fake.
 
-Satisfies the `LLMClient` Protocol (base.py). It is constructed in exactly one
-place, `pipeline.build_agent()`, and handed to ReadingAgent from there.
+`LLMClient` is the whole interface — `__call__(prompt) -> str`. `AzureOpenAILLM`
+is production and is constructed in exactly one place, `pipeline.build_agent()`;
+`FakeLLM` returns canned responses and is what tests hand ReadingAgent instead.
 
 Configuration comes from .env — **never from code or config**:
 
@@ -36,13 +37,51 @@ being assembled is what makes it impossible to miss.
 from __future__ import annotations
 
 import os
+from typing import Protocol
 
 import openai
 from openai import AzureOpenAI
 
 
+# ---- the contract ----------------------------------------------------------
+
+
+class LLMClient(Protocol):
+    """The one method the pipeline needs from an LLM.
+
+    **ReadingAgent calls nothing but this**, which is what lets a test hand it
+    `FakeLLM` in place of the real client.
+    """
+
+    def __call__(self, prompt: str) -> str: ...
+
+
+# ---- the fake, for tests and dry runs --------------------------------------
+
+
+class FakeLLM:
+    """Returns ``responses`` one per call, in order.
+
+    Once ``responses`` runs out it keeps returning the last one, so a test only has
+    to spell out the calls it actually cares about.
+    """
+
+    def __init__(self, responses: list[str] | None = None):
+        self.responses = responses or [""]
+        self.calls: list[str] = []
+        self._i = 0
+
+    def __call__(self, prompt: str) -> str:
+        self.calls.append(prompt)
+        response = self.responses[min(self._i, len(self.responses) - 1)]
+        self._i += 1
+        return response
+
+
+# ---- the real client -------------------------------------------------------
+
 # **This is an input to the model, not a comment.** Every other prompt in the
-# pipeline (agent/reading.py) is English and the corpus is English, so it is English
+# pipeline (agent.py) is English and the corpus is English, so it is English
 # here too; it was Japanese when the reported numbers were measured, and a prompt
 # change can move an LLM's output, so a re-measurement is the way to confirm nothing
 # shifted.
@@ -98,7 +137,7 @@ class AzureOpenAILLM:
                 "    AZURE_OPENAI_API_VERSION=2025-04-01-preview\n"
                 "    AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-5.4\n"
                 "Only tests can run without an LLM (hand ReadingAgent the FakeLLM "
-                "from llm/fake.py directly); a real search requires one."
+                "from llm.py directly); a real search requires one."
             )
 
         self.deployment = deployment

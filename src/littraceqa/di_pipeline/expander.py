@@ -12,7 +12,7 @@ The result enters the candidate list only through the **RRF fusion of ranking A
 and ranking B**. ``rank()`` returns a proximity ordering that still contains
 papers already in the candidate list — overlapping papers are exactly what the
 fusion rewards, so they must not be filtered out. The formula and the reasoning
-live in ``_combine_rrf`` in agent/reading.py.
+live in ``_combine_rrf`` in agent.py.
 
 An earlier design spliced the extra papers into fixed positions of the candidate
 list. It lost to rank fusion on every metric and was removed.
@@ -76,7 +76,7 @@ class PaperExpander(Protocol):
     """Rank papers by proximity to the anchors (ranking B).
 
     **The caller chooses the anchors and passes them in.** Which papers anchor the
-    expansion is a fusion decision (`_anchor_papers` in agent/reading.py), so an
+    expansion is a fusion decision (`_anchor_papers` in agent.py), so an
     expander is responsible for nothing but returning their neighbours.
 
     **Papers already in the candidate list are not excluded** from the result:

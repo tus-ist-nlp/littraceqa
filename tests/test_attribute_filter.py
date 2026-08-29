@@ -13,13 +13,13 @@ import json
 import pytest
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
-from littraceqa.di_pipeline.retrieve.attribute_filter import (
+from littraceqa.di_pipeline.retrieve import (
     AttributeExtractor,
     AttributeFilter,
+    HybridRetriever,
+    PaperRRFFuser,
     filter_results,
 )
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
-from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
 
 # The same venue mix as the real paper_metadata.jsonl, with the counts scaled down.
 _PAPERS = (

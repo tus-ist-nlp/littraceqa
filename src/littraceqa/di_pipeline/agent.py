@@ -31,12 +31,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from littraceqa.di_pipeline.agent.evidence import evidence_from_result
-from littraceqa.di_pipeline.agent.json_utils import parse_json_object
-from littraceqa.di_pipeline.contracts import Answer, Evidence, Prediction, Query, RetrievalResult
-from littraceqa.di_pipeline.llm.base import LLMClient
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_papers
-from littraceqa.di_pipeline.retrieve.paper_expander import PaperExpander
+import json
+import re
+
+from littraceqa.di_pipeline.contracts import (
+    Answer,
+    Evidence,
+    EvidenceLocator,
+    Prediction,
+    Query,
+    RetrievalResult,
+)
+from littraceqa.di_pipeline.expander import PaperExpander
+from littraceqa.di_pipeline.llm import LLMClient
+from littraceqa.di_pipeline.retrieve import HybridRetriever, to_gold_papers
 
 
 # How many candidate papers to keep in the prediction file. The headline metric is
@@ -170,7 +178,7 @@ class ReadingConfig:
     # **Chunk types excluded from the representative score** (`["table"]` measured
     # best). Table chunks are dense with numbers and short labels, so one table can
     # spike a paper that is not the question's topic. See `to_gold_papers` in
-    # retrieve/hybrid.py. **The chunk pool handed to the reader is unchanged**, so
+    # retrieve.py. **The chunk pool handed to the reader is unchanged**, so
     # tables still reach evidence as before.
     paper_score_skip_chunk_types: tuple[str, ...] = ()
 
@@ -188,7 +196,7 @@ class ReadingAgent:
         retriever: HybridRetriever,
         llm: LLMClient,
         *,
-        # Paper-to-paper expansion (retrieve/paper_expander.py), there to recover
+        # Paper-to-paper expansion (expander.py), there to recover
         # peer gold papers the question never names. None leaves the candidate list
         # exactly as retrieval ranked it.
         paper_expander: PaperExpander | None = None,
@@ -306,7 +314,7 @@ class ReadingAgent:
 
         The actual narrowing is done by attribute_filter on the results, so this is
         the constraint **as a search term**. A title_abstract chunk's text really
-        does begin `[ACL 2025] Title...` (preprocess/mineru_chunker.py), so leading
+        does begin `[ACL 2025] Title...` (preprocess.py), so leading
         with the same tag pulls BM25 toward that venue. `_decompose()` sometimes
         keeps the venue on its own but `_refine()` dropped it, so both say it now.
         """
@@ -715,3 +723,62 @@ class ReadingAgent:
         if not isinstance(values, list):
             return []
         return [str(v) for v in values if v]
+
+
+# ---- pulling JSON out of an LLM response -----------------------------------
+#
+# The reading loop asks for JSON and gets back whatever the model felt like
+# emitting, so nothing here trusts the shape.
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def parse_json_object(text: str) -> dict | None:
+    """Extract a JSON object from an LLM response; None if there is none."""
+    fence_match = _JSON_FENCE_RE.search(text)
+    if fence_match:
+        candidate = fence_match.group(1)
+    else:
+        candidate = text
+    try:
+        return json.loads(candidate)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    start, end = candidate.find("{"), candidate.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        return json.loads(candidate[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+# ---- building the submitted Evidence ---------------------------------------
+#
+# A MinerU chunk already carries page / table_id / figure_id / section /
+# equation_id in its metadata, and the chunk_type vocabulary (table / figure /
+# text_span / equation_algorithm / citation_context) matches the values observed in
+# Evidence.source_type exactly. **So once it is settled which chunk is the evidence,
+# building the Evidence is mechanical** — nothing has to be inferred.
+#
+# Scoring keys on the 4-tuple (paper_id, source_type, page, object_id), where
+# object_id is table_id for a table and figure_id for a figure and nothing else
+# (`coarse_evidence_key` in scripts/evaluate.py). The finer gold fields — row,
+# column, sentence_start — can be left empty and evidence F1 still scores.
+
+def evidence_from_result(result: RetrievalResult) -> Evidence:
+    """One retrieved chunk becomes one submitted Evidence."""
+    metadata = result.metadata or {}
+    locator = EvidenceLocator(
+        page=metadata.get("page"),
+        table_id=metadata.get("table_id"),
+        figure_id=metadata.get("figure_id"),
+        section=metadata.get("section"),
+        equation_id=metadata.get("equation_id"),
+    )
+    return Evidence(
+        paper_id=result.paper_id,
+        source_type=result.chunk_type,
+        locator=locator,
+        evidence_text_or_value=result.text,
+    )

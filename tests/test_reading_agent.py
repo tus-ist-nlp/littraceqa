@@ -13,14 +13,14 @@ import json
 
 import pytest
 
-from littraceqa.di_pipeline.agent.reading import (
+from littraceqa.di_pipeline.agent import (
     CANDIDATE_PAPERS_LIMIT,
     CombineConfig,
     ReadingAgent,
     ReadingConfig,
 )
 from littraceqa.di_pipeline.contracts import Query, RetrievalResult
-from littraceqa.di_pipeline.llm.fake import FakeLLM
+from littraceqa.di_pipeline.llm import FakeLLM
 
 
 def _query(**kwargs) -> Query:
@@ -303,7 +303,7 @@ class _StubExtractor:
     """A dummy extractor returning a constraint only for questions naming NAACL."""
 
     def __init__(self):
-        from littraceqa.di_pipeline.retrieve.attribute_filter import AttributeFilter
+        from littraceqa.di_pipeline.retrieve import AttributeFilter
 
         self._cls = AttributeFilter
 
@@ -682,7 +682,7 @@ def test_decompose_asks_for_a_fixed_number_of_subqueries():
     the two estimators were indistinguishable in accuracy (0.670 vs 0.673), so the
     branch went away entirely.
     """
-    from littraceqa.di_pipeline.agent.reading import SUBQUERY_COUNT
+    from littraceqa.di_pipeline.agent import SUBQUERY_COUNT
 
     for task_family in ("hidden_source_single_paper", "multi_paper"):
         llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])

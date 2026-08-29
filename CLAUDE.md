@@ -37,6 +37,10 @@
 | `iseakira/paper-ablation` | + 選定の過程で試した ablation すべて |
 
 最終構成の全体は `src/littraceqa/di_pipeline/pipeline.py` にある。
+**サブパッケージは持たない**（各段1モジュール）。以前は agent / index / llm /
+preprocess / retrieve の5つに分かれていたが、手法を比べるための分割だったので、
+構成が1つに定まった段階では「段ごとにディレクトリがある＝選択肢がある」と
+読ませるだけになり畳んだ。
 
 MinerU で PDF をチャンク化し、chunk BM25 + paper BM25 + Qwen3-Embedding-8B を
 **論文単位RRF**で融合、Seed Expansion を通してから Qwen3-Reranker-8B で**順位融合**、
@@ -59,15 +63,18 @@ validation 55件の `candidate_recall@k`（macro, total）:
 各モジュールの docstring にある。
 
 ```
-pipeline.py          構成そのもの（Paths / build_indexers / build_retriever /
-                     build_expander / build_agent）
-contracts.py         各段の入出力契約（Query / Chunk / RetrievalResult / Prediction …）
-index/               索引3本（bm25s / bm25s_paper / faiss_qwen3_8b）と SPECTER2
-retrieve/hybrid.py   検索本体（索引 → 融合 → Seed Expansion → reranker → 順位融合）
-retrieve/paper_rrf.py    論文単位RRF（1論文1票）
-retrieve/reranker.py     Qwen3-Reranker-8B
-retrieve/paper_expander.py  論文→論文展開（ランキングB）
-agent/reading.py     反復エージェント（分解 → 読解 → 再検索 → A/B 統合）
+pipeline.py     構成そのもの（Paths / build_indexers / build_retriever /
+                build_expander / build_agent）
+contracts.py    各段の入出力契約（Query / Chunk / RetrievalResult / Prediction …）
+retrieve.py     検索本体（属性フィルタ → 索引 → 論文単位RRF → Seed Expansion →
+                reranker → 順位融合）
+reranker.py     Qwen3-Reranker-8B
+expander.py     論文→論文展開（ランキングB: SPECTER2 / 書誌結合 / 全文MLT）
+agent.py        反復エージェント（分解 → 読解 → 再検索 → A/B 統合）
+indexes.py      bm25s / bm25s_paper と SPECTER2 索引
+faiss_qwen3.py  Qwen3-Embedding-8B の索引（分散ビルドが単独で import するので別ファイル）
+preprocess.py   MinerU の出力を Chunk にする
+llm.py          LLMClient / AzureOpenAILLM / FakeLLM
 ```
 
 ### 設定を変えるとき
@@ -75,7 +82,7 @@ agent/reading.py     反復エージェント（分解 → 読解 → 再検索 
 **手法のつまみは `pipeline.py` を直接編集する。** 実行環境の場所だけが
 `configs/paths/*.yaml` にある（マシンによって置き場所が違うため）。
 
-- エージェントのつまみ … `ReadingConfig`（`agent/reading.py`）。**存在する param の
+- エージェントのつまみ … `ReadingConfig`（`agent.py`）。**存在する param の
   定義はこの dataclass だけ**で、`ReadingAgent` には `config=ReadingConfig(...)` の
   形で1つのオブジェクトとして渡す（綴り間違いはコンストラクタの TypeError で止まる）
 - A/B 統合のつまみ … `CombineConfig`（同上）
@@ -84,7 +91,7 @@ agent/reading.py     反復エージェント（分解 → 読解 → 再検索 
 **索引パスは `Paths.index(名前)` で導出する。** 名前が重なると**先に作った索引を
 上書きする**（数時間かけたビルドが消える）。`test_pipeline.py` が重複を検知する。
 
-**埋め込みのモデル設定は `index/faiss_qwen3.py` の `PRODUCTION_PARAMS` に置く。**
+**埋め込みのモデル設定は `faiss_qwen3.py` の `PRODUCTION_PARAMS` に置く。**
 分散ビルド（`scripts/build_faiss_qwen3_shard.py`）が同じ定数を読むので、
 **構築時と検索時でモデルや前置詞がズレる事故が起きない。**
 
@@ -108,7 +115,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 
 ### 論文単位 RRF（`fuser: paper_rrf`）— 1論文1票
 
-実装は `retrieve/paper_rrf.py`。
+実装は `retrieve.py`。
 
 素朴に**チャンク単位**で融合すると、**同じ論文の複数チャンクがそれぞれ
 独立に票を持つ**。長い論文・表が多い論文はチャンク数が多いだけで上位を占有しやすく、
@@ -124,7 +131,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 
 - **出力はチャンクの列のまま。** reranker も読解も evidence も chunk_id で動く。
   論文の順位を主キー、論文内のチャンク順位を副キーにして並べる。
-- **論文内の順序も `score` に載せる。** 下流（`agent/reading.py` の貯め込み・
+- **論文内の順序も `score` に載せる。** 下流（`agent.py` の貯め込み・
   `_candidate_papers`・`to_gold_papers`）はすべて score で並べ直すので、返り値の
   並び順だけに順序を持たせると捨てられる。論文内オフセットは `1e-9`。
 - **`chunks_per_paper` で1論文の占有を止める。** 制限しないとチャンクを100本持つ論文1本が
@@ -136,7 +143,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 
 ### Seed Expansion（`seed_expansion`）— 上位論文から語彙を借りる
 
-実装は `retrieve/hybrid.py` の `_seed_expand()`。**LLM を1回も呼ばない。**
+実装は `retrieve.py` の `_seed_expand()`。**LLM を1回も呼ばない。**
 
     expanded = 元の質問 + 1位論文の title+abstract の先頭 query_chars 文字
 
@@ -157,7 +164,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 
 ### `rerank_blend` — reranker に順位を置き換えさせない
 
-既定では reranker が RRF 融合後の順位を**完全に置き換える**（`retrieve/hybrid.py`）。
+既定では reranker が RRF 融合後の順位を**完全に置き換える**（`retrieve.py`）。
 だが reranker は「質問に答えるか」で判定するので、質問文が名指ししないピア gold を必ず下げる。
 ランキングB を reranker に通さないのはそのためだが、**ランキングA の内部では無防備なまま**
 だった。`rerank_blend` を書くと順位融合になる。
@@ -202,7 +209,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 51位の論文を B が強く推していても、先に切ると押し上げようがないため。
 
 **論文→論文展開の近さは3種類あり、`build_expander()` が RRF で併用する**
-（`retrieve/paper_expander.py`）:
+（`expander.py`）:
 
 - `specter2`: SPECTER2(proximity) 埋め込みの近傍。構築済み索引を再利用（追加構築なし）。
 - `bib_coupling`: 書誌結合。参考文献の arXiv ID 集合の Jaccard。初回のみコーパス1走査で
@@ -225,7 +232,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 
 `_read_and_judge()` が返す `paper_ids` は本文を読んだうえでの判定なのに、順位付けに一度も
 使っていなかった。`anchor_from: verdict` を書くと、ランキングB の起点を「候補1位」から
-「候補1位 ∪ LLM 確認済み」に広げる（`agent/reading.py` の `_anchor_papers()`）。
+「候補1位 ∪ LLM 確認済み」に広げる（`agent.py` の `_anchor_papers()`）。
 
 **何を直しているのか。** multi の gold をクエリ内で順位順に並べると、1本目は解けているのに
 3本目以降が沈んでいる（1本目 @5 100% / 3本目 @5 27% / 4本目 @5 8%）。anchor が1本だと
@@ -272,7 +279,7 @@ multi ecr@20 0.908 -> **0.925**、**single は1桁も動かない**。
 ### 属性フィルタ（会議名・年）
 
 `build_retriever()` が `attribute_extractor` を渡すと、質問が明示した会議名で
-検索結果を絞り込む（`retrieve/attribute_filter.py`）。**索引の改修も再構築も不要**。
+検索結果を絞り込む（`retrieve.py`）。**索引の改修も再構築も不要**。
 `RetrievalResult.metadata` に既に venue/year が入っているので、各索引から多めに取ってから
 落とすだけ。
 
@@ -313,7 +320,7 @@ top-k を選ぶので k が効き、しかも取った件数はフィルタ後�
 裾の雑音が混ざって上位が薄まる。
 
 **「Web検索エンジンではない」と書かないと LLM は Google 検索クエリを書く**
-（`agent/reading.py` の `CORPUS_NOTE`）。実測で `_refine()` が作るサブクエリの **29〜41%** が
+（`agent.py` の `CORPUS_NOTE`）。実測で `_refine()` が作るサブクエリの **29〜41%** が
 `site:arxiv.org` / `filetype:pdf` のような Web検索演算子付きだった。投げ先はローカルの
 BM25 と faiss なのでこれらは1件もヒットせず、2周目・3周目の検索が丸ごと空振りしていた。
 `CORPUS_NOTE` は分解・再分解の両方の先頭に置いてある。
@@ -321,7 +328,7 @@ BM25 と faiss なのでこれらは1件もヒットせず、2周目・3周目�
 **属性制約が取れたときは、サブクエリの先頭に `[NAACL 2025]` を付けさせる**
 （`_constraint_note()`）。絞り込み自体は `attribute_filter` が担当するので、これは
 **検索語としての**制約。title_abstract チャンクの本文は実際に `[ACL 2025] タイトル…` と
-この表記で始まる（`preprocess/mineru_chunker.py`）ので、同じ表記が BM25 の語として効く。
+この表記で始まる（`preprocess.py`）ので、同じ表記が BM25 の語として効く。
 
 **反復の停止条件は `_read_and_judge()` が返す LLM の `sufficient` 判定のみ。**
 提出本数は候補列の先頭 `max_papers` 本で切るだけで、`task_family`（single/multi）には

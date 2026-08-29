@@ -30,30 +30,27 @@ from dotenv import load_dotenv
 
 from littraceqa.chunk_store import ChunkStore
 from littraceqa.common import ROOT
-from littraceqa.di_pipeline.agent.reading import CombineConfig, ReadingAgent, ReadingConfig
-from littraceqa.di_pipeline.index.bm25_index import BM25Index
-from littraceqa.di_pipeline.index.bm25_paper_index import BM25PaperIndex
-from littraceqa.di_pipeline.index.faiss_qwen3 import (
-    INDEX_NAME as QWEN3_INDEX_NAME,
-)
-from littraceqa.di_pipeline.index.faiss_qwen3 import (
-    PRODUCTION_PARAMS as QWEN3_PARAMS,
-)
-from littraceqa.di_pipeline.index.faiss_qwen3 import Qwen3FAISSIndex
-from littraceqa.di_pipeline.index.faiss_specter2 import Specter2FAISSIndex
-from littraceqa.di_pipeline.llm.azure_openai import AzureOpenAILLM
-from littraceqa.di_pipeline.llm.base import LLMClient
-from littraceqa.di_pipeline.preprocess.mineru_chunker import MinerUChunker
-from littraceqa.di_pipeline.retrieve.attribute_filter import AttributeExtractor
-from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, RerankBlend, SeedExpansion
-from littraceqa.di_pipeline.retrieve.paper_expander import (
+from littraceqa.di_pipeline.agent import CombineConfig, ReadingAgent, ReadingConfig
+from littraceqa.di_pipeline.expander import (
     BibCouplingExpander,
     BM25MLTExpander,
     FusedPaperExpander,
     Specter2PaperExpander,
 )
-from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
-from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker
+from littraceqa.di_pipeline.faiss_qwen3 import INDEX_NAME as QWEN3_INDEX_NAME
+from littraceqa.di_pipeline.faiss_qwen3 import PRODUCTION_PARAMS as QWEN3_PARAMS
+from littraceqa.di_pipeline.faiss_qwen3 import Qwen3FAISSIndex
+from littraceqa.di_pipeline.indexes import BM25Index, BM25PaperIndex, Specter2FAISSIndex
+from littraceqa.di_pipeline.llm import AzureOpenAILLM, LLMClient
+from littraceqa.di_pipeline.preprocess import MinerUChunker
+from littraceqa.di_pipeline.reranker import Qwen3Reranker
+from littraceqa.di_pipeline.retrieve import (
+    AttributeExtractor,
+    HybridRetriever,
+    PaperRRFFuser,
+    RerankBlend,
+    SeedExpansion,
+)
 
 # API keys and the like come from .env at the repo root (never from code or yaml).
 # Variables already exported in the environment win.
@@ -123,7 +120,7 @@ def build_indexers(paths: Paths) -> list:
         # index goes weak, so the two are used together.
         BM25PaperIndex(index_dir=str(paths.index("bm25s_paper"))),
         # Catches paraphrases that share no vocabulary. Model settings live in
-        # index/faiss_qwen3.py so the distributed builder can share them. Only one
+        # faiss_qwen3.py so the distributed builder can share them. Only one
         # GPU here: search uses devices[0] only, leaving the rest for the reranker.
         Qwen3FAISSIndex(
             index_dir=str(paths.index(QWEN3_INDEX_NAME)),

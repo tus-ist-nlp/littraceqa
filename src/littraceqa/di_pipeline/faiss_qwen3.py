@@ -37,8 +37,7 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from littraceqa.di_pipeline.accel import load_with_best_attn, maybe_compile
-from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult
-from littraceqa.di_pipeline.index.chunk_filter import filter_chunk_types
+from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult, filter_chunk_types
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"

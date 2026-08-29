@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from littraceqa.di_pipeline.contracts import Chunk
-from littraceqa.di_pipeline.index.chunk_filter import ALL_CHUNK_TYPES, filter_chunk_types
+from littraceqa.di_pipeline.contracts import ALL_CHUNK_TYPES, Chunk, filter_chunk_types
 
 
 def _chunks() -> list[Chunk]:
