@@ -1,7 +1,8 @@
-"""Qwen3-Reranker（causal LM ベースの yes/no 判定型 reranker）によるチャンクの再ランク。
+"""Qwen3-Reranker: a causal-LM yes/no reranker over chunks.
 
-索引構築ではなくクエリ時の推論のみなので、Qwen3-Embedding の索引構築
-（faiss_qwen3.py）のようなマルチGPU分散・memmap は不要で、GPUでバッチ推論すれば足りる。
+This is query-time inference only, not index building, so it needs none of the
+multi-GPU sharding or memmap machinery of the embedding build (faiss_qwen3.py) —
+batched GPU inference is enough.
 """
 
 from __future__ import annotations
@@ -19,10 +20,11 @@ _DEFAULT_INSTRUCTION = (
     "Given a scientific question, retrieve passages from research papers that "
     "help identify or support the answer"
 )
-# Qwen3-Reranker 公式の prompt フォーマット。<Document> の後ろに続けて渡す本文だけを
-# 別途トークナイズし、prefix/suffix の分だけ予算を引いてから切り詰める
-# (単純にフォーマット済み文字列をまとめて max_length で切ると、末尾の suffix
-#  <think></think> ごと吹き飛んで yes/no 判定の形式が壊れるため)。
+# Qwen3-Reranker's official prompt format. The document text that follows
+# <Document> is tokenised separately and truncated against a budget that already
+# subtracts the prefix and suffix. Truncating the whole formatted string at
+# max_length instead would cut off the trailing <think></think> and break the
+# yes/no answer format.
 _PREFIX = (
     "<|im_start|>system\n"
     "Judge whether the Document meets the requirements based on the Query and the "
@@ -41,23 +43,23 @@ class Qwen3Reranker:
         batch_size: int = 16,
         max_tokens: int = 2048,
         instruction: str = _DEFAULT_INSTRUCTION,
-        # rerank は 1 run で候補を数千件スコアリングするので torch.compile が
-        # 回収できる。可変長入力なので dynamic=True でコンパイルする。
-        # ただし **マルチGPU（devices 指定）時は自動で無効化される**（下記）。
+        # One run scores thousands of candidates, so torch.compile pays for itself.
+        # Inputs are variable length, hence dynamic=True. **Automatically disabled
+        # under multi-GPU (see below).**
         compile: bool = True,
-        # **マルチGPU。** "cuda:1,cuda:2,cuda:3" のようにカンマ区切りで指定すると、
-        # 各GPUにモデル複製を載せてスレッド並列でスコアリングする。reranker は
-        # クエリのたびに pool_k 件を推論するので、pool_k を大きくすると1GPUでは
-        # 実行時間が破綻する（8B・998件で1GPU 152.6秒 vs 3GPU 56.6秒 = 2.7倍）。
-        # PyTorch の CUDA forward は GIL を解放するのでスレッドで実並列になる
-        # （クエリのたびにプロセスを起こす索引ビルド方式のオーバーヘッドを避ける）。
-        # 省略時は device 1枚（従来どおり）。
+        # **Multi-GPU.** A comma-separated list ("cuda:1,cuda:2,cuda:3") places a
+        # replica on each GPU and scores in parallel threads. The reranker infers
+        # over pool_k chunks on every query, so a large pool_k breaks run time on a
+        # single GPU (8B, 998 chunks: 152.6s on one GPU vs 56.6s on three, 2.7x).
+        # PyTorch's CUDA forward releases the GIL, so threads run genuinely in
+        # parallel, avoiding the per-query process spawn the index builder uses.
+        # Omitted means the single `device`.
         devices: str | None = None,
-        # **1バッチのパディング後トークン数の上限。** 件数固定(batch_size)だと、
-        # 文書の長さがばらつくとき長い外れ値で「batch_size × 最長」がVRAMを食う。
-        # 8B・論文単位の実測では batch_size=4 でピーク22GB、8/16 は即OOMした。
-        # 件数ではなくトークン量で区切れば短い文書を多数詰めつつVRAMを一定に保てる
-        # （索引構築 index/faiss_qwen3.py と同じ対策）。None なら batch_size 固定。
+        # **Cap on padded tokens per batch.** With a fixed count, varying document
+        # lengths mean one long outlier makes batch_size x longest eat the VRAM: at
+        # 8B, batch_size=4 peaked at 22GB and 8 or 16 went straight to OOM. Budgeting
+        # tokens instead packs many short documents while keeping VRAM flat (the
+        # same fix as in index/faiss_qwen3.py). None keeps the fixed batch_size.
         max_batch_tokens: int | None = None,
     ):
         self.model_name = model
@@ -73,7 +75,7 @@ class Qwen3Reranker:
         self.fp16 = fp16 and any(str(d).startswith("cuda") for d in self.devices)
         self.max_batch_tokens = max_batch_tokens
 
-        # device -> (tokenizer, model)。_ensure_loaded で埋める。
+        # device -> (tokenizer, model), filled in by _ensure_loaded.
         self._replicas: dict[str, tuple] = {}
         self._prefix_ids: list[int] = []
         self._suffix_ids: list[int] = []
@@ -84,11 +86,12 @@ class Qwen3Reranker:
         if self._replicas:
             return
         dtype = torch.float16 if self.fp16 else torch.float32
-        # **マルチGPU（スレッド並列）のときは torch.compile を使わない。**
-        # compile 済みモデルを複数スレッドから同時に呼ぶと dynamo が
+        # **No torch.compile under multi-GPU (thread parallelism).** Calling a
+        # compiled model from several threads at once makes dynamo fail with
         # 「FX symbolic trace of a dynamo-optimized function is not supported」
-        # で落ちる。compile は実測でほぼ無効果（8B論文単位で188 vs 212ms）なので、
-        # 並列化の利益と引き換えにしても損失はない。1GPU 構成でのみ compile する。
+        # "FX symbolic trace of a dynamo-optimized function". compile measured
+        # almost no benefit anyway (188 vs 212ms), so trading it for parallelism
+        # costs nothing. Only single-GPU setups compile.
         use_compile = self.compile and len(self.devices) == 1
         for device in self.devices:
             tokenizer = AutoTokenizer.from_pretrained(self.model_name, padding_side="left")
@@ -122,14 +125,15 @@ class Qwen3Reranker:
 
         scores = self._score_all(query, [c.text for c in candidates])
 
-        # score を rerank スコア（yes 確率）で**上書きして**返す。
-        # 返り値の並び順だけに順位を乗せると、下流で消える。ReadingAgent は
-        # 検索結果を chunk_id の dict に貯めてから r.score で並べ直すので
-        # (agent/reading.py の _candidate_papers)、元の RRF スコアを残したままだと
-        # rerank の順位が 100% 捨てられ、効果が「100件のプールから20件を選ぶ」
-        # フィルタ効果だけになってしまう。
-        # RRF スコアと yes 確率はスケールが違うが、reranker を設定した run では
-        # 全チャンクが必ずここを通るので、1 run の中でスケールが混ざることはない。
+        # **Overwrite** score with the rerank score (the yes probability). A ranking
+        # carried only by list order is lost downstream: ReadingAgent accumulates
+        # results into a dict keyed by chunk_id and re-sorts by r.score
+        # (_candidate_papers in agent/reading.py), so keeping the original RRF score
+        # would discard 100% of the reranker's ordering and reduce it to a filter
+        # that picks 20 out of a pool of 100.
+        # RRF scores and yes probabilities are on different scales, but with a
+        # reranker configured every chunk passes through here, so the scales never
+        # mix within one run.
         ranked = sorted(
             (replace(c, score=float(s)) for c, s in zip(candidates, scores)),
             key=lambda result: result.score,
@@ -137,13 +141,14 @@ class Qwen3Reranker:
         )
         return ranked[:top_k]
 
-    # ---- スコアリング（マルチGPU・トークン予算バッチ）----------------------
+    # ---- scoring (multi-GPU, token-budget batches) ------------------------------
 
     def _score_all(self, query: str, texts: list[str]) -> list[float]:
-        """全文書をスコアリングする（元の texts の順で返す）。
+        """Score every document, returned in the original order of `texts`.
 
-        長さ順にソートしてバッチを組み、各GPU複製に配ってスレッド並列で流す。
-        書き戻しは元インデックスで行うので、処理順が変わっても結果は変わらない。
+        Batches are formed after sorting by length and handed to the GPU replicas in
+        parallel threads. Results are written back by original index, so a different
+        processing order does not change the output.
         """
         order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
         batches = self._make_batches(order, texts)
@@ -160,7 +165,7 @@ class Qwen3Reranker:
                 run(self.devices[0], batch)
             return scores
 
-        # バッチをラウンドロビンでGPUに割り当て、スレッドで並列実行する。
+        # Assign batches to GPUs round-robin and run the threads in parallel.
         with ThreadPoolExecutor(max_workers=len(self.devices)) as pool:
             futures = [
                 pool.submit(run, self.devices[i % len(self.devices)], batch)
@@ -171,12 +176,13 @@ class Qwen3Reranker:
         return scores
 
     def _make_batches(self, order: list[int], texts: list[str]) -> list[list[int]]:
-        """長さ昇順の order を、件数またはトークン予算でバッチに割る。
+        """Split a length-ascending order into batches by count or token budget.
 
-        max_batch_tokens 指定時は「(件数+1) x 新要素のトークン数 <= 予算」で切る。
-        order は昇順なので後から入る要素が常にバッチ内最長になり、この1条件で
-        パディング後トークン数を予算以下に保てる（索引構築の _token_budget_batches
-        と同じ理屈）。トークン数はモデルの tokenizer で正確に測る。
+        With max_batch_tokens, a batch grows while (count + 1) x tokens(new element)
+        stays within budget. Since the order ascends, the newest element is always the
+        longest in the batch, which keeps padded tokens under the budget (the same
+        reasoning as the index builder's token budgeting). Token counts come from the
+        model's own tokenizer.
         """
         if not self.max_batch_tokens:
             return [
@@ -201,7 +207,7 @@ class Qwen3Reranker:
         return batches
 
     def _score_on(self, device: str, query: str, texts: list[str]) -> list[float]:
-        """指定デバイスの複製で1バッチをスコアリングする。"""
+        """Score one batch on the replica of the given device."""
         tokenizer, model = self._replicas[device]
         pairs = [
             f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {text}"
@@ -216,8 +222,8 @@ class Qwen3Reranker:
             add_special_tokens=False,
         )
         input_ids = [self._prefix_ids + ids + self._suffix_ids for ids in encoded["input_ids"]]
-        # 各系列は budget で既に max_tokens 以下に切り詰め済みなので、ここでの
-        # max_length 指定は不要 (指定すると padding=True 時に警告が出るだけ)。
+        # Each sequence is already truncated below max_tokens by the budget, so no
+        # max_length here (specifying it only warns when padding=True).
         padded = tokenizer.pad(
             {"input_ids": input_ids}, padding=True, return_tensors="pt"
         ).to(device)

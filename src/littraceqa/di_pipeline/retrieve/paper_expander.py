@@ -1,56 +1,51 @@
-"""候補1位論文の「近い論文」で候補列を拡張する（論文→論文展開）。
+"""Paper-to-paper expansion: extend the candidate list with papers near the anchors.
 
-近さの測り方は3種類あり、registry の "expander" として差し替え・併用できる:
+Three ways of measuring "near", used together:
 
-- ``specter2``: SPECTER2(proximity) の埋め込み近傍。意味的な近さ。
-- ``bib_coupling``: 書誌結合。参考文献の arXiv ID 集合の Jaccard で測る。
-- ``bm25_mlt``: 論文全文の more-like-this。anchor の title+abstract をクエリにして
-  構築済みの ``bm25s_paper`` 索引を引く。レキシカルな近さ。
+- ``specter2``: neighbours in SPECTER2(proximity) embedding space. Semantic.
+- ``bib_coupling``: bibliographic coupling — Jaccard over the sets of arXiv IDs
+  each paper cites.
+- ``bm25_mlt``: more-like-this over full paper text, querying the prebuilt
+  ``bm25s_paper`` index with the anchor's title+abstract. Lexical.
 
-取り込み方は**関連ランキングと候補列の RRF 統合**の1通りだけ。``rank()`` が
-既存候補も含めた関連度順を返す（重なった論文を加点するのが目的なので落としてはいけない）。
-統合の式と根拠は agent/reading.py の ``_combine_rrf`` を参照。
+The result enters the candidate list only through the **RRF fusion of ranking A
+and ranking B**. ``rank()`` returns a proximity ordering that still contains
+papers already in the candidate list — overlapping papers are exactly what the
+fusion rewards, so they must not be filtered out. The formula and the reasoning
+live in ``_combine_rrf`` in agent/reading.py.
 
-かつては「追記すべき論文を候補列の決まった位置に差し込む」位置挿入方式もあったが、
-順位融合に全指標で負けたので実装ごと削除した。
+An earlier design spliced the extra papers into fixed positions of the candidate
+list. It lost to rank fusion on every metric and was removed.
 
-**3つとも違う gold を拾うので併用する価値がある**（実測: 候補圏外 gold 37本の回収は
-SPECTER2 15本 / 書誌結合 11本 / 全文MLT 16本で、MLT だけが拾えたのが2本、
-既存2つだけが拾えたのが6本、重複14本）。``fused`` が各ソースの近傍を RRF で融合する。
+**All three are worth keeping because they recover different gold papers**: of 37
+gold papers outside the candidate list, SPECTER2 recovered 15, bibliographic
+coupling 11 and full-text MLT 16; 2 were reachable only through MLT and 6 only
+through the other two. ``fused`` fuses the sources' neighbours with RRF.
 
-書誌結合が効くのは、このコーパスが2024〜2025年の論文しか持たないため。
-同時期の論文は互いに引用できない（TCM は sCT / IMM を引用していない）ので
-引用グラフそのものは繋がらない——実測で anchor から解決できたコーパス内引用は
-1本だけだった。しかし**同じ古い文献を引いている**ので書誌結合なら繋がる
-（TCM とピア3本の Jaccard 0.19〜0.24 に対し、無作為30本は中央値 0.000・最大 0.054）。
+Bibliographic coupling works here *because* the corpus only spans 2024-2025.
+Contemporaries cannot cite each other (TCM cites neither sCT nor IMM), so a
+citation graph barely connects at all — only one in-corpus citation resolved from
+an anchor in practice. But they do **cite the same older work**, which coupling
+picks up (TCM against its three peers scores 0.19-0.24, while 30 random papers
+score a median of 0.000 and at most 0.054).
 
-multi_paper の gold は「トピッククラスタの主要論文」の使い回しで、
-質問文が名指ししないピア論文は**質問→論文**の検索では原理的に拾いにくい
-（クエリ品質監査の実測: 候補50位に入らない evidence 持ち gold 17本）。
-一方でそれらは**正解論文からは近い**。SPECTER2 の proximity アダプタは
-引用近接で学習された論文単位の類似埋め込みなので、候補1位（たいてい
-supporting 本体）を anchor に近傍を引けばクラスタの残りが拾える。
+Multi-paper gold sets reuse "the main papers of a topic cluster", and the peer
+papers the question never names are close to impossible to reach by
+**question->paper** retrieval (17 evidence-backed gold papers fell outside the top
+50). They are, however, **close to the correct paper**. SPECTER2's proximity
+adapter is a paper-level similarity embedding trained on citation proximity, so
+anchoring on the top candidate (usually the supporting paper itself) pulls in the
+rest of the cluster.
 
-検証55件・predictions_8b_chunk_b_merged での実測（anchor上位1×近傍20）:
+Implementation notes:
 
-    candidate_recall          0.836 -> 0.914 (+7.8pt)
-    evidence_candidate_recall 0.908 -> 0.956 (+4.8pt)
-    候補列の伸び              50 -> 平均57本程度（重複除去後）
-
-anchor を3本に増やしても ecr は 0.956 から動かず候補だけ増えた（クラスタの
-中心1本で十分）ため、既定は anchors=1 / neighbors=20。
-
-実装上の要点:
-
-- **構築済みの faiss_specter2_abstract 索引をそのまま読む**。anchor のベクトルは
-  索引から reconstruct() で取り出すので、クエリ時に SPECTER2 モデルのロードも
-  GPU も不要（faiss の CPU 検索1回）。
-- 展開結果の挿入位置は呼び出し側（ReadingAgent）が決める。このクラスは
-  「追加すべき論文IDのリスト」を返すだけ。実測では **max_candidates 直後への
-  挿入**が最良（末尾追記比で cr@20 同一のまま cr@50 が 0.855 -> 0.880。
-  10位挿入は LLM 可視域の候補を押し出して cr@20 を壊す）。
-- 提出（gold_papers）には影響しない。挿入分は LLM が読む max_candidates の
-  範囲外で、apply_paper_cutoff の対象にもならない。
+- **The prebuilt faiss_specter2_abstract index is read as is.** The anchor's
+  vector comes out of the index via reconstruct(), so query time needs neither the
+  SPECTER2 model nor a GPU — one CPU faiss search.
+- Where the expansion lands is the caller's decision (ReadingAgent). This module
+  only returns a ranked list of paper IDs.
+- Submission is unaffected: expanded papers sit outside the `max_candidates` the
+  reading LLM sees.
 """
 
 from __future__ import annotations
@@ -69,23 +64,24 @@ from littraceqa.di_pipeline.contracts import RetrievalResult
 
 _INDEX_FILENAME = "index.faiss"
 _CHUNKS_FILENAME = "chunks.jsonl"
-# bm25s_paper 索引が並べて書き出す「1論文=1ドキュメント」の本文。
+# The "one paper = one document" text the bm25s_paper index writes alongside it.
 _PAPERS_FILENAME = "papers.jsonl"
 _PAPER_ID_RE = re.compile(r'"paper_id":\s*"([^"]+)"')
 
-# 参考文献から arXiv ID を拾う。MinerU の出力は "ar X iv : 2403.06807" のように
-# 字間が割れることがあるので、間の空白を許す。
+# Pull arXiv IDs out of the references. MinerU output can break the characters
+# apart ("ar X iv : 2403.06807"), so whitespace is tolerated between them.
 _ARXIV_RE = re.compile(r"ar\s*X\s*iv[:\s]*(\d{4}\.\d{4,5})")
 
 class PaperExpander(Protocol):
-    """論文→論文の近さで「起点に似た論文」を順位付けする（ランキングB）。
+    """Rank papers by proximity to the anchors (ranking B).
 
-    **起点（anchor）は呼び出し側が決めて渡す。** どの論文を起点にするかは
-    A/B 統合の判断（`agent/reading.py` の `_anchor_papers`）なので、expander は
-    「渡された起点の近傍を返す」ことだけを担う。
+    **The caller chooses the anchors and passes them in.** Which papers anchor the
+    expansion is a fusion decision (`_anchor_papers` in agent/reading.py), so an
+    expander is responsible for nothing but returning their neighbours.
 
-    返り値から**既存候補を除外しない**。既存候補と重なる論文こそ RRF 統合での
-    加点対象なので、ここで落とすと統合の意味が消える（`_combine_rrf` 参照）。
+    **Papers already in the candidate list are not excluded** from the result:
+    overlapping papers are exactly what the RRF fusion rewards, so dropping them
+    here would defeat it (see `_combine_rrf`).
     """
 
     def rank(self, anchors: list[str]) -> list[str]: ...
@@ -94,10 +90,10 @@ class PaperExpander(Protocol):
 def _interleave(
     pools: list[list[str]], limit: int, exclude: set[str] | None = None
 ) -> list[str]:
-    """複数 anchor の近傍リストをランク順に交互配置して1本にする。
+    """Interleave several anchors' neighbour lists by rank into one list.
 
-    1つの anchor の遠い近傍より、別の anchor の近い近傍を先に置く。
-    ``exclude`` に入っている論文は飛ばす（``rank()`` は何も除外しない）。
+    A near neighbour of one anchor comes before a far neighbour of another.
+    Papers in ``exclude`` are skipped (``rank()`` excludes nothing).
     """
     seen = set(exclude or ())
     merged: list[str] = []
@@ -110,18 +106,18 @@ def _interleave(
 
 
 class Specter2PaperExpander:
-    """SPECTER2(proximity) 埋め込みの近傍。構築済みの faiss 索引をそのまま読む。"""
+    """Neighbours in SPECTER2(proximity) space, read from the prebuilt faiss index."""
 
     def __init__(self, index_dir: str, neighbors: int = 20):
         self.index_dir = Path(index_dir)
         self.neighbors = neighbors
-        # 索引のロードは初回 rank() まで遅延する（--build だけの実行や
-        # テストで索引が無くても構築できるように）。
+        # Loading is deferred to the first rank(), so a --build-only run or a test
+        # can construct this without the index existing.
         self._index: faiss.Index | None = None
         self._row_of: dict[str, int] = {}
         self._pid_of: dict[int, str] = {}
-        # rerank 用に title+abstract の本文も持っておく（この索引の chunks.jsonl に
-        # 入っているので、別途チャンクストアを読む必要はない）。
+        # Keep the title+abstract text too; it lives in this index's chunks.jsonl,
+        # so no separate chunk store is needed.
         self._chunk_of: dict[str, dict] = {}
 
     def _load(self) -> None:
@@ -130,14 +126,14 @@ class Specter2PaperExpander:
             for row, line in enumerate(handle):
                 chunk = json.loads(line)
                 paper_id = chunk.get("paper_id", "")
-                # abstract 索引は1論文1行だが、複数行あっても最初の行を使う。
+                # The abstract index has one row per paper; if more, take the first.
                 if paper_id and paper_id not in self._row_of:
                     self._row_of[paper_id] = row
                     self._pid_of[row] = paper_id
                     self._chunk_of[paper_id] = chunk
 
     def _pools(self, anchors: list[str]) -> list[list[str]]:
-        """anchor ごとの近傍リスト（近い順）。"""
+        """Each anchor's neighbours, nearest first."""
         if not anchors:
             return []
         if self._index is None:
@@ -164,15 +160,17 @@ class Specter2PaperExpander:
         return _interleave(self._pools(anchors), self.neighbors)
 
 class BibCouplingExpander:
-    """書誌結合（参考文献の共有）で近い論文を返す。
+    """Papers that are near by bibliographic coupling (shared references).
 
-    各論文の全文から参考文献の arXiv ID を抜き、ID 集合の Jaccard で近さを測る。
-    **引用グラフ（A が B を引く）ではない**。このコーパスは2024〜2025年しか無く
-    同時期の論文は互いに引用できないので、引用グラフは繋がらない（実測で anchor から
-    解決できたコーパス内引用は1本）。一方、同じ古典を引いているかは測れる。
+    Pulls the arXiv IDs each paper cites out of its full text and measures Jaccard
+    over those sets. **This is not a citation graph** (A cites B): the corpus only
+    spans 2024-2025, contemporaries cannot cite each other, and in practice exactly
+    one in-corpus citation resolved from an anchor. What it can measure is whether
+    two papers cite the same older work.
 
-    索引はコーパス全走査で作り、``cache_path`` に pickle で保存する（実測47秒、
-    25,012論文 / 68,418 ID）。2回目以降はキャッシュを読むだけ。GPU 不要。
+    The index is built by one full pass over the corpus and pickled to
+    ``cache_path`` (47 seconds, 25,012 papers, 68,418 IDs). Later runs just read the
+    cache. No GPU.
     """
 
     def __init__(
@@ -185,8 +183,8 @@ class BibCouplingExpander:
         self.chunks_path = Path(chunks)
         self.cache_path = Path(cache_path)
         self.neighbors = neighbors
-        # 共有文献がこの本数未満のペアは切る。1本だけの共有は汎用的な引用
-        # （Adam, ResNet 等）で繋がってしまい、ノイズにしかならない。
+        # Drop pairs sharing fewer references than this. A single shared reference
+        # is usually a generic citation (Adam, ResNet) and is pure noise.
         self.min_shared = min_shared
         self._refs: dict[str, set[str]] | None = None
         self._inv: dict[str, set[str]] = {}
@@ -202,7 +200,7 @@ class BibCouplingExpander:
         self._inv = payload["inv"]
 
     def _build(self) -> dict:
-        """chunks.jsonl を1回走査して {論文 -> 引用arXiv ID} と転置索引を作る。"""
+        """One pass over chunks.jsonl to build {paper -> cited arXiv IDs} and its inverse."""
         refs: dict[str, set[str]] = {}
         current: str | None = None
         buffer: list[str] = []
@@ -247,9 +245,9 @@ class BibCouplingExpander:
             for other, count in shared.items()
             if count >= self.min_shared
         }
-        # 同点は paper_id で決める。scores は set を走査して作るので、これが無いと
-        # 同点の並びが**プロセスごとに変わる**（文字列ハッシュの乱択）。実測で候補列の
-        # 40%強のクエリが実行のたびに入れ替わり、cr@20 が 0.4pt ぶれた。
+        # Break ties on paper_id. scores is built by iterating a set, so without
+        # this the order of ties **varies per process** (string hash randomisation).
+        # Measured: 40%+ of queries reordered between runs, moving cr@20 by 0.4pt.
         return sorted(scores, key=lambda p: (-scores[p], p))[: self.neighbors]
 
     def _pools(self, anchors: list[str]) -> list[list[str]]:
@@ -260,21 +258,21 @@ class BibCouplingExpander:
         return [self._neighbors(a) for a in anchors]
 
     def rank(self, anchors: list[str]) -> list[str]:
-        """書誌結合の近さ順。"""
+        """Ordered by bibliographic-coupling proximity."""
         return _interleave(self._pools(anchors), self.neighbors)
 
 def _json_string_prefix(line: str, start: int, max_chars: int) -> str:
-    """JSON1行の ``start`` 位置から始まる文字列値の先頭 ``max_chars`` 文字を復号する。
+    """Decode the first ``max_chars`` of the JSON string value starting at ``start``.
 
-    papers.jsonl は1行が数百KB〜数MBあるので、行全体を ``json.loads`` すると
-    27,489行ぶんで数分かかる。閉じ引用符まで読まずに先頭だけ取りたいので、
-    エスケープを自前で解きながら必要な分だけ進める。
+    A line of papers.jsonl runs from hundreds of KB to several MB, so ``json.loads``
+    on whole lines takes minutes across 27,489 of them. This walks only as far as
+    needed, unescaping by hand, instead of reading to the closing quote.
     """
     out: list[str] = []
     i = start
     while i < len(line) and len(out) < max_chars:
         char = line[i]
-        if char == '"':  # 文字列値の終わり（本文がとても短い論文）
+        if char == '"':  # end of the string value (a paper with very little text)
             break
         if char == "\\":
             escape = line[i : i + 6] if line[i + 1 : i + 2] == "u" else line[i : i + 2]
@@ -290,19 +288,20 @@ def _json_string_prefix(line: str, start: int, max_chars: int) -> str:
 
 
 class BM25MLTExpander:
-    """論文全文の more-like-this。anchor の title+abstract で `bm25s_paper` 索引を引く。
+    """More-like-this over full paper text: query `bm25s_paper` with the anchor's title+abstract.
 
-    SPECTER2（abstract の意味近傍）とも書誌結合（引用文献の共有）とも違い、
-    **本文全体のレキシカル一致**で近さを測る。LLM 呼び出しゼロ・追加の索引構築ゼロで、
-    構築済みの `bm25s_paper`（論文1本=1ドキュメントの BM25）をそのまま読む。
+    Independent of both SPECTER2 (semantic proximity of abstracts) and bibliographic
+    coupling (shared references), this measures **lexical overlap across the whole
+    body**. No LLM calls and nothing extra to build: it reuses the prebuilt
+    `bm25s_paper` index (BM25 with one document per paper).
 
-    ``papers.jsonl`` は 2.5GB あるが**クエリ時には読まない**:
+    ``papers.jsonl`` is 2.5GB but is **never read at query time**:
 
-    - BM25 本体は ``mmap=True`` で開くので npy(490MB) を RAM に載せない。
-    - 行番号 -> paper_id と anchor 用の title+abstract は初回1回だけ流し読みして
-      pickle にキャッシュする（BibCouplingExpander の refs.pkl と同じ作法）。
-      各行の text は "[venue year] title\\n" + abstract + 本文… の順なので、
-      先頭 ``query_chars`` 文字を取れば title+abstract になる。
+    - BM25 itself opens with ``mmap=True``, so the 490MB npy never enters RAM.
+    - The row -> paper_id map and the anchors' title+abstract are streamed once and
+      pickled (the same approach as BibCouplingExpander's refs.pkl). Each line's text
+      runs "[venue year] title\n" + abstract + body, so the first ``query_chars``
+      characters are exactly title+abstract.
     """
 
     def __init__(
@@ -310,8 +309,9 @@ class BM25MLTExpander:
         index_dir: str,
         cache_path: str,
         neighbors: int = 20,
-        # anchor のクエリに使う先頭文字数。title+abstract を覆う程度に取る
-        # （短い abstract では本文の冒頭まで入るが、MLT のクエリとしては害がない）。
+        # How many leading characters of the anchor to use as the query — enough to
+        # cover title+abstract. With a short abstract this reaches into the body,
+        # which does no harm as an MLT query.
         query_chars: int = 1200,
     ):
         self.index_dir = Path(index_dir)
@@ -334,7 +334,7 @@ class BM25MLTExpander:
         self._bm25 = bm25s.BM25.load(str(self.index_dir), load_corpus=False, mmap=True)
 
     def _build(self) -> dict:
-        """papers.jsonl を1回流し読みして {行番号 -> paper_id} と title+abstract を作る。"""
+        """One streaming pass over papers.jsonl for {row -> paper_id} and title+abstract."""
         pids: list[str] = []
         text: dict[str, str] = {}
         with open(self.index_dir / _PAPERS_FILENAME, encoding="utf-8") as handle:
@@ -374,15 +374,16 @@ class BM25MLTExpander:
         return [self._neighbors(a) for a in anchors]
 
     def rank(self, anchors: list[str]) -> list[str]:
-        """全文 BM25 の近さ順。"""
+        """Ordered by full-text BM25 proximity."""
         return _interleave(self._pools(anchors), self.neighbors)
 
 class FusedPaperExpander:
-    """複数の expander の近傍を RRF で融合する。
+    """Fuse several expanders' neighbours with RRF.
 
-    SPECTER2（意味的な近さ）と書誌結合（引用文献の共有）は違う gold を拾うので、
-    片方に寄せず順位融合する。重み付けの根拠が無いので RRF（順位のみを使う、
-    スコアのスケールに依存しない）を使う——検索側の fuser と同じ考え方。
+    The sources recover different gold papers, so neither is favoured; their
+    rankings are fused. There is no principled basis for weighting them, hence RRF,
+    which uses ranks only and is insensitive to score scale — the same reasoning as
+    the retrieval-side fuser.
     """
 
     def __init__(
@@ -404,5 +405,5 @@ class FusedPaperExpander:
         return ordered[: self.neighbors]
 
     def rank(self, anchors: list[str]) -> list[str]:
-        """各ソースの近傍ランキングを RRF 融合する。"""
+        """RRF-fuse each source's neighbour ranking."""
         return self._fuse([source.rank(anchors) for source in self.sources])

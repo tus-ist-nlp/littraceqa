@@ -1,21 +1,23 @@
-"""LitTraceQA 検索システムの構成そのもの。**ここを読めば全体が分かる**ようにしてある。
+"""The retrieval system itself. **Read this file to understand the whole pipeline.**
 
-質問1件が候補論文50本になるまでの流れ:
+How one question becomes 50 candidate papers:
 
-    質問
-     ├─ 会議名・年の制約を1回だけ抽出（AttributeExtractor）
-     ├─ LLM がサブクエリ4本に分解                     ┐
-     │   各サブクエリごとに:                           │
-     │     3索引を引く（chunk BM25 / paper BM25 / Qwen3-8B）
-     │     論文単位RRF で融合（1論文1票）              │ 反復
-     │     Seed Expansion（1位論文の語彙で引き直す）    │ 最大3周
-     │     Qwen3-Reranker-8B で採点し、順位融合         │
-     ├─ 上位20論文を読解 LLM に読ませ、根拠と充足を判定  │
-     └─ 足りなければ不足点から再分解して戻る            ┘
+    question
+     ├─ extract the venue/year constraint once (AttributeExtractor)
+     ├─ an LLM splits the question into 4 subqueries          ┐
+     │   for each subquery:                                    │
+     │     query 3 indexes (chunk BM25 / paper BM25 / Qwen3-8B)│
+     │     fuse per paper (one vote per paper)                 │ iterate,
+     │     seed expansion (re-query with the top paper's terms)│ at most
+     │     score with Qwen3-Reranker-8B, blend the ranks       │ 3 rounds
+     ├─ show the top 20 papers to a reading LLM, which picks    │
+     │   the evidence and says whether it is sufficient         │
+     └─ if not, re-split from what is missing and loop back    ┘
         ↓
-    ランキングA（質問→論文）と B（論文→論文展開）を RRF 統合 → 候補50本
+    fuse ranking A (question→paper) with ranking B (paper→paper) → 50 candidates
 
-各機構の実測と選定理由は CLAUDE.md、実装は各モジュールの docstring にある。
+Measurements and the reasoning behind each value live in CLAUDE.md; the
+implementations live in each module's docstring.
 """
 
 from __future__ import annotations
@@ -53,26 +55,29 @@ from littraceqa.di_pipeline.retrieve.paper_expander import (
 from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
 from littraceqa.di_pipeline.retrieve.reranker import Qwen3Reranker
 
-# APIキー等はリポジトリ直下の .env から読む（コードにも yaml にも書かない）。
-# 既に export されている環境変数は上書きしない。
+# API keys and the like come from .env at the repo root (never from code or yaml).
+# Variables already exported in the environment win.
 load_dotenv(ROOT / ".env")
 
-# 前処理の名前。索引ディレクトリの中間パスに入る（`{index_dir}/mineru/bm25s`）ので、
-# 別の前処理で作り直しても既存の索引と衝突しない。
+# Name of the preprocessor. It sits in the middle of every index path
+# (`{index_dir}/mineru/bm25s`), so rebuilding with a different preprocessor
+# cannot clobber the existing indexes.
 PROCESS = "mineru"
 
-# SPECTER2 の索引名。**論文単位のモデルなので title+abstract だけを索引する**
-# （proximity アダプタは title+abstract で学習されており、本文の断片・表・数式を
-# 個別に埋め込むと学習時の入力分布から外れる）。名前に abstract が入っているのは、
-# かつて全チャンク版と並存させたときの区別の名残。
+# Name of the SPECTER2 index. **The model works on whole papers, so only
+# title+abstract is indexed** — the proximity adapter was trained on
+# title+abstract, and embedding body fragments, tables or equations separately
+# takes the input off that distribution. The "abstract" suffix is a leftover
+# from when a whole-chunk variant existed alongside it.
 SPECTER2_INDEX_NAME = "faiss_specter2_abstract"
 
 
 @dataclass(frozen=True)
 class Paths:
-    """実行環境ごとに変わる場所だけ。**手法の設定はここに書かない。**
+    """Only the locations that differ per machine. **No method settings here.**
 
-    `configs/paths/*.yaml` から読む（マシンによって置き場所が違うため yaml に出してある）。
+    Loaded from `configs/paths/*.yaml`, which exists because machines keep their
+    data in different places.
     """
 
     pdf_dir: Path
@@ -93,30 +98,33 @@ class Paths:
 
     @property
     def chunks(self) -> Path:
-        """前処理が書き出したチャンク（索引と読解の両方が読む）。"""
+        """Chunks written by the preprocessor (both indexing and reading use them)."""
         return self.chunks_dir / f"{PROCESS}_chunks.jsonl"
 
     def index(self, name: str) -> Path:
-        """索引1本の置き場所。`name` は索引ごとに固有にする（上書き事故を防ぐ）。"""
+        """Where one index lives. Keep `name` unique per index — a collision
+        silently overwrites an index that took hours to build."""
         return self.index_dir / PROCESS / name
 
 
 def build_preprocessor(paths: Paths) -> MinerUChunker:
-    """PDF → チャンク。`scripts/run_mineru.py` が作った content_list.json を読むだけ。"""
+    """PDF → chunks. Only reads the content_list.json that scripts/run_mineru.py wrote."""
     return MinerUChunker(pdf_dir=str(paths.pdf_dir), max_chars_per_chunk=2000)
 
 
 def build_indexers(paths: Paths) -> list:
-    """索引3本。`--build` はこれと前処理だけを使う（reranker も ChunkStore も要らない）。"""
+    """The three search indexes. `--build` needs only these plus the preprocessor
+    (no reranker, no ChunkStore)."""
     return [
-        # 質問語が1チャンクに揃うとき強い。
+        # Strong when the question's terms land inside a single chunk.
         BM25Index(index_dir=str(paths.index("bm25s"))),
-        # 論文全体を1ドキュメントとして引く。質問語が論文内の離れた場所に分散していると
-        # chunk 側は弱くなる（1チャンクに語が揃わない）ので併用する。
+        # Treats a whole paper as one document. When the question's terms are
+        # scattered across a paper, no single chunk holds them all and the chunk
+        # index goes weak, so the two are used together.
         BM25PaperIndex(index_dir=str(paths.index("bm25s_paper"))),
-        # 語彙が一致しない言い換えを拾う。モデル設定は index/faiss_qwen3.py に
-        # 置いてある（分散ビルドのスクリプトと共有するため）。検索時は devices[0]
-        # しか使わないので1枚だけ指定し、残りを reranker に空ける。
+        # Catches paraphrases that share no vocabulary. Model settings live in
+        # index/faiss_qwen3.py so the distributed builder can share them. Only one
+        # GPU here: search uses devices[0] only, leaving the rest for the reranker.
         Qwen3FAISSIndex(
             index_dir=str(paths.index(QWEN3_INDEX_NAME)),
             devices="cuda:0",
@@ -126,18 +134,20 @@ def build_indexers(paths: Paths) -> list:
 
 
 def build_retriever(paths: Paths) -> HybridRetriever:
-    """質問1本 → チャンクの順位。3索引を論文単位RRFで融合し、reranker と順位融合する。
+    """One question → a ranking of chunks. Fuses 3 indexes per paper, then blends
+    the reranker's ranking into it.
 
-    **チャンクが既にある前提**（`anchor_store` が読む）。索引構築の実行では
-    `build_indexers()` を直接使う。
+    **Assumes the chunks already exist** (`anchor_store` reads them). Index builds
+    use `build_indexers()` directly.
     """
     return HybridRetriever(
         indexers=build_indexers(paths),
-        # **1論文1票。** チャンク単位で融合すると、長い論文・表が多い論文が
-        # チャンク数だけで上位を占有する（評価は論文単位なので指標に直接効く）。
+        # **One vote per paper.** Fusing per chunk lets long papers and
+        # table-heavy papers occupy the top purely by chunk count, and the metric
+        # is per paper, so that distortion lands straight on the score.
         fuser=PaperRRFFuser(k=60, chunks_per_paper=3),
-        # マルチGPU 指定時は torch.compile が自動で無効になる（compile 済みモデルを
-        # 複数スレッドから呼ぶと dynamo が落ちるため）。モデルの読み込みは遅延。
+        # Multi-GPU disables torch.compile automatically (dynamo breaks when a
+        # compiled model is called from several threads). Weights load lazily.
         reranker=Qwen3Reranker(
             model="Qwen/Qwen3-Reranker-8B",
             devices="cuda:1,cuda:2",
@@ -148,29 +158,31 @@ def build_retriever(paths: Paths) -> HybridRetriever:
         ),
         per_index_k=100,
         pool_k=200,
-        # 1位論文の語彙を質問に足して引き直す。**reranker の前**なので推論は増えない。
+        # Append the top paper's vocabulary to the question and query again.
+        # **Runs before the reranker**, so inference cost does not go up.
         seed_expansion=SeedExpansion(query_chars=512),
         anchor_store=ChunkStore(str(paths.chunks)),
-        # reranker に順位を置き換えさせず、融合前の順位と混ぜる。
+        # Blend the reranker's ranking instead of letting it replace the order.
         rerank_blend=RerankBlend(
             original_weight=0.6, rerank_weight=0.4, rrf_k=60, protect_top=20
         ),
-        # 質問が会議名を明示したときだけ発火する。取れなければ従来のコードパス。
+        # Only fires when the question names a venue; otherwise the original path.
         attribute_extractor=AttributeExtractor(paths.paper_metadata),
         fetch_safety=1.5,
-        # **上げてはいけない。** per_index_k に合わせて 40000 にしたところ、
-        # NAACL(選択率4.3%) で faiss search が 1.5秒 -> 91.1秒（61倍）に膨らんだ。
+        # **Do not raise this.** Matching it to per_index_k (40000) blew up faiss
+        # search from 1.5s to 91.1s on NAACL (4.3% selectivity).
         max_fetch_k=3000,
         min_filtered_results=10,
     )
 
 
 def build_expander_index(paths: Paths) -> Specter2FAISSIndex:
-    """ランキングB が読む SPECTER2 索引。**検索の索引ではないので `build_indexers` に
-    入れない**（融合には渡らず、`build_expander()` が近傍を引くためだけに使う）。
+    """The SPECTER2 index that ranking B reads. **Not a search index, so it is not
+    in `build_indexers`** — it never reaches the fuser and only serves
+    `build_expander()` looking up neighbours.
 
-    それでも `--build` では作る必要がある。作る側と読む側が別クラスなので、
-    ここに置いておかないと「索引を作り直す方法が無い」状態になる。
+    `--build` still has to create it. The writer and the reader are different
+    classes, so without this there would be no way to rebuild the index at all.
     """
     return Specter2FAISSIndex(
         index_dir=str(paths.index(SPECTER2_INDEX_NAME)),
@@ -182,27 +194,30 @@ def build_expander_index(paths: Paths) -> Specter2FAISSIndex:
 
 
 def build_expander(paths: Paths) -> FusedPaperExpander:
-    """論文→論文の近さ（ランキングB）。**3つは違う gold を拾うので併用する。**
+    """Paper-to-paper proximity (ranking B). **The three sources find different
+    gold papers, which is why all three are used.**
 
-    候補圏外 gold 37本の回収は SPECTER2 15本 / 書誌結合 11本 / 全文MLT 16本で、
-    MLT だけが拾えた gold が2本、既存2つだけが拾えたのが6本、重複14本。
+    Of 37 gold papers that fell outside the candidate list, SPECTER2 recovered 15,
+    bibliographic coupling 11 and full-text MLT 16; 2 were reachable only via MLT.
     """
     return FusedPaperExpander(
         sources=[
-            # SPECTER2(proximity) の近傍。構築済み索引を読むだけ（追加構築なし）。
+            # Neighbours in SPECTER2(proximity) space. Reads a prebuilt index.
             Specter2PaperExpander(
                 index_dir=str(paths.index(SPECTER2_INDEX_NAME)), neighbors=100
             ),
-            # 参考文献の arXiv ID 集合の Jaccard。**引用グラフではない**——コーパスは
-            # 2024〜2025年しか無く同時期の論文は互いに引用できないので、
-            # 共有している古い文献で繋ぐ。min_shared=2 は汎用引用（Adam 等）を切るため。
+            # Jaccard over the arXiv IDs each paper cites. **Not a citation graph** —
+            # this corpus only covers 2024-2025, so contemporaries cannot cite each
+            # other; the link comes from older work they share. min_shared=2 drops
+            # generic citations (Adam, ResNet) that would connect everything.
             BibCouplingExpander(
                 chunks=str(paths.chunks),
                 cache_path=str(paths.index("bib_coupling") / "refs.pkl"),
                 neighbors=100,
                 min_shared=2,
             ),
-            # 論文全文の more-like-this。構築済みの bm25s_paper 索引を引く。
+            # More-like-this over full paper text, querying the prebuilt
+            # bm25s_paper index.
             BM25MLTExpander(
                 index_dir=str(paths.index("bm25s_paper")),
                 cache_path=str(paths.index("bm25_mlt") / "anchor_text.pkl"),
@@ -216,13 +231,13 @@ def build_expander(paths: Paths) -> FusedPaperExpander:
 
 
 def build_agent(paths: Paths, llm: LLMClient | None = None) -> ReadingAgent:
-    """分解 → 読解 → 不足分の再検索 を繰り返し、最後に A/B を統合して候補50本を出す。"""
+    """Split → read → re-search for what is missing, then fuse A and B into 50."""
     return ReadingAgent(
         build_retriever(paths),
         llm=llm or AzureOpenAILLM(reasoning_effort="medium"),
         paper_expander=build_expander(paths),
-        # **k=10。** k=60 だとリスト長50本の現状では「A にも B にも載っていれば
-        # どれだけ深くても A の1位に勝つ」（2/(61+r) > 1/61 ⟺ r < 61）。
+        # **k=10.** At k=60, with lists of 50, a paper present in both rankings
+        # beats A's top hit no matter how deep it sits (2/(61+r) > 1/61 for r < 61).
         combine=CombineConfig(
             rrf_k=10,
             related_weight=1.0,
@@ -237,8 +252,9 @@ def build_agent(paths: Paths, llm: LLMClient | None = None) -> ReadingAgent:
             chunks_per_paper=2,
             snippet_chars=1800,
             max_papers=10,
-            # 表チャンクは数値と短いラベルが密で、論文が質問の主題でなくても
-            # 表1枚で代表スコアが跳ね上がる。**読解には従来どおり渡る。**
+            # Table chunks are dense with numbers and short labels, so a single
+            # table can spike a paper's representative score even when the paper
+            # is off-topic. **They still reach the reading LLM as usual.**
             paper_score_skip_chunk_types=("table",),
         ),
     )

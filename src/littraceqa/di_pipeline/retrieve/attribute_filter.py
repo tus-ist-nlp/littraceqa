@@ -1,29 +1,28 @@
-"""質問文が明示した会議名・年で検索結果を絞り込むための抽出器とフィルタ。
+"""Narrow results by the venue and year the question states.
 
-LitTraceQA の質問には「Which NAACL 2025 papers ...」「Among ICML 2025 papers ...」
-のように**検索範囲を会議名で明示している**ものがある。検証55件では5件が該当し、
-そのとき gold 論文がその制約を満たす率は 18/18 = 100% だった。つまり制約が
-述べられていればフィルタは常に正しい。
+Some LitTraceQA questions name their search scope outright ("Which NAACL 2025
+papers ...", "Among ICML 2025 papers ..."). Five of 55 validation queries do, and
+in those the gold papers satisfied the constraint 18 times out of 18 — when the
+constraint is stated, filtering on it is always right.
 
-索引の改修は要らない。``RetrievalResult.metadata`` には既に venue / year が
-入っている（``preprocess/mineru_chunker.py`` の metadata_base）ので、
-検索結果を後段で落とすだけでどの indexer にも同じように効く。
+No index changes are needed. ``RetrievalResult.metadata`` already carries venue
+and year (see metadata_base in ``preprocess/mineru_chunker.py``), so dropping
+results afterwards works identically for every index.
 
-**発火条件は「会議名が一意に取れたとき」だけ**にしてある。理由:
+**It only fires when exactly one venue can be extracted.** Why:
 
-* 年だけで絞っても意味が薄い。コーパスは 2025 が 91.3%、2024 が 8.7% の2値しか
-  なく、2025 で絞っても 8.7% しか削れない。
-* 「Across all venues, among 2025 ...」のように**明示的に全会議を対象**とする
-  質問がある（gold は iccv / neurips / icml にまたがっていた）。
-* 「Which CVPR 2025 papers cite UniAD (..., CVPR2023)」のように、**引用先の
-  会議名**が混ざることがある。会議名が2種類以上見つかったら諦める。
+* Filtering on the year alone buys little: the corpus is 91.3% 2025 and 8.7% 2024.
+* Some questions target every venue explicitly ("Across all venues, among
+  2025 ..."), and their gold spanned iccv / neurips / icml.
+* A cited paper's venue can leak in ("Which CVPR 2025 papers cite UniAD (...,
+  CVPR2023)"), so finding two or more venues means giving up.
 
-取れなかったときは空の AttributeFilter を返し、呼び出し側は現状どおりの
-コードパスを通る（＝本番の質問が会議名を書かなければ挙動は一切変わらない）。
+When nothing is extracted an empty AttributeFilter is returned and the caller
+takes its normal path, so questions that name no venue behave exactly as before.
 
-**正規表現だけで足りている。** 検証55件で取り逃がしはゼロ（会議名に言及する7件を
-発火5件／`all venues` の意図的除外2件ですべて正しく処理）。別名 "NIPS" や語順違いに
-備えて LLM を後段に足した版も作ったが、実測での利得がゼロだったので消してある。
+**Regular expressions are enough.** Across the 55 validation queries nothing was
+missed: 5 fired and 2 `all venues` cases were correctly declined. An LLM fallback
+for aliases such as "NIPS" was built and removed after measuring zero gain.
 """
 
 from __future__ import annotations
@@ -35,21 +34,21 @@ from pathlib import Path
 
 from littraceqa.di_pipeline.agent.json_utils import parse_json_object
 
-# コーパスに存在する会議名（data/paper_metadata.jsonl の venue 全9値）。
-# 表記ゆれの吸収のため、小文字化したキーで引く。
+# The venues present in the corpus (all 9 values of venue in
+# data/paper_metadata.jsonl). Looked up lower-cased to absorb spelling variants.
 _VENUES = ("NeurIPS", "ICLR", "EMNLP", "ACL", "ICML", "CVPR", "ICCV", "ECCV", "NAACL")
 
-# 「全会議が対象」と明示している質問。会議名を拾ってはいけない。
+# Questions that explicitly target every venue; no venue must be extracted.
 _ALL_VENUES_RE = re.compile(r"\ball\s+venues\b", re.I)
 
-# 会議名の直後（空白・カンマ・アポストロフィを挟んで）に付く年だけを採用する。
-# "CVPR 2025 papers cite UniAD (..., CVPR2023)" のように離れた年に引きずられないため。
+# Only a year adjacent to the venue (separated by space, comma or apostrophe),
+# so "CVPR 2025 papers cite UniAD (..., CVPR2023)" is not dragged to the distant year.
 _YEAR_RE = r"(20\d{2})"
 
 
 @dataclass(frozen=True)
 class AttributeFilter:
-    """検索結果に掛ける属性の制約。空なら制約なし。"""
+    """The attribute constraint applied to results. Empty means no constraint."""
 
     venue: str | None = None
     year: int | None = None
@@ -58,7 +57,7 @@ class AttributeFilter:
         return self.venue is None and self.year is None
 
     def matches(self, metadata: dict | None) -> bool:
-        """チャンクの metadata がこの制約を満たすか。"""
+        """Does this chunk's metadata satisfy the constraint?"""
         metadata = metadata or {}
         if self.venue is not None and metadata.get("venue") != self.venue:
             return False
@@ -68,11 +67,11 @@ class AttributeFilter:
 
 
 class AttributeExtractor:
-    """質問文から AttributeFilter を作り、その選択率を答える。
+    """Builds an AttributeFilter from a question and reports its selectivity.
 
-    選択率は paper_metadata.jsonl の論文数から求める（チャンク数ではなく論文数の
-    比を使う。1論文あたりのチャンク数は会議によって大きくは変わらないので、
-    取得件数の逆算にはこれで足りる）。
+    Selectivity is computed from paper counts in paper_metadata.jsonl rather than
+    chunk counts. Chunks per paper do not vary much by venue, so the ratio is close
+    enough for working back to a fetch size.
     """
 
     def __init__(self, paper_metadata: str | Path):
@@ -80,7 +79,7 @@ class AttributeExtractor:
         self._total = 0
         self._counts: dict[tuple[str | None, int | None], int] = {}
         self._load(Path(paper_metadata))
-        # 会議名は語境界で拾う。ACL が NAACL の一部に一致しないよう \b を両側に置く。
+        # Match venues on word boundaries so ACL does not match inside NAACL.
         self._venue_re = re.compile(
             r"\b(" + "|".join(re.escape(v) for v in _VENUES) + r")\b", re.I
         )
@@ -100,23 +99,21 @@ class AttributeExtractor:
         self._total = len(papers)
         counts: dict[tuple[str | None, int | None], int] = {}
         for venue, year in papers:
-            # (venue, None) / (venue, year) / (None, year) を数えておき、
-            # 会議名・年のどちらを欠いた制約でも選択率を引けるようにする。
-            # (None, year) は LLM 抽出が「年だけ」の制約を返しうるため必要
-            # （正規表現の抽出器は年だけの制約を作らない）。
+            # Count (venue, None), (venue, year) and (None, year) so selectivity
+            # can be looked up for a constraint missing either part.
             for key in ((venue, None), (venue, year), (None, year)):
                 counts[key] = counts.get(key, 0) + 1
         self._counts = counts
 
     def exists(self, venue: str | None, year: int | None) -> bool:
-        """その (会議名, 年) の組がコーパスに1本でもあるか。"""
+        """Does the corpus contain at least one paper with this (venue, year)?"""
         if venue is None and year is None:
             return False
         return self._counts.get((venue, year), 0) > 0
 
     @staticmethod
     def canonical_venue(name: str | None) -> str | None:
-        """表記ゆれを吸収してコーパスの会議名表記に直す。無い会議なら None。"""
+        """Normalise a spelling variant to the corpus's venue string; None if unknown."""
         if not name:
             return None
         for venue in _VENUES:
@@ -125,36 +122,38 @@ class AttributeExtractor:
         return None
 
     def extract(self, question: str) -> AttributeFilter:
-        """質問文から制約を取り出す。取れなければ空の AttributeFilter。"""
+        """Extract the constraint from a question; an empty AttributeFilter if there is none."""
         if not question or _ALL_VENUES_RE.search(question):
             return AttributeFilter()
 
         found = {self._venue_by_lower[m.group(1).lower()] for m in self._venue_re.finditer(question)}
         if len(found) != 1:
-            # 0個（会議名なし）でも2個以上（引用先が混ざっている）でも諦める。
+            # Neither zero venues nor two or more (a cited venue leaked in) is
+            # usable, so both decline.
             return AttributeFilter()
         venue = next(iter(found))
 
         return AttributeFilter(venue=venue, year=self._adjacent_year(question, venue))
 
     def _adjacent_year(self, question: str, venue: str) -> int | None:
-        """会議名に隣接する年だけを返す。離れた場所の年は無視する。
+        """Return only a year adjacent to the venue, ignoring years elsewhere.
 
-        "Which CVPR 2025 papers cite UniAD (Planning-oriented ..., CVPR2023)" では
-        CVPR2023 も隣接年として拾えてしまうので、複数見つかったら採用しない。
+        In "Which CVPR 2025 papers cite UniAD (Planning-oriented ..., CVPR2023)" the
+        CVPR2023 also reads as adjacent, so finding more than one means declining.
         """
         pattern = re.compile(r"\b" + re.escape(venue) + r"\b[\s,'’]*" + _YEAR_RE, re.I)
         years = {int(m.group(1)) for m in pattern.finditer(question)}
         if len(years) != 1:
             return None
         year = next(iter(years))
-        # コーパスに存在しない年で絞ると必ず空になる。その場合は年を使わない。
+        # A year absent from the corpus would always filter to nothing, so the
+        # year is dropped in that case.
         if self._counts.get((venue, year), 0) == 0:
             return None
         return year
 
     def selectivity(self, attribute_filter: AttributeFilter) -> float:
-        """制約を満たす論文の割合。0除算を避けるため下限を置く。"""
+        """Fraction of papers satisfying the constraint, floored to avoid dividing by zero."""
         if attribute_filter.is_empty() or self._total == 0:
             return 1.0
         matched = self._counts.get((attribute_filter.venue, attribute_filter.year), 0)
@@ -164,7 +163,7 @@ class AttributeExtractor:
 
 
 def filter_results(results: list, attribute_filter: AttributeFilter) -> list:
-    """RetrievalResult の列から制約を満たすものだけを返す。"""
+    """Keep only the results that satisfy the constraint."""
     if attribute_filter.is_empty():
         return list(results)
     return [r for r in results if attribute_filter.matches(r.metadata)]

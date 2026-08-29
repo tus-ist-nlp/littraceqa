@@ -1,27 +1,30 @@
-"""検索 → 読解 → 不足分の再検索 を繰り返す、本命の反復エージェント。
+"""The iterative agent: retrieve, read, re-search for whatever is missing.
 
-過去に試した2つのベースラインは片翼ずつしか持っていなかった（どちらも削除済み）:
+Two earlier baselines each had only one half of this, and both were removed:
 
-* 「反復するが中身を検証しない」型。停止条件を
-  「検索が返した論文の本数 >= しきい値」にすると、retrieve_top_k=20 で検索した時点で
-  初回から満たされてしまい、2周目に入らず反復が空回りした。
-* 「LLM に候補を読ませて選ばせるが1回で終わる」型。足りなくても検索し直さない。
+* Iterate without checking the content. Stopping on "number of papers returned >=
+  threshold" is satisfied immediately at retrieve_top_k=20, so the loop never took
+  a second round.
+* Let an LLM read the candidates and pick, but only once. It never searches again
+  when what it has is not enough.
 
-ReadingAgent はこの2つを合体させる。停止条件を「LLM が根拠として確認できた論文が
-質問に答えるのに足りているか」に置き換えることで、初めて反復が意味を持つ。
+ReadingAgent joins the two. Iteration only becomes meaningful once the stopping
+condition is "do the papers the LLM could actually confirm answer the question".
 
-    1. 質問をサブクエリに分解する
-    2. 各サブクエリで検索する
-    3. 上位候補のチャンクを**全文**（既定1800文字）LLM に読ませ、
-       本当に根拠になる論文と、その根拠チャンクを選ばせる
-    4. LLM が「まだ足りない」と言えば、何が欠けているかを聞いて再分解し 2 に戻る
-    5. 足りたか、max_steps に達したら終了
+    1. split the question into subqueries
+    2. retrieve with each subquery
+    3. show the top candidates' chunks to an LLM **in full** (1800 chars by
+       default) and have it pick the papers that truly carry evidence, plus which
+       chunks that evidence is in
+    4. if the LLM says it is still short, ask what is missing, re-split, go to 2
+    5. stop when it is sufficient, or at max_steps
 
-選ばれた根拠チャンクから Evidence を組み立てる（src/littraceqa/di_pipeline/agent/evidence.py 参照）。
-**Answer（freeform / multiple_choice / table）は埋めない**——回答生成も提出論文の選定も
-読解チーム側の担当なので、このエージェントが渡すのは候補列（candidate_papers）と
-evidence まで。読解 LLM が返す `paper_ids` は反復の停止条件と evidence にだけ使い、
-提出論文の選定には使わない。
+Evidence objects are built from the chosen chunks (see agent/evidence.py).
+**Answer (freeform / multiple_choice / table) is never filled in**: generating
+answers and choosing which papers to submit both belong to the reading team, so
+this agent hands over the candidate list and the evidence and stops there. The
+`paper_ids` the reading LLM returns are used only as the stopping condition, for
+evidence, and as the anchors of ranking B — never to choose the submission.
 """
 
 from __future__ import annotations
@@ -36,39 +39,34 @@ from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, to_gold_pape
 from littraceqa.di_pipeline.retrieve.paper_expander import PaperExpander
 
 
-# 予測ファイルに残す候補論文の本数。看板指標は recall@20 だが、再実行が高コストなので
-# あとから recall@50 まで測れるよう多めに持たせる。
+# How many candidate papers to keep in the prediction file. The headline metric is
+# recall@20, but re-running is expensive, so keep enough to compute recall@50 later.
 CANDIDATE_PAPERS_LIMIT = 50
 
-# `_decompose()` が作らせるサブクエリの本数。**task_family で振り分けない。**
+# How many subqueries `_decompose()` asks for. **Not split by task_family.**
 #
-# 以前は single なら「1〜3個」、multi なら「3〜6個」と指示を分けていたが、その分岐の
-# ためだけに TaskFamilyClassifier が**クエリ1件につき LLM を1回**呼んでいた
-# （本番入力に task_family が無いため）。買えていたものは実測で平均0.58本しかない:
+# Asking for 1-3 on single-paper questions and 3-6 on multi-paper ones bought an
+# average of 0.58 extra subqueries, and cost an LLM call per query just to guess
+# task_family (production input does not carry it). The two estimators were also
+# indistinguishable in accuracy (0.670 vs 0.673 over 55 queries), so there was no
+# basis for branching. Fixing the count at 4 sits between the measured averages and
+# removes one LLM call.
 #
-#   predictions_8b_chunk_b_merged.jsonl の trace（55件）
-#     single 26件: step0 のサブクエリ数 平均 3.08（26件中25件が上限の3本）
-#     multi  29件: 平均 3.66（29件中17件が下限の3本）
-#
-# 推定精度も LLM 0.67 / ヒューリスティック 0.673（55件実測）と差が無く、分岐する
-# 根拠がない。両者の実測値を挟む4本に固定して、LLM 呼び出しを1回減らした。
-#
-# **本数はプロンプトで頼むだけでなく、返り値も機械的に切る。** LLM は
-# `_decompose()` では概ね守る（実測 平均3.3本）が上限を超えることがあり（最大6本）、
-# **本数を書いていなかった `_refine()` では平均8.2〜9.3本・最大20本まで膨らんでいた**。
-# サブクエリ1本 = 検索1回 = reranker が pool_k 件を推論する量なので、ここが
-# そのまま走行時間になる（`pool_k: 1000` の構成で実測 1.73分/本）。
+# **The count is enforced on the return value, not just requested in the prompt.**
+# `_decompose()` mostly complies (3.3 on average) but does overshoot (up to 6), and
+# `_refine()`, which used to state no count at all, ballooned to 8.2-9.3 on average
+# and 20 at worst. One subquery = one retrieval = one reranker pass over pool_k
+# chunks, so this directly sets the wall-clock cost of a run.
 SUBQUERY_COUNT = 4
 
-# サブクエリを作らせる全プロンプトの先頭に置く注意書き。
+# Prepended to every prompt that asks for subqueries.
 #
-# **これが無いと LLM は Google 検索クエリを書く。** 実測（予測ファイルの trace を
-# 集計）では `_refine()` が作るサブクエリの 29〜41% が `site:arxiv.org` /
-# `filetype:pdf` / `site:openaccess.thecvf.com/content/CVPR2025/html` といった
-# Web検索演算子付きで、55件中30〜39件のクエリが影響を受けていた。投げ先は
-# ローカルの BM25 と faiss なので、これらは1件もヒットしない純粋なノイズであり、
-# max_steps=3 の2周目・3周目の検索が丸ごと空振りしていた。
-# （step0 の `_decompose()` では 0% だったが、同じ誤解が起きうるので両方に置く。）
+# **Without it the LLM writes Google queries.** 29-41% of the subqueries `_refine()`
+# produced carried web operators (`site:arxiv.org`, `filetype:pdf`, ...), affecting
+# 30-39 of 55 queries. They go to a local BM25 and faiss index, where such operators
+# match nothing, so rounds 2 and 3 of the loop were retrieving pure noise.
+# (`_decompose()` showed 0%, but the same misunderstanding is possible, so both
+# prompts carry the note.)
 CORPUS_NOTE = (
     "The subqueries are sent to a local search index built over the full text of the "
     "papers (BM25 + dense embeddings). They are NOT sent to a web search engine: "
@@ -80,13 +78,13 @@ CORPUS_NOTE = (
 
 @dataclass
 class SubqueryRun:
-    """1本のサブクエリが返した検索結果を、**検索が返した順のまま**保持する。
+    """One subquery's results, **in the order retrieval returned them**.
 
-    反復ループの `chunks: dict[chunk_id -> RetrievalResult]` は「同じチャンクは
-    スコアが高いほうを残す」max マージなので、どのサブクエリの何位だったかを潰す。
-    順位そのものを後から見たい用途（`scripts/run_search.py --dump-runs` が落とす
-    オフライン再生の土台）のために、**ランキングの出所だけをここに残す**。
-    `chunks` は chunk_id からの引き当て用（捏造チェックと evidence 引き）。
+    The loop's `chunks: dict[chunk_id -> RetrievalResult]` is a max merge (same
+    chunk, keep the higher score), which destroys which subquery ranked it where.
+    **This keeps the provenance of the ranking** for uses that need it later, such
+    as the offline replay basis `scripts/run_search.py --dump-runs` writes.
+    `chunks` remains the lookup by chunk_id (hallucination checks and evidence).
     """
 
     step: int
@@ -96,81 +94,88 @@ class SubqueryRun:
 
 @dataclass(frozen=True)
 class CombineConfig:
-    """ランキングA（質問→論文）と B（論文→論文）の RRF 統合の設定。
+    """How ranking A (question->paper) and B (paper->paper) are fused with RRF.
 
-    **この設定を使うのは ReadingAgent だけ**（`_combine_rrf`）。expander は
-    「渡された起点の近傍を返す」ことしか担わないので、ここの値は持たない。
+    **Only ReadingAgent uses these** (`_combine_rrf`). An expander is responsible
+    for nothing but returning neighbours of the anchors it is handed, so it does
+    not hold any of these values.
     """
 
-    # A と B のどちらの「順位の深さ」を重く見るか。**k が小さいほど上位重視**。
+    # Whether depth of rank or presence in both lists weighs more. **Smaller k
+    # favours the top of each list.**
     #
-    # k=60 では A でも B でも r 位の論文が `2/(61+r)`、A の1位が `1/61` なので
-    # `2/(61+r) > 1/61 ⟺ r < 61`——リスト長50本の現状では**両方に載っていれば
-    # どれだけ深くても A の1位に勝ってしまう**。reranker が1位に置いた論文が、
-    # A の40位 × B の40位の論文に抜かれていた。k=10 なら閾値が `r < 11` になり、
-    # 「両方の**上位**に居るときだけ勝つ」という本来の意味になる。
+    # At k=60 a paper at rank r in both lists scores 2/(61+r) while A's top hit
+    # scores 1/61, and 2/(61+r) > 1/61 holds for r < 61 — with lists of 50, **being
+    # in both wins no matter how deep**. Papers the reranker had put first were
+    # being overtaken by a paper sitting 40th in A and 40th in B. k=10 moves the
+    # threshold to r < 11, restoring the intended meaning: being in both wins only
+    # near the top of both.
     #
-    # 全長A・55件で ecr@5 0.781 -> 0.806 / ecr@20 0.932 -> 0.948、悪化ゼロ。
-    # **`neighbors: 100` とセットで入れる**（片方だけでは効かない）。
+    # Measured over 55 queries with full-length A: ecr@5 0.781 -> 0.806,
+    # ecr@20 0.932 -> 0.948, nothing regressed. **Pair it with neighbors=100** —
+    # neither change does anything on its own.
     rrf_k: int = 60
-    # B 側の重みと下駄。素の RRF（1.0 / 0）が4土台すべてで最良。重みを下げると
-    # B 単独の論文が A の裾より下に落ちて統合の意味が消え、上げると B が候補列を
-    # 占領する。offset を足すと位置挿入に戻っていくだけで効かない。
+    # Weight and offset for the B side. Plain RRF (1.0 / 0) was best on all four
+    # bases: lowering the weight drops B-only papers below A's tail and the fusion
+    # stops meaning anything, raising it lets B take over the candidate list, and an
+    # offset just walks back toward positional insertion.
     related_weight: float = 1.0
     related_offset: int = 0
-    # ランキングB の起点にする候補論文の本数。**増やしてはいけない**——土台4本で
-    # 測ると 3 本で悪化し、2位・3位を B の先頭に据えると、それ自体が
-    # 「A にも B にも居る」2項ぶんを得て本来上位に来る論文を押し下げる。
+    # How many top candidates seed ranking B. **Do not raise this** — 3 was worse on
+    # all four bases. Putting the 2nd and 3rd candidates at the head of B earns them
+    # the same two-term bonus and pushes down papers that belong above them.
     anchors: int = 1
-    # "verdict" にすると、起点に**読解 LLM が根拠を確認した論文**を足す
-    # （`_anchor_papers` 参照）。None なら候補の先頭 `anchors` 本だけ。
+    # "verdict" adds **the papers the reading LLM confirmed** to the anchors (see
+    # `_anchor_papers`). None uses only the top `anchors` candidates.
     anchor_from: str | None = None
 
 
 @dataclass(frozen=True)
 class ReadingConfig:
-    """ReadingAgent の振る舞いを決める数値。yaml の `agent.params` がこの形になる。
+    """The numbers that shape ReadingAgent's behaviour.
 
-    **協働オブジェクト（retriever / llm / paper_expander）とは分ける。** あちらは
-    「何を使うか」で DI が差し替える対象、こちらは「どう使うか」で実験のたびに振る値。
-    ReadingAgent はこの2つを別々の引数として受け取る。
+    **Kept apart from the collaborators (retriever / llm / paper_expander).** Those
+    say *what* to use; these say *how* to use it and get swept during experiments.
+    ReadingAgent takes the two as separate arguments.
 
-    **どの param が存在するかの唯一の定義がここ**なので、yaml の綴り間違いは
-    `from_params()` が名前を挙げて弾く（既定値のまま黙って走らせない）。
+    **This dataclass is the single definition of which params exist**, so a
+    misspelled key is rejected by name in `from_params()` rather than silently
+    running with the default.
     """
 
-    # ---- 反復ループ ----
+    # ---- the iteration loop ----
     max_steps: int = 3
-    # 1ステップで投げるサブクエリの上限。**プロンプトの本数指定と返り値の
-    # 切り詰めの両方に使う**（LLM は本数指定を守らないことがある）。
-    # 増やしても検索力は上がらない — 実測は SUBQUERY_COUNT のコメント参照。
+    # Cap on subqueries per step. **Used both to ask in the prompt and to truncate
+    # the response** (the LLM does not always respect the requested count).
+    # Raising it does not improve retrieval; see the note on SUBQUERY_COUNT.
     subquery_count: int = SUBQUERY_COUNT
-    # サブクエリ1本の検索で retriever から受け取る**チャンク**数（論文数ではない）。
-    # search_style 側の per_index_k / pool_k とは別物で、reranker が pool_k 件を
-    # 全件スコアリングし終えたあとの「上位何件を受け取るか」。増やしても
-    # reranker の推論は増えない（捨てていた分を拾うだけ）。
+    # How many **chunks** (not papers) one subquery's retrieval returns. Distinct
+    # from the retriever's per_index_k / pool_k: this is how many of the reranker's
+    # already-scored pool_k results are handed back. Raising it costs no extra
+    # reranker inference — it only picks up results that were being discarded.
     retrieve_top_k: int = 20
 
-    # ---- 読解 LLM に見せる範囲 ----
+    # ---- what the reading LLM gets to see ----
     max_candidates: int = 15
     chunks_per_paper: int = 2
     snippet_chars: int = 1800
 
-    # ---- 提出 ----
-    # **どれを提出するかの選定は読解チーム側の担当**なので、このエージェントは
-    # 候補列の順位をそのまま渡し、`max_papers` 本で切るだけ。
+    # ---- submission ----
+    # **Choosing which papers to submit belongs to the reading team**, so this agent
+    # passes the candidate ranking through and only cuts it to `max_papers`.
     max_papers: int = 10
 
-    # ---- 論文の代表スコア ----
-    # **代表スコアに使わないチャンク種別**（`["table"]` が実測での最良）。表チャンクは
-    # 数値と短いラベルが密なので、論文が質問の主題でなくても表1枚で代表スコアが
-    # 跳ね上がる。詳細は retrieve/hybrid.py の to_gold_papers。
-    # **読解に渡すチャンクプールは変えない**ので evidence には従来どおり出せる。
+    # ---- a paper's representative score ----
+    # **Chunk types excluded from the representative score** (`["table"]` measured
+    # best). Table chunks are dense with numbers and short labels, so one table can
+    # spike a paper that is not the question's topic. See `to_gold_papers` in
+    # retrieve/hybrid.py. **The chunk pool handed to the reader is unchanged**, so
+    # tables still reach evidence as before.
     paper_score_skip_chunk_types: tuple[str, ...] = ()
 
     @classmethod
     def from_params(cls, params: dict) -> ReadingConfig:
-        """yaml の `agent.params` から作る。未知のキーはここで弾く。"""
+        """Build from a params dict, rejecting unknown keys."""
         known = {f.name for f in fields(cls)}
         unknown = sorted(set(params) - known)
         if unknown:
@@ -178,7 +183,7 @@ class ReadingConfig:
                 f"unknown agent params: {unknown}. valid params: {sorted(known)}"
             )
         values = dict(params)
-        # yaml ではリストで書くが、設定は不変にしたいのでタプルに寄せる。
+        # Written as a list in config; normalised to a tuple to keep this frozen.
         values["paper_score_skip_chunk_types"] = tuple(
             values.get("paper_score_skip_chunk_types") or ()
         )
@@ -186,11 +191,11 @@ class ReadingConfig:
 
 
 class ReadingAgent:
-    """候補を読んで根拠を確定し、足りなければ検索し直す反復エージェント。
+    """Read the candidates, settle the evidence, search again if it is not enough.
 
-    設定は `ReadingConfig`（`self.config`）にまとめてある。`__init__` が名前付きで
-    受けるのは**協働オブジェクトだけ**で、残りは `**params` として `ReadingConfig`
-    に渡す（registry.build が yaml の `params` をそのまま展開してくるため）。
+    Settings live in `ReadingConfig` (`self.config`). `__init__` names only the
+    **collaborators**; everything else arrives as `**params` and is handed to
+    `ReadingConfig`.
     """
 
     def __init__(
@@ -198,10 +203,11 @@ class ReadingAgent:
         retriever: HybridRetriever,
         llm: LLMClient,
         *,
-        # 論文→論文展開（retrieve/paper_expander.py）。質問文が名指ししないピア gold を
-        # 拾うためのもので、None なら候補列は検索の順位そのまま。
+        # Paper-to-paper expansion (retrieve/paper_expander.py), there to recover
+        # peer gold papers the question never names. None leaves the candidate list
+        # exactly as retrieval ranked it.
         paper_expander: PaperExpander | None = None,
-        # A/B 統合の設定。expander を渡さないときは使われない。
+        # A/B fusion settings; unused when no expander is given.
         combine: CombineConfig | None = None,
         config: ReadingConfig | None = None,
         **params,
@@ -213,17 +219,17 @@ class ReadingAgent:
         self.paper_expander = paper_expander
         self.combine = combine or CombineConfig()
         self.config = config if config is not None else ReadingConfig.from_params(params)
-        # scripts/run_search.py の --dump-runs が読む。Prediction.trace には入れない
-        # （提出ファイルが膨らむため）。
+        # Read by scripts/run_search.py --dump-runs. Deliberately not in
+        # Prediction.trace, which would bloat the submission file.
         self.last_runs: list[SubqueryRun] = []
 
     def run(self, query: Query) -> Prediction:
-        # 会議名・年の制約は**元の質問から1回だけ**取る。_decompose() が作る
-        # サブクエリは「NAACL 2025」のような制約語を落とすことがあるので、
-        # サブクエリから抽出すると発火しない。反復ステップをまたいで使い回す。
+        # The venue/year constraint is taken **once, from the original question**.
+        # Subqueries from _decompose() often drop terms like "NAACL 2025", so
+        # extracting from them would simply never fire. Reused across all steps.
         attribute_filter = self._extract_attribute_filter(query)
-        # 制約が取れたときだけ引数を足す。Retriever Protocol の retrieve() は
-        # (query, top_k) の2引数なので、常に渡すと自作 Retriever を壊す。
+        # Only pass the argument when a constraint was found; retrieve() takes
+        # (query, top_k), so always passing it would break simpler retrievers.
         retrieve_kwargs = (
             {} if attribute_filter is None else {"attribute_filter": attribute_filter}
         )
@@ -241,10 +247,10 @@ class ReadingAgent:
                 results = self._retrieve(subquery, retrieve_kwargs)
                 runs.append(SubqueryRun(step=step, subquery=subquery, results=results))
                 for result in results:
-                    # 同じチャンクが複数のサブクエリで当たったら、スコアが高いほうを残す。
-                    # 後勝ちにすると、サブクエリ1で最上位だったチャンクがサブクエリ3の
-                    # 低いスコアで上書きされ、_candidate_papers の論文順位が
-                    # 「最後に投げたサブクエリ」に引きずられる。
+                    # When several subqueries hit the same chunk, keep the higher
+                    # score. Last-write-wins would let subquery 3's low score
+                    # overwrite subquery 1's top hit, dragging the paper ranking in
+                    # _candidate_papers toward whichever subquery ran last.
                     previous = chunks.get(result.chunk_id)
                     if previous is None or result.score > previous.score:
                         chunks[result.chunk_id] = result
@@ -259,7 +265,7 @@ class ReadingAgent:
                 {
                     "step": step,
                     "subqueries": subqueries,
-                    # 実際に絞り込みが効いたかを後から追えるように残す。
+                    # Recorded so it is possible to tell afterwards whether the filter fired.
                     "attribute_filter": (
                         None
                         if attribute_filter is None
@@ -273,8 +279,8 @@ class ReadingAgent:
                 }
             )
 
-            # ここが「本数で止める反復」との決定的な違い。検索が何本返したかではなく、
-            # LLM が根拠として確認できた論文で足りているかどうかで打ち切る。
+            # This is what separates the loop from "stop at N results": it stops on
+            # whether the papers the LLM could confirm are enough, not on a count.
             if verdict is not None and verdict["sufficient"]:
                 break
             if step == self.config.max_steps - 1:
@@ -288,50 +294,48 @@ class ReadingAgent:
         self.last_runs = runs
         return self._build_prediction(query, verdict, chunks, trace)
 
-    # ---- 検索1本ぶん --------------------------------------------------------
+    # ---- one retrieval ------------------------------------------------------
 
     def _retrieve(self, subquery: str, retrieve_kwargs: dict) -> list[RetrievalResult]:
-        """サブクエリ1本を検索して上位 `retrieve_top_k` 件を返す。"""
+        """Retrieve with one subquery and return the top `retrieve_top_k` results."""
         return list(
             self.retriever.retrieve(subquery, self.config.retrieve_top_k, **retrieve_kwargs)
         )
 
-    # ---- サブクエリ間のマージ ----------------------------------------------
+    # ---- merging across subqueries ------------------------------------------
 
     def _merged_results(self, chunks: dict[str, RetrievalResult]) -> list[RetrievalResult]:
-        """全サブクエリの結果を1本のランキングに統合する。
+        """Merge every subquery's results into one ranking.
 
-        `chunks` の構築自体が「同じ chunk_id はスコアが高いほうを残す」max マージ
-        なので、ここは貯め込んだものをそのまま列にするだけ。
+        Building `chunks` is itself the max merge (same chunk_id, keep the higher
+        score), so this just turns the accumulator into a list.
         """
         return list(chunks.values())
 
-    # ---- 0. 属性制約の抽出 -------------------------------------------------
+    # ---- 0. extract the attribute constraint --------------------------------
 
     def _extract_attribute_filter(self, query: Query):
-        """質問が明示した会議名・年の制約を取る。retriever 側が無効なら None。
+        """Take the venue/year constraint the question states. None if disabled.
 
-        抽出器は retriever が持っている（search_style の attribute_filter 設定で
-        構築される）。無効な構成ではここが None を返し、retrieve() は従来どおりの
-        コードパスを通る。
+        The extractor belongs to the retriever (`pipeline.build_retriever()` hands
+        it one). Without it this returns None and retrieve() takes its normal path.
         """
         extractor = getattr(self.retriever, "attribute_extractor", None)
         if extractor is None:
             return None
         attribute_filter = extractor.extract(query.question)
-        # 空なら None にして、retrieve() に引数自体を渡さないようにする
-        # （制約が無い質問の挙動を従来と完全に同一に保つため）。
+        # Empty becomes None so retrieve() is not even given the argument, keeping
+        # unconstrained questions on exactly the original code path.
         return None if attribute_filter.is_empty() else attribute_filter
 
     def _constraint_note(self, attribute_filter) -> str:
-        """取れた制約をサブクエリ生成プロンプトに伝える文面。制約が無ければ空。
+        """Wording that tells the subquery prompt about the constraint; empty if none.
 
-        絞り込み自体は attribute_filter が検索結果に対して行うので、これは
-        **検索語としての**制約。title_abstract チャンクの本文は
-        `[ACL 2025] タイトル…` と実際にこの表記で始まる（preprocess/mineru_chunker.py）
-        ので、同じ表記を頭に付けると BM25 でその会議の論文に寄る。
-        `_decompose()` は自発的に会議名を残すことがあるが、`_refine()` では
-        落ちていたため両方に明示する。
+        The actual narrowing is done by attribute_filter on the results, so this is
+        the constraint **as a search term**. A title_abstract chunk's text really
+        does begin `[ACL 2025] Title...` (preprocess/mineru_chunker.py), so leading
+        with the same tag pulls BM25 toward that venue. `_decompose()` sometimes
+        keeps the venue on its own but `_refine()` dropped it, so both say it now.
         """
         if attribute_filter is None:
             return ""
@@ -348,16 +352,17 @@ class ReadingAgent:
             "title/abstract text of each paper in the index literally starts with that tag."
         )
 
-    # ---- 1. 分解 ----------------------------------------------------------
+    # ---- 1. split -----------------------------------------------------------
 
     def _decompose(self, query: Query, attribute_filter=None) -> list[str]:
-        """質問を検索用のサブクエリに分解する。
+        """Split the question into search subqueries.
 
-        multi_paper のときだけ分解する手もあるが、single_paper でも
-        「どの論文か」と「その中のどの表か」は別々の検索語になりうるので常に分解する。
+        Splitting only multi-paper questions is possible, but even single-paper ones
+        want separate terms for "which paper" and "which table inside it", so this
+        always splits.
 
-        **件数は task_family で振り分けず `subquery_count` 本に固定する**（下記）。
-        指示した本数を超えることがある（実測 最大6本）ので、返り値も切る。
+        **The count is fixed at `subquery_count`, never branched on task_family.**
+        The LLM overshoots the request (up to 6 observed), so the result is cut too.
         """
         prompt = "\n".join(
             part
@@ -365,9 +370,10 @@ class ReadingAgent:
                 "You are helping to decompose a research question into search "
                 "subqueries against a scientific paper corpus.",
                 f"Question: {query.question}",
-                # 1本の論文で足りる質問も、複数論文にまたがる質問も同じ文面で扱う。
-                # どちらかを決め打ちすると、外したときに「主役の論文を引き当てる
-                # 言い換え」か「各論文を個別に取りに行く分解」のどちらかが欠ける。
+                # One wording covers both single-paper and multi-paper questions.
+                # Committing to either loses one of the two useful behaviours when
+                # the guess is wrong: paraphrases that land the paper in focus, or a
+                # split that goes after each paper separately.
                 "The evidence may live in a single paper or be spread across several. "
                 "Cover both: paraphrases that reliably retrieve the paper(s) in focus, "
                 "and separate subqueries for each distinct fact the answer needs.",
@@ -382,14 +388,14 @@ class ReadingAgent:
         subqueries = self._ask_for_list(prompt, "subqueries")[: self.config.subquery_count]
         return subqueries or [query.question]
 
-    # ---- 2. 候補の組み立て ------------------------------------------------
+    # ---- 2. assemble the candidates -----------------------------------------
 
     def _candidate_papers(
         self, results: list[RetrievalResult]
     ) -> list[tuple[str, list[RetrievalResult]]]:
-        """統合済みランキングを論文単位にまとめ、スコア上位の論文を候補として返す。
+        """Group the merged ranking by paper and return the top-scoring papers.
 
-        引数は `_merged_results()` の出力（貯め込んだチャンクをスコア順に見た列）。
+        Takes the output of `_merged_results()`.
         """
         by_paper: dict[str, list[RetrievalResult]] = {}
         for result in results:
@@ -406,7 +412,7 @@ class ReadingAgent:
             for paper_id, results in ranked[: self.config.max_candidates]
         ]
 
-    # ---- 3. 読解と判定 ----------------------------------------------------
+    # ---- 3. read and judge --------------------------------------------------
 
     def _read_and_judge(
         self,
@@ -414,7 +420,7 @@ class ReadingAgent:
         candidates: list[tuple[str, list[RetrievalResult]]],
         chunks: dict[str, RetrievalResult],
     ) -> dict | None:
-        """候補チャンクを LLM に読ませ、根拠になる論文とチャンクを選ばせる。"""
+        """Have the LLM read the candidate chunks and pick the evidence."""
         if not candidates:
             return None
 
@@ -464,7 +470,7 @@ class ReadingAgent:
             paper_ids.append(paper_id)
             for chunk_id in item.get("evidence_chunk_ids") or []:
                 chunk_id = str(chunk_id)
-                # LLM の捏造を弾く。実在するチャンクで、かつその論文のものだけ通す。
+                # Reject hallucinations: the chunk must exist and belong to that paper.
                 result = chunks.get(chunk_id)
                 if result is not None and result.paper_id == paper_id:
                     evidence_chunk_ids.append(chunk_id)
@@ -472,7 +478,7 @@ class ReadingAgent:
         if not paper_ids:
             return None
 
-        # 本数の打ち切りはここではやらない（提出は候補列の順位で `max_papers` 本）。
+        # No truncation here; submission is the top `max_papers` of the candidate list.
         return {
             "paper_ids": paper_ids,
             "evidence_chunk_ids": evidence_chunk_ids,
@@ -503,7 +509,7 @@ class ReadingAgent:
             parts.append(f"Answer table columns: {columns}")
         return "\n".join(parts)
 
-    # ---- 4. 不足分の再分解 ------------------------------------------------
+    # ---- 4. re-split from what is missing ------------------------------------
 
     def _refine(
         self,
@@ -512,7 +518,7 @@ class ReadingAgent:
         tried: list[str],
         attribute_filter=None,
     ) -> list[str]:
-        """「何が欠けているか」を踏まえて、次に投げる検索サブクエリを作る。"""
+        """Build the next subqueries from what the reader said was missing."""
         tried_text = "\n".join(f"- {sq}" for sq in dict.fromkeys(tried))
         missing_text = missing or "(No specific note from the LLM. Search from a different angle.)"
         prompt = "\n\n".join(
@@ -523,16 +529,15 @@ class ReadingAgent:
                 f"{missing_text}",
                 "Search subqueries already tried (do not repeat the same or similar ones):\n"
                 f"{tried_text}",
-                # ここを省くと LLM は「もっと絞り込んだ検索」として site: や
-                # filetype: を付け始める（実測で 29〜41%）。CORPUS_NOTE 参照。
+                # Omit this and the LLM starts adding site: / filetype: as its idea
+                # of "a narrower search" (29-41% observed). See CORPUS_NOTE.
                 CORPUS_NOTE,
                 self._constraint_note(attribute_filter),
-                # **本数を書かないと LLM は出したいだけ出す**（実測 平均8.2〜9.3本・
-                # 最大20本）。中身は「手法名 × 言い回し」の総当たりに流れていて、
-                # q_021 の step1 は `SimLingo trained on Bench2Drive Base split` /
-                # `SimLingo only uses the Bench2Drive Base dataset` … を20本並べていた。
-                # 検索1本ぶんのコストは reranker の pool_k 件推論なので、これが
-                # そのまま走行時間を数倍にする。
+                # **State a count or the LLM emits as many as it likes** (8.2-9.3 on
+                # average, 20 at worst). The extras degenerate into a cross product
+                # of method name x phrasing; q_021's step 1 listed 20 variants of
+                # "SimLingo ... Bench2Drive Base". Each subquery costs a reranker
+                # pass over pool_k chunks, so this multiplies the run time directly.
                 f"Propose at most {self.config.subquery_count} new search subqueries to fill "
                 "this gap. Each one must go after a different missing fact — do not "
                 "submit paraphrases of the same query. "
@@ -541,10 +546,10 @@ class ReadingAgent:
             )
             if part
         )
-        # プロンプトの上限は守られないことがあるので、ここでも必ず切る。
+        # The prompt's cap is not always respected, so truncate here as well.
         return self._ask_for_list(prompt, "subqueries")[: self.config.subquery_count]
 
-    # ---- 5. 提出物の組み立て ----------------------------------------------
+    # ---- 5. assemble the prediction ------------------------------------------
 
     def _build_prediction(
         self,
@@ -553,23 +558,24 @@ class ReadingAgent:
         chunks: dict[str, RetrievalResult],
         trace: list[dict],
     ) -> Prediction:
-        # 反復中に溜めたチャンクを論文順位に直したもの。打ち切り前の「検索が拾えた候補」
-        # なので、recall@k の分析はこちらを見る必要がある（gold_papers は LLM 選定と
-        # cutoff の後なので、検索力と選定力が混ざってしまう）。
+        # The chunks accumulated during the loop, collapsed to a paper ranking.
+        # This is "what retrieval found", before any truncation, so recall@k analysis
+        # must read this rather than gold_papers (which comes after the cut and
+        # therefore mixes retrieval quality with selection).
         merged = self._merged_results(chunks)
         if self.paper_expander is not None:
-            # 論文→論文展開は**A/B の RRF 統合のみ**（位置挿入は順位融合に全指標で
-            # 負けたので実装ごと削除した。詳細は CLAUDE.md）。
+            # Expansion enters only through the A/B RRF fusion (positional
+            # insertion lost on every metric and was deleted; see CLAUDE.md).
             #
-            # 統合では**50件で切る前の全長**を A のランキングとして使う。
-            # 51位の論文を関連ランキングが強く推していても、先に切ってしまうと
-            # そもそも押し上げようがないため。切るのは統合したあと。
+            # Fusion uses the **full-length** A ranking, before the cut to 50: a
+            # paper sitting at rank 51 cannot be lifted by B if it was already
+            # discarded. The cut happens after fusion.
             candidate_papers = to_gold_papers(
                 merged, skip_chunk_types=self.config.paper_score_skip_chunk_types
             )
             if candidate_papers:
-                # `anchor_from: verdict` のときだけ使う。verdict が None のクエリでは
-                # 空リストになり、`_anchor_papers()` が候補の先頭を起点にする。
+                # Only used with `anchor_from: verdict`. When verdict is None this
+                # is empty and `_anchor_papers()` falls back to the top candidates.
                 candidate_papers = self._combine_rrf(
                     candidate_papers,
                     trace,
@@ -583,14 +589,15 @@ class ReadingAgent:
                 skip_chunk_types=self.config.paper_score_skip_chunk_types,
             )
 
-        # **どれを提出するかは選ばない。** 検索の順位をそのまま渡し、選定は読解チーム側に
-        # 任せる（読解 LLM が返す `paper_ids` は停止条件と evidence にだけ使う）。
+        # **No selection happens here.** The retrieval ranking is passed through and
+        # choosing is left to the reading team (the reader's `paper_ids` are used
+        # only as the stopping condition and for evidence).
         evidence: list[Evidence] = []
         paper_ids = candidate_papers[: self.config.max_papers]
 
         evidence_results: list[RetrievalResult] = []
         if verdict is not None:
-            # 打ち切りで落ちた論文の evidence は出さない。
+            # Do not emit evidence for papers the cut removed.
             kept = set(paper_ids)
             evidence_results = [
                 chunks[chunk_id]
@@ -599,8 +606,8 @@ class ReadingAgent:
             ]
             evidence = [evidence_from_result(r) for r in evidence_results]
 
-        # **回答は生成しない**（freeform / multiple_choice / table は読解チーム側の担当）。
-        # 空の Answer をそのまま置く。1クエリにつき LLM 呼び出しが1回減る。
+        # **No answer is generated** (freeform / multiple_choice / table belong to
+        # the reading team). An empty Answer goes out as is, saving one LLM call.
         return Prediction(
             query_id=query.query_id,
             gold_papers=[{"paper_id": paper_id} for paper_id in paper_ids],
@@ -610,38 +617,34 @@ class ReadingAgent:
             candidate_papers=candidate_papers,
         )
 
-    # ---- 6. ランキング A/B の統合（論文→論文展開）--------------------------
+    # ---- 6. fuse rankings A and B (paper-to-paper expansion) -----------------
 
     def _anchor_papers(
         self, candidate_papers: list[str], verdict_papers: list[str] | None
     ) -> list[str]:
-        """ランキングB の起点。
+        """The anchors of ranking B.
 
-        既定は**候補1位から `anchors` 本**。`anchor_from: "verdict"` にすると、
-        そこに**読解 LLM が本文を読んで根拠を確認した論文**（`_read_and_judge()` の
-        `paper_ids`）を足す。
+        By default the **top `anchors` candidates**. With `anchor_from: "verdict"`,
+        the papers the reading LLM confirmed by reading their text (the `paper_ids`
+        from `_read_and_judge()`) are added to them.
 
-        **候補1位は必ず先頭に残す。** LLM の確認済みだけにすると候補1位が B の
-        先頭から外れ、「A にも B にも居る」論文に抜かれて **single_paper の cr@1 が
-        0.923 -> 0.885 に落ちた**。和集合にすれば single は完全に不変のまま伸びだけ残る。
+        **The top candidate always stays first.** Using only the LLM's confirmations
+        pushed it out of B's head, where papers present in both rankings overtook it
+        and **single-paper cr@1 fell 0.923 -> 0.885**. Taking the union leaves single
+        completely unchanged and keeps the gain.
 
-        **効くのは精度ではなく本数。** LLM 確認済みの gold 率は 68本中52本 = 76% で、
-        候補1位の 85%（47/55）より**低い**。それでも効くのは、1本の anchor では
-        1つのトピッククラスタしか展開できないため。anchor が2本以上になるのは
-        55件中16件で、**うち14件が multi_paper**（single に副作用が出ないのはこのため）。
+        **What helps is the count, not the precision.** The LLM's confirmations are
+        gold 76% of the time (52/68), *below* the top candidate's 85% (47/55). They
+        help anyway because one anchor can only expand one topic cluster. 16 of 55
+        queries end up with more than one anchor, and **14 of those are multi-paper**,
+        which is why single-paper queries see no side effect.
 
-        実測（土台4本 + 全長A。single の cr@1 は5条件とも不変）:
-
-            土台           multi@5          multi@10         multi@20
-            k100_cand50   0.682 -> 0.717   0.767 -> 0.830   0.869 -> 0.885
-            chunk_cand50  0.610 -> 0.686   0.762 -> 0.842   0.899 -> 0.908
-            fat           0.666 -> 0.669   0.809 -> 0.848   0.914 -> 0.914
-            b_merged      0.680 -> 0.726   0.786 -> 0.868   0.876 -> 0.899
-            全長A          0.683 -> 0.677   0.814 -> 0.844   0.910 -> 0.914
-
-        **伸びが @10 に集中する**のは、沈んでいるのがそこだから。multi の根拠あり
-        gold をクエリ内で順位順に並べると、1本目は中央1位（@5 で 100%）なのに
-        2本目が中央4位・3本目が中央8位・4本目が中央14位まで落ちる。
+        Measured across four bases (multi-paper recall, single-paper cr@1 unchanged
+        in all of them): @5 moves by -0.006 to +0.076, @10 by +0.030 to +0.082,
+        @20 by 0.000 to +0.023. **The gain concentrates at @10** because that is
+        where the misses are: ordering a multi-paper query's evidence-backed gold by
+        rank, the first sits at median rank 1 while the second, third and fourth sit
+        at 4, 8 and 14.
         """
         anchors = candidate_papers[: self.combine.anchors]
         if self.combine.anchor_from != "verdict" or not verdict_papers:
@@ -654,40 +657,44 @@ class ReadingAgent:
         trace: list[dict],
         verdict_papers: list[str] | None = None,
     ) -> list[str]:
-        """ランキングを2本に分けて RRF 統合する。
+        """Fuse two rankings with RRF.
 
-        * **A（質問→論文）**: 検索そのもの。BM25 + 埋め込み → RRF → reranker。
-        * **B（論文→論文）**: 論文間の近さ（SPECTER2 / 書誌結合 / 全文MLT の RRF 融合）。
-          **reranker には通さない**——reranker は「質問に答えるか」で判定するので、
-          質問文が名指ししないピア gold を必ず下げる。B をそこに晒さないのが要点。
+        * **A (question->paper)**: retrieval itself. BM25 + embeddings -> RRF -> reranker.
+        * **B (paper->paper)**: proximity between papers (SPECTER2 / bibliographic
+          coupling / full-text MLT, fused with RRF). **Never passed through the
+          reranker** — it judges "does this answer the question" and would always
+          demote the peer gold papers the question does not name. Keeping B away
+          from it is the whole point.
 
             score(p) = 1 / (k + rank_A) + w_B / (k + offset + rank_B)
 
-        かつてあった位置挿入（決まった位置に差し込む方式）との違いは2つ。
-        **A にも B にも居る論文が加点される**こと（例: A 30位 × B 3位 → 実効1位相当）と、
-        本数決め打ちが要らないこと。位置挿入は全指標で負けたので削除した。
-        スコアで混ぜて壊れた（cr@20 0.822 -> 0.773）のは reranker の絶対スコアと
-        展開の仮スコアを足していたからで、RRF は順位しか見ないのでその問題が無い。
+        Two things separate this from the positional insertion it replaced:
+        **papers present in both rankings gain** (A 30th x B 3rd behaves like a top
+        hit), and no fixed count has to be chosen. Insertion lost on every metric.
+        An earlier attempt to mix by score broke badly (cr@20 0.822 -> 0.773) because
+        it added the reranker's absolute score to the expander's improvised one; RRF
+        looks only at ranks and cannot have that problem.
 
-        **素の RRF（`related_weight: 1.0` / `related_offset: 0`）が実測で最良**
-        （オフライン55件: cr@20 0.789 -> 0.879、ecr@20 0.868 -> 0.926、
-        multi@20 0.601 -> 0.770、cr@50 0.832 -> 0.917、ecr@50 0.889 -> 0.956。
-        single_paper の cr@20 は 1.000 のまま）。重みを下げると B 単独の論文が A の裾より
-        下に落ちて統合の意味が消え（w=0.5 で cr@20 0.817）、上げると B が候補列を
-        占領する（w=2.0 で 0.830）。`related_offset` も 0 が最良で、15 にすると 0.839 まで
-        下がる——位置挿入で効いていた「差し込み深さ」は、順位融合では下駄ではなく
-        重なりの加点が担う。
+        **Plain RRF (weight 1.0, offset 0) measured best**: over 55 queries
+        cr@20 0.789 -> 0.879, ecr@20 0.868 -> 0.926, multi@20 0.601 -> 0.770,
+        cr@50 0.832 -> 0.917, with single-paper cr@20 staying at 1.000. Lowering the
+        weight drops B-only papers below A's tail and the fusion stops meaning
+        anything (0.817 at w=0.5); raising it lets B take over (0.830 at w=2.0).
+        offset 0 is likewise best (0.839 at offset 15) — in a rank fusion the
+        "insertion depth" that mattered for positional insertion is carried by the
+        overlap bonus instead.
         """
         anchors = self._anchor_papers(candidate_papers, verdict_papers)
         related = self.paper_expander.rank(anchors)
         if not related:
             return candidate_papers
 
-        # **anchor 自身をランキングB の先頭に置く。** 各 expander は anchor を自分の
-        # 近傍から外すので、そのままだと anchor は A の 1/(k+1) しか持てず、
-        # 「A にも B にも居る」論文（2項ぶん）に軒並み抜かれる。実測では
-        # single_paper 2件で gold そのものだった候補1位が top20 から消えた。
-        # 論文は自分自身に最も近いので、B の1位に置くのが定義どおりでもある。
+        # **Put the anchors themselves at the head of B.** Every expander excludes
+        # an anchor from its own neighbours, so otherwise an anchor holds only A's
+        # 1/(k+1) and is overtaken by every paper that appears in both. Measured: on
+        # two single-paper queries the top candidate, which *was* the gold paper,
+        # fell out of the top 20. A paper is also by definition its own nearest
+        # neighbour, so first place in B is where it belongs.
         related = anchors + [p for p in related if p not in anchors]
 
         k = self.combine.rrf_k
@@ -697,7 +704,7 @@ class ReadingAgent:
             scores[paper_id] = scores.get(paper_id, 0.0) + self.combine.related_weight / (
                 k + offset + rank + 1
             )
-        # 同点は挿入順（= A の順位が先、次に B の順位）で決まる。sorted が安定なため。
+        # Ties break by insertion order (A's rank first, then B's) since sorted is stable.
         fused = sorted(scores, key=lambda paper_id: -scores[paper_id])
 
         before = {paper_id: rank for rank, paper_id in enumerate(candidate_papers)}
@@ -706,14 +713,14 @@ class ReadingAgent:
             {
                 "paper_fusion": {
                     "anchor": candidate_papers[0],
-                    # 実際に使った起点。既定では候補の先頭 `anchors` 本だが、
-                    # `anchor_from: verdict` では読解 LLM の確認済み論文が加わる。
+                    # The anchors actually used: the top `anchors` candidates by
+                    # default, plus the reader's confirmations under `verdict`.
                     "anchors": anchors,
                     "n_a": len(candidate_papers),
                     "n_b": len(set(related)),
-                    # B にしか居なかったのに上位圏へ入った論文（新規に拾えた分）。
+                    # Papers that were only in B yet reached the visible head (newly found).
                     "b_only_promoted": [p for p in head if p not in before],
-                    # A では上位圏の外だったのに押し上がった論文（順位調整が効いた分）。
+                    # Papers outside A's visible head that got lifted (reordering at work).
                     "promoted": [
                         p for p in head if before.get(p, 0) >= self.config.max_candidates
                     ],
@@ -722,7 +729,7 @@ class ReadingAgent:
         )
         return fused
 
-    # ---- LLM 呼び出しの薄いラッパ ------------------------------------------
+    # ---- thin wrappers around the LLM call -----------------------------------
 
     def _ask_for_json(self, prompt: str) -> dict | None:
         try:
