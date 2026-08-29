@@ -23,8 +23,10 @@ The classes in pipeline order:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 
 class _AsDict:
@@ -203,3 +205,41 @@ def filter_chunk_types(
 
     wanted = set(chunk_types)
     return [chunk for chunk in chunks if chunk.chunk_type in wanted]
+
+
+# ---- reading and writing a chunks jsonl -------------------------------------
+#
+# **The format is defined here and nowhere else.** Every index writes a copy of its
+# chunks beside itself, because bm25s and faiss both store vectors or terms and none
+# of a Chunk's metadata; that sidecar, in the same row order, is what turns a hit
+# back into a Chunk. **Row i of the file must be row i of the index**, so the two
+# halves cannot be allowed to drift apart — which is what having six copies of them
+# invited.
+#
+# It lives with the Chunk contract rather than beside the indexes so that
+# faiss_qwen3.py can use it without importing indexes.py, which would drag bm25s and
+# the SPECTER2 adapters into the distributed build.
+
+
+def read_chunks_jsonl(path: str | Path) -> list[Chunk]:
+    """Read a chunks jsonl. Blank lines are skipped; a bad line names itself."""
+    path = Path(path)
+    chunks: list[Chunk] = []
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
+            chunks.append(Chunk(**record))
+    return chunks
+
+
+def write_chunks_jsonl(path: str | Path, chunks: Iterable[Chunk]) -> None:
+    """Write a chunks jsonl, one Chunk per line, in the order given."""
+    with Path(path).open("w", encoding="utf-8") as handle:
+        for chunk in chunks:
+            handle.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")

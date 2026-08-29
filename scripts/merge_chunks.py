@@ -14,22 +14,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-from littraceqa.search.contracts import Chunk
-
-
-def load_chunks(path: Path) -> list[Chunk]:
-    chunks = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            chunks.append(Chunk(**json.loads(line)))
-    return chunks
+from littraceqa.search.contracts import Chunk, read_chunks_jsonl, write_chunks_jsonl
 
 
 def merge_chunks(chunk_lists: list[list[Chunk]], strict: bool = False) -> list[Chunk]:
@@ -70,14 +58,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    chunk_lists = [load_chunks(Path(p)) for p in args.inputs]
+    chunk_lists = [read_chunks_jsonl(p) for p in args.inputs]
     merged = merge_chunks(chunk_lists, strict=args.strict)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as f:
-        for chunk in merged:
-            f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+    write_chunks_jsonl(output_path, merged)
 
     print(
         f"wrote {len(merged)} chunks to {output_path} "

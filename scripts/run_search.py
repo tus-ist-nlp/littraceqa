@@ -37,7 +37,7 @@ except ImportError:
     def tqdm(iterable, **kwargs):
         return iterable
 
-from littraceqa.search.contracts import Chunk, Query
+from littraceqa.search.contracts import Query, write_chunks_jsonl
 from littraceqa.search.pipeline import (
     Paths,
     build_agent,
@@ -176,17 +176,6 @@ def check_coverage(scored_path: Path) -> dict[str, Any]:
     return {"covered": covered, "gold_total": total}
 
 
-def load_chunks(path: Path) -> list[Chunk]:
-    chunks = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            chunks.append(Chunk(**json.loads(line)))
-    return chunks
-
-
 def load_queries(path: Path) -> list[Query]:
     """Load the queries.
 
@@ -249,9 +238,7 @@ def main() -> None:
             chunks.extend(build_preprocessor(paths).process(paper))
 
         paths.chunks.parent.mkdir(parents=True, exist_ok=True)
-        with paths.chunks.open("w", encoding="utf-8") as f:
-            for chunk in chunks:
-                f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+        write_chunks_jsonl(paths.chunks, chunks)
         print(f"saved {len(chunks)} chunks to {paths.chunks}")
 
         # The three search indexes, plus the SPECTER2 index ranking B reads. The

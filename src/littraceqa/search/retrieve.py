@@ -18,7 +18,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
-from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass, replace
 from pathlib import Path

@@ -19,7 +19,6 @@ into a Chunk.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -31,7 +30,13 @@ from adapters import AutoAdapterModel
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from littraceqa.search.contracts import Chunk, RetrievalResult, filter_chunk_types
+from littraceqa.search.contracts import (
+    Chunk,
+    RetrievalResult,
+    filter_chunk_types,
+    read_chunks_jsonl,
+    write_chunks_jsonl,
+)
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _PAPERS_FILENAME = "papers.jsonl"
@@ -140,25 +145,10 @@ class _BM25Base:
         return results
 
     def _save_docs(self) -> None:
-        path = self.index_dir / self.sidecar
-        with path.open("w", encoding="utf-8") as f:
-            for doc in self._docs:
-                f.write(json.dumps(doc.to_dict(), ensure_ascii=False) + "\n")
+        write_chunks_jsonl(self.index_dir / self.sidecar, self._docs)
 
     def _load_docs(self) -> list[Chunk]:
-        path = self.index_dir / self.sidecar
-        docs: list[Chunk] = []
-        with path.open(encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
-                docs.append(Chunk(**record))
-        return docs
+        return read_chunks_jsonl(self.index_dir / self.sidecar)
 
 
 class BM25Index(_BM25Base):
@@ -389,22 +379,7 @@ class Specter2FAISSIndex:
         self._model = model
 
     def _save_chunks(self) -> None:
-        path = self.index_dir / _CHUNKS_FILENAME
-        with path.open("w", encoding="utf-8") as f:
-            for chunk in self._chunks:
-                f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+        write_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME, self._chunks)
 
     def _load_chunks(self) -> list[Chunk]:
-        path = self.index_dir / _CHUNKS_FILENAME
-        chunks: list[Chunk] = []
-        with path.open(encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
-                chunks.append(Chunk(**record))
-        return chunks
+        return read_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME)

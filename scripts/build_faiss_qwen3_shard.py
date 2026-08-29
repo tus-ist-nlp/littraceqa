@@ -59,12 +59,11 @@ less than 20GB free**: the 8B model peaks at 19.3GB even in fp16.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import yaml
 
-from littraceqa.search.contracts import Chunk
+from littraceqa.search.contracts import read_chunks_jsonl
 
 # Importing search.pipeline drags in the reranker (torch), the expanders
 # (faiss/bm25s) and the LLM client, which fails on a machine that has none of them
@@ -93,17 +92,6 @@ def shard_bounds(n: int, shard_index: int, num_shards: int) -> tuple[int, int]:
     start = n * shard_index // num_shards
     end = n * (shard_index + 1) // num_shards
     return start, end
-
-
-def load_chunks(path: Path) -> list[Chunk]:
-    chunks: list[Chunk] = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            chunks.append(Chunk(**json.loads(line)))
-    return chunks
 
 
 def main() -> None:
@@ -159,7 +147,7 @@ def main() -> None:
     index_dir = f"{index_dir}__shard{args.shard_index}of{args.num_shards}"
 
     print(f"loading chunks: {chunks_path}")
-    chunks = load_chunks(chunks_path)
+    chunks = read_chunks_jsonl(chunks_path)
     n = len(chunks)
     start, end = shard_bounds(n, args.shard_index, args.num_shards)
     shard = chunks[start:end]

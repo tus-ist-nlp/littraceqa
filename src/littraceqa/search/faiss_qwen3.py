@@ -37,7 +37,13 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from littraceqa.search.accel import load_with_best_attn, maybe_compile
-from littraceqa.search.contracts import Chunk, RetrievalResult, filter_chunk_types
+from littraceqa.search.contracts import (
+    Chunk,
+    RetrievalResult,
+    filter_chunk_types,
+    read_chunks_jsonl,
+    write_chunks_jsonl,
+)
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"
@@ -315,25 +321,10 @@ class Qwen3FAISSIndex:
     # ---- saving and loading the chunks -------------------------------------
 
     def _save_chunks(self) -> None:
-        path = self.index_dir / _CHUNKS_FILENAME
-        with path.open("w", encoding="utf-8") as f:
-            for chunk in self._chunks:
-                f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+        write_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME, self._chunks)
 
     def _load_chunks(self) -> list[Chunk]:
-        path = self.index_dir / _CHUNKS_FILENAME
-        chunks: list[Chunk] = []
-        with path.open(encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
-                chunks.append(Chunk(**record))
-        return chunks
+        return read_chunks_jsonl(self.index_dir / _CHUNKS_FILENAME)
 
 
 # ---- the worker side (module level, because it runs in another process) --------
