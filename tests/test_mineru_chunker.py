@@ -1,4 +1,4 @@
-"""MinerUChunker のブロック種別マッピング・ページ番号変換・分割規則のテスト。"""
+"""MinerUChunker: block type mapping, page number conversion, and the split rules."""
 
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ def test_tagged_equation_gets_its_own_chunk_with_preceding_text_as_context(tmp_p
     assert equations[0].chunk_id == "p1#eq0001"
     assert equations[0].metadata["equation_id"] == "Equation 12"
     assert equations[0].metadata["page"] == 3
-    # 数式単独ではなく直前の本文を文脈として含む。
+    # Not the equation alone: the preceding body text comes with it as context.
     assert "We define the score." in equations[0].text
     assert "x = y" in equations[0].text
 
@@ -248,7 +248,7 @@ def test_list_items_are_joined_into_the_text_buffer(tmp_path):
 
 
 def test_long_text_is_split_at_max_chars(tmp_path):
-    paragraph = " ".join(["word"] * 100)  # 499 文字
+    paragraph = " ".join(["word"] * 100)  # 499 characters
     _write_content_list(
         tmp_path / "mineru", "p1",
         [{"type": "text", "text": paragraph, "page_idx": 0} for _ in range(4)],

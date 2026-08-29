@@ -1,10 +1,11 @@
-"""chunk_types フィルタと index_name による索引パス分離のテスト。
+"""The chunk_types filter, and keeping index paths apart by index_name.
 
-この2つが無いと、モデルを設計どおりの粒度で使う構成が組めない:
-* chunk_types: SPECTER2 は title+abstract で学習された論文単位モデルなので、
-  本文チャンクを個別に埋め込むのは設計外。abstract だけに絞れるようにする。
-* index_name: 同じ indexer の別バリアント（全チャンク版 / abstract版）を並べたとき、
-  索引ディレクトリを分けないと互いを上書きしてしまう。
+Without these two, a model cannot be used at the granularity it was designed for:
+* chunk_types: SPECTER2 is a whole-paper model trained on title+abstract, so
+  embedding body chunks individually is off-design. This is what narrows it to the
+  abstract alone.
+* index_name: two variants of the same indexer (all chunks / abstract only) sitting
+  side by side **overwrite each other** unless their index directories differ.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def test_filters_to_the_requested_types():
 
 
 def test_typo_in_chunk_types_is_rejected_loudly():
-    """静かに0件の索引を作るより、その場で落ちた方がよい。"""
+    """Failing here beats quietly building an index of zero chunks."""
     with pytest.raises(ValueError, match="unknown chunk_types"):
         filter_chunk_types(_chunks(), ["titel_abstract"])
 

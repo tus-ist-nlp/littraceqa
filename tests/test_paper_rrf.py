@@ -1,4 +1,4 @@
-"""論文単位 RRF（1論文1票）と Seed Expansion のテスト。"""
+"""Paper-level RRF (one vote per paper) and Seed Expansion."""
 
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ def result(chunk_id, paper_id, source="bm25s", text="body", chunk_type="text_spa
 
 class TestPaperRRFFuse:
     def test_one_vote_per_paper_ignores_chunk_count(self):
-        """チャンクを大量に持つ論文が、順位の力ではなく本数で上がってこないこと。
+        """A paper with many chunks does not rise on chunk count instead of rank.
 
-        チャンク単位に融合すると p_many は 1/62 + 1/63 + 1/64 = 0.0473 を集め、
-        p_top の 1/61 = 0.0164 を票数だけで抜く。論文単位なら1 run 1票なので、
-        run の中で先に出た p_top が勝つ。
+        Fused per chunk, p_many collects 1/62 + 1/63 + 1/64 = 0.0473 and passes
+        p_top's 1/61 = 0.0164 on sheer number of votes. Per paper it is one vote per
+        run, so p_top, which appears first in the run, wins.
         """
         run = [
             result("p_top#c0", "p_top"),
@@ -34,7 +34,8 @@ class TestPaperRRFFuse:
             result("p_many#c1", "p_many"),
             result("p_many#c2", "p_many"),
         ]
-        # 対比用のチャンク単位 RRF（本番の fuser は paper_rrf 一本なのでここに置く）。
+        # Chunk-level RRF for contrast; the production fuser is paper_rrf alone, so
+        # this lives here rather than in the source.
         chunk_scores: dict[str, float] = {}
         for rank, r in enumerate(run):
             chunk_scores[r.paper_id] = chunk_scores.get(r.paper_id, 0.0) + 1 / (60 + rank + 1)
@@ -43,7 +44,7 @@ class TestPaperRRFFuse:
         assert to_gold_papers(paper_rrf_fuse([run], top_k=10)) == ["p_top", "p_many"]
 
     def test_papers_in_both_runs_win(self):
-        """両方の run の上位に居る論文が、片方だけ1位の論文に勝つこと。"""
+        """A paper high in both runs beats one that is first in only one of them."""
         run_a = [result("only_a#c0", "only_a"), result("both#c0", "both")]
         run_b = [result("only_b#c0", "only_b", source="faiss"), result("both#c1", "both", source="faiss")]
         papers = to_gold_papers(paper_rrf_fuse([run_a, run_b], top_k=10))
@@ -53,39 +54,39 @@ class TestPaperRRFFuse:
         run = [result(f"p#c{i}", "p") for i in range(10)]
         fused = paper_rrf_fuse([run], top_k=100, chunks_per_paper=3)
         assert len(fused) == 3
-        # 論文内の順位は元の順位を保つ（先頭が最上位）。
+        # Within a paper the original order is kept, best first.
         assert [r.chunk_id for r in fused] == ["p#c0", "p#c1", "p#c2"]
 
     def test_within_paper_order_is_written_to_score(self):
-        """下流は score で並べ直すので、返り値の並び順だけでは足りない。"""
+        """Downstream re-sorts by score, so the returned list order is not enough."""
         run = [result(f"p#c{i}", "p") for i in range(3)]
         fused = paper_rrf_fuse([run], top_k=10, chunks_per_paper=3)
         assert [r.score for r in fused] == sorted((r.score for r in fused), reverse=True)
         assert len({r.score for r in fused}) == 3
 
     def test_within_paper_offset_never_reorders_papers(self):
-        """論文内オフセットが論文間のスコア差を超えないこと。"""
+        """The within-paper offset never exceeds the gap between papers."""
         run = [result(f"p1#c{i}", "p1") for i in range(3)] + [result("p2#c0", "p2")]
         fused = paper_rrf_fuse([run], top_k=10, chunks_per_paper=3)
         assert to_gold_papers(fused) == ["p1", "p2"]
 
     def test_paper_level_pseudo_chunk_is_not_a_representative(self):
-        """`{paper_id}#paper` は chunk_id が実在しないので evidence に使えない。"""
+        """`{paper_id}#paper` is not a real chunk_id, so it cannot serve as evidence."""
         run = [
-            result("p#paper", "p", source="bm25s_paper", text="論文全文"),
+            result("p#paper", "p", source="bm25s_paper", text="the whole paper"),
             result("p#c7", "p", source="bm25s"),
         ]
         fused = paper_rrf_fuse([run], top_k=10, chunks_per_paper=1)
         assert [r.chunk_id for r in fused] == ["p#c7"]
 
     def test_paper_level_pseudo_chunk_is_kept_when_alone(self):
-        """実チャンクが無い論文を候補から消してはいけない（順位付けには使う）。"""
+        """A paper with no real chunk stays a candidate; it is still ranked."""
         run = [result("p#paper", "p", source="bm25s_paper")]
         fused = paper_rrf_fuse([run], top_k=10, chunks_per_paper=1)
         assert [r.chunk_id for r in fused] == ["p#paper"]
 
     def test_ties_are_broken_deterministically(self):
-        """実行のたびに並びが変わらないこと（bib_coupling で踏んだ事故の予防）。"""
+        """The order does not change between runs — the accident bib_coupling hit."""
         run = [result("b#c0", "b"), result("a#c0", "a")]
         first = paper_rrf_fuse([run, run], top_k=10)
         second = paper_rrf_fuse([run, run], top_k=10)
@@ -104,8 +105,15 @@ class TestPaperRRFFuse:
         assert PaperRRFFuser(k=60).fuse([run], top_k=5)[0].chunk_id == "p#c0"
 
 
+# The question the seed-expansion tests search with. **It has to be shorter than
+# the anchor-vocabulary key ("reward shape")**: StubIndexer matches substrings
+# longest key first, and the expanded query contains both, so the anchor vocabulary
+# only wins while it is the longer of the two.
+QUESTION = "the query"
+
+
 class StubIndexer:
-    """クエリ文字列ごとに返す結果を決め打ちするスタブ。"""
+    """A stub whose results are fixed per query string."""
 
     name = "bm25s"
 
@@ -115,8 +123,9 @@ class StubIndexer:
 
     def search(self, query, top_k):
         self.queries.append(query)
-        # 拡張クエリは「元の質問 + anchor 本文」なので両方のキーに当たる。
-        # 長いキー（= より具体的な語彙）を優先して、拡張後だけ別の結果を返す。
+        # The expanded query is "the question + the anchor's text", so it matches
+        # both keys. The longer key (the more specific vocabulary) wins, so only the
+        # expanded query gets the other results.
         for key in sorted(self.by_query, key=len, reverse=True):
             if key in query:
                 return self.by_query[key][:top_k]
@@ -133,7 +142,7 @@ class StubStore:
     def load_paper(self, paper_id):
         return [
             {"chunk_id": f"{paper_id}#c0000", "chunk_type": "title_abstract", "text": self.texts[paper_id]},
-            {"chunk_id": f"{paper_id}#c0001", "chunk_type": "text_span", "text": "本文"},
+            {"chunk_id": f"{paper_id}#c0001", "chunk_type": "text_span", "text": "body"},
         ]
 
 
@@ -141,9 +150,9 @@ class TestSeedExpansion:
     def _retriever(self, **kwargs):
         indexer = StubIndexer(
             {
-                # 元の質問では p_seed が1位、gold は引けない。
-                "元の質問": [result("p_seed#c0", "p_seed"), result("p_other#c0", "p_other")],
-                # anchor の語彙（reward shape）を足すと gold が引ける。
+                # The question alone puts p_seed first and never reaches gold.
+                QUESTION: [result("p_seed#c0", "p_seed"), result("p_other#c0", "p_other")],
+                # Adding the anchor's vocabulary (reward shape) reaches gold.
                 "reward shape": [result("p_gold#c0", "p_gold"), result("p_seed#c0", "p_seed")],
             }
         )
@@ -156,8 +165,8 @@ class TestSeedExpansion:
 
     def test_disabled_by_default_runs_one_search(self):
         retriever, indexer = self._retriever()
-        papers = to_gold_papers(retriever.retrieve("元の質問", 10))
-        assert indexer.queries == ["元の質問"]
+        papers = to_gold_papers(retriever.retrieve(QUESTION, 10))
+        assert indexer.queries == [QUESTION]
         assert "p_gold" not in papers
 
     def test_expands_with_the_top_paper_vocabulary(self):
@@ -165,14 +174,14 @@ class TestSeedExpansion:
             seed_expansion=SeedExpansion(query_chars=512),
             anchor_store=StubStore({"p_seed": "[ICML 2025] Seed Paper\nWe study reward shape."}),
         )
-        papers = to_gold_papers(retriever.retrieve("元の質問", 10))
+        papers = to_gold_papers(retriever.retrieve(QUESTION, 10))
         assert len(indexer.queries) == 2
-        # 2本目のクエリは「元の質問 + anchor の title+abstract」。
-        assert indexer.queries[1].startswith("元の質問")
+        # The second query is the question plus the anchor's title+abstract.
+        assert indexer.queries[1].startswith(QUESTION)
         assert "reward shape" in indexer.queries[1]
-        # 拡張でしか引けない論文が候補に入る。
+        # The paper only the expansion reaches is now a candidate.
         assert "p_gold" in papers
-        # 元の質問の1位は融合後も残る（両方の run に居るので上位）。
+        # The question's own top hit survives the fusion, being in both runs.
         assert papers[0] == "p_seed"
 
     def test_query_chars_truncates_the_anchor_text(self):
@@ -180,23 +189,23 @@ class TestSeedExpansion:
             seed_expansion=SeedExpansion(query_chars=10),
             anchor_store=StubStore({"p_seed": "0123456789reward shape"}),
         )
-        retriever.retrieve("元の質問", 10)
+        retriever.retrieve(QUESTION, 10)
         assert "reward shape" not in indexer.queries[1]
         assert indexer.queries[1].endswith("0123456789")
 
     def test_falls_back_to_the_hit_chunk_without_a_store(self):
         retriever, indexer = self._retriever(seed_expansion=SeedExpansion())
-        retriever.retrieve("元の質問", 10)
+        retriever.retrieve(QUESTION, 10)
         assert len(indexer.queries) == 2
         assert "title of p_seed" in indexer.queries[1]
 
     def test_no_op_when_the_first_search_is_empty(self):
         retriever, indexer = self._retriever(seed_expansion=SeedExpansion())
-        assert retriever.retrieve("当たらない質問", 10) == []
+        assert retriever.retrieve("a query that matches nothing", 10) == []
         assert len(indexer.queries) == 1
 
     def test_reranker_runs_once_with_the_original_query(self):
-        """Seed Expansion は reranker の前に置くので推論回数が増えないこと。"""
+        """Seed Expansion runs before the reranker, so inference count does not rise."""
         calls = []
 
         class StubReranker:
@@ -210,7 +219,7 @@ class TestSeedExpansion:
         )
         retriever.reranker = StubReranker()
         retriever.pool_k = 20
-        retriever.retrieve("元の質問", 10)
-        assert calls == ["元の質問"]
+        retriever.retrieve(QUESTION, 10)
+        assert calls == [QUESTION]
 
 

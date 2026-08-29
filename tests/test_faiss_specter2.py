@@ -1,12 +1,13 @@
-"""SPECTER2 索引が「512トークン超えで落ちる」バグに戻らないことを守るテスト。
+"""Guards the SPECTER2 index against regressing to "dies past 512 tokens".
 
-SPECTER2 は max_position_embeddings=512 の BERT だが、tokenizer の model_max_length は
-未設定（1e19）。そのため max_length に 512 より大きい値を渡すと truncation=True でも
-切り詰められず、forward が位置埋め込みの範囲外で落ちる:
+SPECTER2 is a BERT with max_position_embeddings=512, but its tokenizer leaves
+model_max_length unset (1e19). A max_length above 512 is therefore not truncated
+even with truncation=True, and forward runs past the position embeddings and dies:
 
     RuntimeError: The size of tensor a (1002) must match the size of tensor b (512)
 
-MinerU のチャンクは約8%が512トークンを超えるので、これを踏むと索引構築が必ず途中で死ぬ。
+About 8% of MinerU's chunks are longer than 512 tokens, so hitting this kills any
+build partway through — it is not a rare edge case.
 """
 
 from __future__ import annotations
@@ -20,14 +21,14 @@ from littraceqa.di_pipeline.index.faiss_specter2 import _MAX_TOKENS, Specter2FAI
 
 
 class _RecordingTokenizer:
-    """tokenizer に渡された max_length を記録するスタブ。"""
+    """A stub tokenizer that records the max_length it was given."""
 
     def __init__(self):
         self.max_lengths: list[int] = []
 
     def __call__(self, batch, padding, truncation, max_length, return_tensors):
         self.max_lengths.append(max_length)
-        # 実際の tokenizer と同じく max_length で頭打ちにする
+        # Cap at max_length, as the real tokenizer does
         seq_len = min(max_length, 1000)
         return _Encoded(len(batch), seq_len)
 
@@ -41,7 +42,7 @@ class _Encoded(dict):
 
 
 class _StubModel:
-    """位置埋め込み512本の BERT を模したスタブ。512を超えたら本物と同じように落ちる。"""
+    """A stub BERT with 512 position embeddings; past 512 it dies, as the real one does."""
 
     max_positions = 512
 
@@ -75,26 +76,26 @@ def index(tmp_path):
 
 
 def test_max_tokens_does_not_exceed_specter2_position_embeddings():
-    """SPECTER2 は BERT(512)。ここを増やすと長いチャンクで forward が落ちる。"""
+    """SPECTER2 is a BERT(512). Raising this makes forward die on long chunks."""
     assert _MAX_TOKENS == 512
 
 
 def test_embed_truncates_to_512(index):
-    """長文を渡しても 512 に切り詰めてトークナイズする。"""
+    """Long text is truncated to 512 before tokenising."""
     embeddings = index._embed(["word " * 4000], adapter="proximity")
     assert index._tokenizer.max_lengths == [512]
     assert embeddings.shape == (1, 768)
 
 
 def test_embed_survives_chunks_longer_than_512_tokens(index):
-    """8000文字級のチャンク（>512トークン）が混ざっても例外にならない。"""
+    """A chunk of 8000 characters (>512 tokens) in the mix raises nothing."""
     texts = ["short", "word " * 4000, "medium " * 200]
     embeddings = index._embed(texts, adapter="proximity")
     assert embeddings.shape == (3, 768)
 
 
 def test_embed_switches_adapter(index):
-    """文書側 proximity / クエリ側 adhoc_query を adapters の API で切り替える。"""
+    """proximity for documents, adhoc_query for queries, through the adapters API."""
     index._embed(["doc"], adapter="proximity")
     assert index._model.active == "proximity"
     index._embed(["query"], adapter="adhoc_query")
@@ -102,7 +103,7 @@ def test_embed_switches_adapter(index):
 
 
 def test_embed_returns_l2_normalized_float32(index):
-    """内積がコサイン類似度になるよう L2 正規化した float32 を返す。"""
+    """Returns L2-normalised float32, so the inner product is cosine similarity."""
     embeddings = index._embed(["a", "b"], adapter="proximity")
     assert embeddings.dtype == np.float32
     norms = np.linalg.norm(embeddings, axis=1)
@@ -110,6 +111,6 @@ def test_embed_returns_l2_normalized_float32(index):
 
 
 def test_fp16_disabled_on_cpu(tmp_path):
-    """CPU では half() が使えないので fp16 は自動的に無効になる。"""
+    """half() is unavailable on CPU, so fp16 turns itself off."""
     assert Specter2FAISSIndex(index_dir=str(tmp_path), device="cpu").fp16 is False
     assert Specter2FAISSIndex(index_dir=str(tmp_path), device="cuda").fp16 is True

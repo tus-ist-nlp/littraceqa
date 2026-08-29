@@ -1,10 +1,12 @@
-"""Qwen3-Embedding-8B 索引の設定まわりのテスト（GPU不要）。
+"""The Qwen3-Embedding-8B index's configuration (no GPU required).
 
-実測した制約:
-* fp32 だと重みが約32GBになり 24GB の RTX 3090 に載らない → fp16 が既定
-* 4096次元 x 256万件 = 42GB。RAM に貯めるとピーク126GBで実RAM 125GB を超える
-  → memmap 経由にする
-* 5.7 chunks/s (1GPU) なので 256万件は約124時間 → 複数GPUへのデータ並列が必須
+The measured constraints behind it:
+* At fp32 the weights are about 32GB and do not fit a 24GB RTX 3090 -> fp16 is the
+  default
+* 4096 dims x 2.56M chunks = 42GB; held in RAM the peak is 126GB, past the 125GB
+  the machine has -> it goes through a memmap
+* At 5.7 chunks/s on one GPU, 2.56M chunks take about 124 hours -> data parallelism
+  across GPUs is not optional
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from littraceqa.di_pipeline.index.faiss_qwen3 import _ADD_ROWS, Qwen3FAISSIndex
 
 
 def test_fp16_is_the_default(tmp_path):
-    """fp32 では 8B の重み(約32GB)が 24GB の 3090 に載らない。"""
+    """At fp32 the 8B weights (about 32GB) do not fit a 24GB 3090."""
     assert Qwen3FAISSIndex(index_dir=str(tmp_path), device="cuda").fp16 is True
 
 
@@ -26,7 +28,7 @@ def test_fp16_is_disabled_on_cpu(tmp_path):
 
 
 def test_devices_are_parsed_for_data_parallel(tmp_path):
-    """複数GPUをカンマ区切りで受け取り、データ並列で分散する。"""
+    """Several GPUs arrive comma-separated and the work is split data-parallel."""
     index = Qwen3FAISSIndex(
         index_dir=str(tmp_path), devices="cuda:0, cuda:1 ,cuda:2,cuda:3"
     )
@@ -40,10 +42,10 @@ def test_devices_defaults_to_the_single_device(tmp_path):
 
 
 def test_shard_boundaries_cover_every_row_exactly_once():
-    """担当範囲の切り方に穴も重複も無いこと。
+    """The shard ranges leave no gap and no overlap.
 
-    ここがずれると memmap の一部が未初期化（ゼロ）のまま faiss に入り、
-    検索結果が静かに壊れる。
+    **A mistake here puts uninitialised (zero) rows of the memmap into faiss** and
+    the search results break silently.
     """
     for n in (1, 7, 100, 2_564_545):
         for world in (1, 2, 3, 4):
@@ -59,8 +61,8 @@ def test_faiss_add_is_sliced_to_avoid_touching_42gb_at_once():
     assert _ADD_ROWS <= 200_000
 
 
-# ---- 再開（resume）まわり -------------------------------------------------
-# 30時間級のビルドが途中で落ちたときに全部やり直しにならないための仕組み。
+# ---- resuming -------------------------------------------------------------
+# What keeps a 30-hour build from starting over when it dies partway.
 
 import numpy as np  # noqa: E402
 
@@ -86,7 +88,7 @@ def test_first_build_creates_both_intermediate_files(tmp_path):
 
 
 def test_resume_keeps_the_previous_progress(tmp_path):
-    """件数・次元が一致すれば前回の途中経過を引き継ぐこと。"""
+    """Last run's progress is picked up when the row count and dimension match."""
     index = _index(tmp_path)
     memmap_path = tmp_path / _EMBEDDINGS_FILENAME
     done_path = tmp_path / _DONE_FILENAME
@@ -102,7 +104,7 @@ def test_resume_keeps_the_previous_progress(tmp_path):
 
 
 def test_mismatched_size_starts_over(tmp_path):
-    """チャンク件数が変わっていたら作り直すこと（古い中身を混ぜない）。"""
+    """A changed chunk count rebuilds, so nothing stale is mixed in."""
     index = _index(tmp_path)
     memmap_path = tmp_path / _EMBEDDINGS_FILENAME
     done_path = tmp_path / _DONE_FILENAME
@@ -112,7 +114,7 @@ def test_mismatched_size_starts_over(tmp_path):
     done.flush()
     del done
 
-    # 件数が 10 -> 12 に変わった
+    # the count changed, 10 -> 12
     assert index._prepare_memmap(memmap_path, done_path, n=12, dim=4) is False
     assert np.memmap(done_path, dtype="uint8", mode="r", shape=(12,)).sum() == 0
 

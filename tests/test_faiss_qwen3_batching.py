@@ -1,9 +1,10 @@
-"""トークン予算バッチと再開処理のテスト（OOM 対策の中身）。
+"""Token-budget batching and resuming — the substance of the OOM guard.
 
-チャンクは長さ順にソートしてからバッチ化されるので、件数固定のバッチだと
-末尾に長い外れ値が集まり「batch_size × max_tokens」のパディング後トークン数になる。
-実測では全チャンクの99%が738トークン以下・8192に張り付くのは0.002%なので、
-そこだけのために batch_size を下げると大多数のバッチが無駄に小さくなる。
+Chunks are sorted by length before batching, so a fixed count collects the long
+outliers into the last batches, whose padded token count is batch_size x
+max_tokens. Measured, 99% of chunks are 738 tokens or fewer and only 0.002% reach
+8192, so **lowering batch_size for those few makes the vast majority of batches
+needlessly small.**
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ def _batches(texts: list[str], budget: int) -> list[list[int]]:
 
 
 def test_padded_tokens_never_exceed_the_budget():
-    """どのバッチも「件数 × バッチ内最長トークン」が予算以下であること。"""
+    """Every batch keeps rows x longest-row-tokens within the budget."""
     texts = ["x" * n for n in (10, 50, 100, 3500, 7000, 30000, 60000)]
     budget = 8192
 
@@ -32,18 +33,18 @@ def test_padded_tokens_never_exceed_the_budget():
 
 
 def test_long_outliers_get_their_own_batch():
-    """max_tokens に張り付く長さのチャンクは1件ずつになること。"""
-    texts = ["x" * 100] * 20 + ["x" * 60000]  # 60000文字 -> 8192トークンで頭打ち
+    """A chunk long enough to hit max_tokens ends up alone in its batch."""
+    texts = ["x" * 100] * 20 + ["x" * 60000]  # 60000 chars -> capped at 8192 tokens
     budget = 8192
 
     batches = _batches(texts, budget)
 
-    assert [len(b) for b in batches][-1] == 1  # 末尾（最長）は単独
+    assert [len(b) for b in batches][-1] == 1  # the last (longest) is on its own
 
 
 def test_short_chunks_batch_larger_than_a_fixed_size():
-    """短いチャンクは件数固定(8)よりも大きなバッチにまとまること（速度の根拠）。"""
-    texts = ["x" * 900] * 100  # 約257トークン
+    """Short chunks group into batches larger than the fixed 8 — this is the speed-up."""
+    texts = ["x" * 900] * 100  # about 257 tokens
     budget = 8192
 
     batches = _batches(texts, budget)
@@ -52,7 +53,7 @@ def test_short_chunks_batch_larger_than_a_fixed_size():
 
 
 def test_every_index_appears_exactly_once():
-    """1件も落とさず、重複もしないこと。"""
+    """Nothing is dropped and nothing is batched twice."""
     texts = ["x" * n for n in range(1, 200)]
 
     flat = [i for batch in _batches(texts, 4096) for i in batch]
@@ -68,9 +69,9 @@ def test_estimate_tokens_is_capped_at_max_tokens():
     assert _estimate_tokens("x" * 10_000_000, MAX_TOKENS) == MAX_TOKENS
 
 
-# ---- flush の間隔 ---------------------------------------------------------
-# np.memmap.flush() はマッピング全体への msync なので、毎バッチ呼ぶと
-# 42GB級の索引ではディスクが飽和して GPU が遊ぶ（実測 3.4 -> 15〜33秒/バッチ）。
+# ---- how often to flush ---------------------------------------------------
+# np.memmap.flush() msyncs the whole mapping, so calling it every batch saturates
+# the disk on a 42GB index and leaves the GPU idle (measured: 3.4 -> 15-33 s/batch).
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
@@ -79,13 +80,13 @@ from littraceqa.di_pipeline.index.faiss_qwen3 import Qwen3FAISSIndex  # noqa: E4
 
 
 def test_flush_every_defaults_to_batching_not_every_batch(tmp_path):
-    """既定で毎バッチ flush しないこと（1 なら毎バッチになってしまう）。"""
+    """The default does not flush every batch (a value of 1 would)."""
     index = Qwen3FAISSIndex(index_dir=str(tmp_path), device="cpu")
     assert index.flush_every > 1
 
 
 class _CountingMemmap(np.ndarray):
-    """flush() の呼び出し回数を数える memmap 代用。"""
+    """A stand-in for a memmap that counts flush() calls."""
 
     def __new__(cls, shape):
         obj = np.zeros(shape, dtype="float32").view(cls)
@@ -97,18 +98,19 @@ class _CountingMemmap(np.ndarray):
 
 
 def test_commit_does_not_msync_the_embeddings_mapping():
-    """完了フラグの確定で埋め込み本体を msync しないこと。
+    """Committing the completion flags does not msync the embeddings.
 
-    np.memmap.flush() はマッピング全体への msync で、書き込み行が長さ順ソートの
-    結果ファイル全体に散っているため HDD ではヘッドが14GBを飛び回る。実測で
-    blk-wbt のライトバックスロットリング(rq_qos_wait)に捕まり21分以上ブロックした。
-    mmap 書き込みはプロセスが死んでもページキャッシュに残るので、再開のためには
-    msync は要らない（守れるのは電源断だけ）。
+    np.memmap.flush() msyncs the whole mapping, and because the rows were sorted by
+    length the written ones are scattered through the file, so on an HDD the head
+    crosses 14GB. Measured, blk-wbt's writeback throttling (rq_qos_wait) caught it
+    and blocked for over 21 minutes. A write to an mmap stays in the page cache even
+    if the process dies, so resuming never needs the msync — it protects against
+    power loss and nothing else.
     """
     embeddings = _CountingMemmap((10, 4))
     done = np.zeros(10, dtype="uint8")
 
-    # commit 相当: 完了フラグを立てるだけ
+    # the commit: set the completion flags, nothing more
     for i in (0, 1, 2):
         done[i] = 1
 
@@ -118,5 +120,5 @@ def test_commit_does_not_msync_the_embeddings_mapping():
 
 @pytest.mark.parametrize("flush_every,n_batches,expected", [(200, 1000, 5), (50, 100, 2)])
 def test_flush_count_scales_with_flush_every(flush_every, n_batches, expected):
-    """flush 回数が バッチ数 / flush_every になること（I/O が 1/N になる根拠）。"""
+    """flush runs batches / flush_every times — this is where the 1/N I/O comes from."""
     assert n_batches // flush_every == expected

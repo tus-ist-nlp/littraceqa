@@ -1,8 +1,9 @@
-"""会議名・年による属性フィルタのテスト。
+"""The venue/year attribute filter.
 
-一番大事なのは「**抽出してはいけない質問で抽出しないこと**」。本番の質問分布は
-分からないので、発火しなければ現状と同じ動作に戻る（＝損失ゼロ）という性質だけが
-安全の担保になる。誤って絞り込むと gold を候補から落として recall が壊れる。
+**What matters most is not extracting where extraction would be wrong.** The
+distribution of production questions is unknown, so the only thing that makes this
+safe is that not firing falls back to exactly the previous behaviour — zero loss.
+Narrowing wrongly drops gold from the candidates and breaks recall outright.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from littraceqa.di_pipeline.retrieve.attribute_filter import (
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever
 from littraceqa.di_pipeline.retrieve.paper_rrf import PaperRRFFuser
 
-# 本物の paper_metadata.jsonl と同じ venue 構成（件数だけ縮めたもの）。
+# The same venue mix as the real paper_metadata.jsonl, with the counts scaled down.
 _PAPERS = (
     [{"paper_id": f"naacl2025_{i:03d}", "venue": "NAACL", "year": 2025} for i in range(5)]
     + [{"paper_id": f"cvpr2025_{i:03d}", "venue": "CVPR", "year": 2025} for i in range(10)]
@@ -50,7 +51,7 @@ def _result(chunk_id: str, venue: str, year: int, score: float = 1.0) -> Retriev
     )
 
 
-# ---- 抽出する例 -----------------------------------------------------------
+# ---- what should be extracted ---------------------------------------------
 
 
 def test_extracts_venue_and_year(extractor):
@@ -67,18 +68,18 @@ def test_extracts_venue_without_year(extractor):
 
 
 def test_acl_does_not_match_inside_naacl(extractor):
-    """ACL が NAACL の部分文字列として拾われないこと（語境界）。"""
+    """ACL is not picked up inside NAACL — word boundaries."""
     f = extractor.extract("Among NAACL 2025 papers, which one uses MCTS?")
     assert f.venue == "NAACL"
 
 
-# ---- 抽出してはいけない例 -------------------------------------------------
+# ---- what must not be extracted -------------------------------------------
 
 
 def test_all_venues_disables_extraction(extractor):
-    """「全会議が対象」と明示されている質問では絞り込まない。
+    """A question that says "all venues" narrows nothing.
 
-    実例では gold が iccv / neurips / icml にまたがっていた。
+    In the real case its gold spanned iccv, neurips and icml.
     """
     f = extractor.extract(
         "Across all venues, among 2025 inference-time scaling methods for "
@@ -88,7 +89,7 @@ def test_all_venues_disables_extraction(extractor):
 
 
 def test_two_venues_disables_extraction(extractor):
-    """引用先の会議名が混ざったら諦める。"""
+    """Two venue names means one of them belongs to a cited paper; give up."""
     f = extractor.extract(
         "Which CVPR 2025 papers cite a NeurIPS baseline in their comparison table?"
     )
@@ -96,17 +97,18 @@ def test_two_venues_disables_extraction(extractor):
 
 
 def test_year_only_is_not_extracted(extractor):
-    """年だけの言及では絞り込まない（2025 で絞っても 8.7% しか削れない）。"""
+    """A bare year narrows nothing: filtering to 2025 removes only 8.7%."""
     f = extractor.extract("What is the best 2025 method for long-context evaluation?")
     assert f.is_empty()
 
 
 def test_spaceless_cited_venue_is_ignored(extractor):
-    """引用先の "CVPR2023" に引きずられないこと。
+    """A cited paper's "CVPR2023" does not drag the extraction along.
 
-    実例: "Which CVPR 2025 papers cite UniAD (..., CVPR2023)"
-    語境界(\\b)により "CVPR2023" は会議名としても隣接年としても拾われないので、
-    質問本来の制約 CVPR 2025 だけが残る（gold は全て cvpr2025_* なので正しい）。
+    The real case: "Which CVPR 2025 papers cite UniAD (..., CVPR2023)". Word
+    boundaries (\\b) keep "CVPR2023" from matching either as a venue or as an
+    adjacent year, so only the question's own constraint, CVPR 2025, survives —
+    correctly, since all its gold is cvpr2025_*.
     """
     f = extractor.extract(
         "Which CVPR 2025 papers cite UniAD (Planning-oriented Autonomous Driving, CVPR2023)?"
@@ -115,14 +117,14 @@ def test_spaceless_cited_venue_is_ignored(extractor):
 
 
 def test_conflicting_adjacent_years_drop_the_year(extractor):
-    """同じ会議名に別々の年が空白付きで付いていたら年は使わない（会議名だけ残す）。"""
+    """One venue with two spaced years drops the year and keeps the venue."""
     f = extractor.extract("Which CVPR 2025 papers cite a CVPR 2023 baseline?")
     assert f.venue == "CVPR"
     assert f.year is None
 
 
 def test_year_absent_from_corpus_is_dropped(extractor):
-    """コーパスに無い年で絞ると必ず空になるので、年は使わない。"""
+    """A year the corpus does not have would always filter to nothing, so it is dropped."""
     f = extractor.extract("Which NAACL 2019 papers use MCTS?")
     assert f == AttributeFilter(venue="NAACL", year=None)
 
@@ -131,7 +133,7 @@ def test_empty_question(extractor):
     assert extractor.extract("").is_empty()
 
 
-# ---- フィルタと選択率 -----------------------------------------------------
+# ---- filtering and selectivity --------------------------------------------
 
 
 def test_filter_results_keeps_only_matching():
@@ -152,16 +154,16 @@ def test_empty_filter_keeps_everything():
 
 
 def test_selectivity(extractor):
-    # NAACL 2025 は 5 / 40 本
+    # NAACL 2025 is 5 of the 40
     assert extractor.selectivity(AttributeFilter(venue="NAACL", year=2025)) == pytest.approx(0.125)
     assert extractor.selectivity(AttributeFilter()) == 1.0
 
 
-# ---- HybridRetriever との結合 ---------------------------------------------
+# ---- wired into HybridRetriever -------------------------------------------
 
 
 class _StubIndexer:
-    """要求された件数だけ、NAACL と CVPR を交互に返すダミー索引。"""
+    """A dummy index returning as many results as asked, alternating NAACL and CVPR."""
 
     name = "stub"
 
@@ -189,19 +191,19 @@ def _retriever(indexer, extractor, **kwargs) -> HybridRetriever:
 
 
 def test_no_filter_path_is_unchanged(extractor):
-    """制約が取れない質問では per_index_k をそのまま要求すること（従来動作）。"""
+    """With no constraint, per_index_k is requested unchanged — the previous behaviour."""
     indexer = _StubIndexer()
     _retriever(indexer, extractor).retrieve("what is the best method?", top_k=5)
     assert indexer.requested_k == [10]
 
 
 def test_filter_over_fetches_and_drops(extractor):
-    """制約があるときは多めに取り、条件に合わないものを落とすこと。"""
+    """With a constraint, over-fetch and drop what does not match."""
     indexer = _StubIndexer()
     results = _retriever(indexer, extractor, min_filtered_results=1).retrieve(
         "Which NAACL 2025 papers use MCTS?", top_k=5
     )
-    # 10 / 0.125 * 1.5 = 120 件を要求する
+    # asks for 10 / 0.125 * 1.5 = 120
     assert indexer.requested_k == [120]
     assert results
     assert all(r.metadata["venue"] == "NAACL" for r in results)
@@ -216,7 +218,7 @@ def test_fetch_k_is_capped(extractor):
 
 
 def test_fails_open_when_filter_empties_the_run(extractor):
-    """絞り込み後が min_results 未満なら制約なしに戻すこと（fail-open）。"""
+    """Fewer than min_results after filtering falls back to no constraint (fail-open)."""
     indexer = _StubIndexer()
     results = _retriever(indexer, extractor, min_filtered_results=1000).retrieve(
         "Which NAACL 2025 papers use MCTS?", top_k=5
@@ -224,23 +226,24 @@ def test_fails_open_when_filter_empties_the_run(extractor):
     assert any(r.metadata["venue"] == "CVPR" for r in results)
 
 
-# ---- LLM 抽出（正規表現が空のときだけ後ろに足す）---------------------------
+# ---- selectivity and a caller-supplied constraint -------------------------
 
 
 def test_year_only_selectivity(extractor):
-    """年だけの制約でも選択率が引けること（fetch_k の逆算に使う）。"""
-    # ECCV 2024 は 5 / 40 本
+    """A year-only constraint still has a selectivity, which fetch_k works back from."""
+    # ECCV 2024 is 5 of the 40
     assert extractor.selectivity(AttributeFilter(year=2024)) == pytest.approx(0.125)
 
 
 def test_explicit_filter_overrides_extraction(extractor):
-    """呼び出し側が渡した制約が、クエリからの抽出より優先されること。
+    """A constraint passed in wins over one extracted from the query.
 
-    ReadingAgent は元の質問から抽出した制約をサブクエリ検索に渡してくる。
+    ReadingAgent extracts once from the original question and passes that down to
+    each subquery search.
     """
     indexer = _StubIndexer()
     results = _retriever(indexer, extractor, min_filtered_results=1).retrieve(
-        "number of subfigures",  # サブクエリ側には会議名が無い
+        "number of subfigures",  # the subquery itself names no venue
         top_k=5,
         attribute_filter=AttributeFilter(venue="NAACL", year=2025),
     )

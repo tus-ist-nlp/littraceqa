@@ -41,12 +41,15 @@ import openai
 from openai import AzureOpenAI
 
 
-# Kept in Japanese deliberately: this is the prompt the measured system ran with,
-# and rewording it would change the model's output.
+# **This is an input to the model, not a comment.** Every other prompt in the
+# pipeline (agent/reading.py) is English and the corpus is English, so it is English
+# here too; it was Japanese when the reported numbers were measured, and a prompt
+# change can move an LLM's output, so a re-measurement is the way to confirm nothing
+# shifted.
 _SYSTEM = (
-    "あなたは科学論文の検索システムの一部として動作しています。"
-    "指示された出力フォーマットに厳密に従ってください。"
-    "JSON を求められたら、前置きや説明を付けずに JSON だけを出力してください。"
+    "You are part of a search system over scientific papers. "
+    "Follow the requested output format exactly. "
+    "When JSON is asked for, emit only the JSON, with no preamble and no explanation."
 )
 
 _REQUIRED = (
