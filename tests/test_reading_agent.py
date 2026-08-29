@@ -24,13 +24,10 @@ from littraceqa.di_pipeline.llm.fake import FakeLLM
 
 
 def _query(**kwargs) -> Query:
-    # task_family is set explicitly. Retrieval never uses it; it is here only so the
-    # fixtures match what the gold data actually carries.
     base = {
         "query_id": "q_1",
         "question": "Which papers report FID on CIFAR-10?",
         "answer_types": ["table"],
-        "task_family": "multi_paper",
     }
     base.update(kwargs)
     return Query(**base)
@@ -690,7 +687,9 @@ def test_decompose_asks_for_a_fixed_number_of_subqueries():
     for task_family in ("hidden_source_single_paper", "multi_paper"):
         llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
         agent = ReadingAgent(_StubRetriever(), llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
-        agent.run(_query(task_family=task_family))
+        # task_family is not a Query field at all, so a record carrying it builds
+        # the same Query as one without: the branch cannot come back by accident.
+        agent.run(Query.from_dict({**_query().to_dict(), "task_family": task_family}))
         decompose_prompt = llm.calls[0]
         assert f"into {SUBQUERY_COUNT} short" in decompose_prompt
         # No wording committed to one case survives; one sentence covers both
@@ -699,14 +698,13 @@ def test_decompose_asks_for_a_fixed_number_of_subqueries():
 
 
 def test_decompose_does_not_call_the_task_family_classifier():
-    """Production input (no task_family) does not cost an extra LLM call to split.
+    """Splitting costs no extra LLM call, whatever the input carries.
 
     Back when it did, a "single or multi" guess ran before the split and the read,
     making three LLM calls per query instead of two.
     """
     llm = FakeLLM(responses=[_subqueries("sq"), _judge(["p0"], sufficient=True)])
     agent = ReadingAgent(_StubRetriever(), llm=llm, config=ReadingConfig(max_steps=1, retrieve_top_k=5))
-    # A query without task_family, as --production-input produces
     agent.run(Query(query_id="q_prod", question="Which papers report FID?", answer_types=[]))
 
     assert len(llm.calls) == 2  # the split and the read, nothing else

@@ -493,9 +493,9 @@ def evaluate(
             ranked = candidate_paper_ids(pred) or []
             row["n_candidates"] = len(ranked)
             row["gold_ranks"] = gold_ranks(gold_paper_ids, ranked)
-            # task_family is stripped from production input (run_search.py
-            # --production-input), so it is **always read from gold, never from the
-            # prediction**. Unknown or missing counts towards total only.
+            # Production input has no task_family, and `Query` does not carry it
+            # either, so it is **always read from gold, never from the prediction**.
+            # Unknown or missing counts towards total only.
             task_family = normalize_id(gold.get("task_family"))
             scenarios = ["total"]
             if task_family == SINGLE:

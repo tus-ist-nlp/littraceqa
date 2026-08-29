@@ -7,13 +7,12 @@ the dataclasses defined here, so **reading just these boundaries is enough to
 follow the whole flow** without opening any stage.
 
 `to_dict()` comes from `_AsDict` (which delegates to `dataclasses.asdict()`).
-The reverse, `from_dict()`, exists only on Query and PaperMeta because those read
+The reverse, `from_dict()`, exists only on Query, which is the one class read from
 external jsonl, and it **raises KeyError on a missing required field** rather than
 quietly substituting None.
 
 The classes in pipeline order:
     Query            -- one input to the system (a question about the corpus).
-    PaperMeta        -- one record of ``data/paper_metadata.jsonl``.
     Chunk            -- the preprocessing → indexing boundary.
     RetrievalResult  -- the indexing → fusion boundary.
     EvidenceLocator  -- where one piece of evidence sits (fields vary by source_type).
@@ -44,19 +43,21 @@ class _AsDict:
         return asdict(self)
 
 
-# The two values `task_family` takes in the gold data. **Absent from production
-# input**, so retrieval never uses it; scoring (scripts/evaluate.py) uses it to
-# break results down into single/multi.
+# The two values `task_family` takes in the gold data. **It is not on Query** —
+# retrieval never reads it; only scoring (scripts/evaluate.py) uses it, and reads it
+# from the gold record, to break results down into single/multi.
 SINGLE = "hidden_source_single_paper"
 MULTI = "multi_paper"
 
 
 # 1. Query -- one input to the system (a question).
 #
-# Production input carries only four fields: query_id / question / answer_types /
-# table_schema. task_family and primary_evidence_type are not provided (the local
-# validation_inputs.jsonl has them, production does not), so both are optional and
-# retrieval uses neither (submission is simply the top max_papers candidates).
+# **These four fields are the whole input**, and they are exactly the ones a
+# production record and a validation record share. The validation data also carries
+# task_family, primary_evidence_type and (joined in from gold) the multiple_choice
+# options; none of them are here, because nothing in retrieval ever read them. Which
+# papers to submit is simply the top max_papers candidates, and generating the
+# answer belongs to the reading team.
 @dataclass
 class Query(_AsDict):
     query_id: str
@@ -65,68 +66,19 @@ class Query(_AsDict):
     # Column spec, present only for table answers:
     # [{"name": ..., "type": ..., "is_row_key": bool}]
     table_schema: list[dict] | None = None
-    # multiple_choice options {"A": "...", "B": "..."}. In the validation data these
-    # live on the gold side only, so this is populated only when the options are
-    # joined in explicitly. **Answer generation belongs to the reading team**, so
-    # the retrieval agent never reads it.
-    options: dict | None = None
-    # The next two are absent from production input; only the local validation data has them.
-    task_family: str | None = None  # SINGLE / MULTI (used only to break down scores)
-    primary_evidence_type: str | None = None  # observed: "table" / "figure" / "text_span" / "citation_context" / "equation_algorithm"
 
     @classmethod
     def from_dict(cls, d: dict) -> Query:
-        """Build a Query from one input jsonl record; fields absent in production become None."""
+        """Build a Query from one input jsonl record, ignoring any other field."""
         return cls(
             query_id=d["query_id"],
             question=d["question"],
             answer_types=d.get("answer_types") or [],
             table_schema=d.get("table_schema"),
-            options=d.get("options"),
-            task_family=d.get("task_family"),
-            primary_evidence_type=d.get("primary_evidence_type"),
         )
 
 
-# 2. PaperMeta -- one record of data/paper_metadata.jsonl.
-@dataclass
-class PaperMeta(_AsDict):
-    paper_id: str
-    title: str
-    authors: list[str]
-    abstract: str
-    venue: str
-    year: int
-    track: str | None
-    award: str | None
-    source_url: str | None
-    pdf_url: str | None
-    arxiv_id: str | None
-    doi: str | None
-    openreview_id: str | None
-    anthology_id: str | None
-
-    @classmethod
-    def from_dict(cls, d: dict) -> PaperMeta:
-        return cls(
-            paper_id=d["paper_id"],
-            title=d["title"],
-            authors=d["authors"],
-            abstract=d["abstract"],
-            venue=d["venue"],
-            year=d["year"],
-            track=d.get("track"),
-            award=d.get("award"),
-            source_url=d.get("source_url"),
-            pdf_url=d.get("pdf_url"),
-            arxiv_id=d.get("arxiv_id"),
-            doi=d.get("doi"),
-            openreview_id=d.get("openreview_id"),
-            anthology_id=d.get("anthology_id"),
-        )
-
-
-# 3. Chunk -- the preprocessing → indexing boundary.
+# 2. Chunk -- the preprocessing → indexing boundary.
 @dataclass
 class Chunk(_AsDict):
     chunk_id: str  # of the form "{paper_id}#c{idx:04d}"
@@ -137,7 +89,7 @@ class Chunk(_AsDict):
     metadata: dict
 
 
-# 4. RetrievalResult -- the indexing → fusion boundary.
+# 3. RetrievalResult -- the indexing → fusion boundary.
 @dataclass
 class RetrievalResult(_AsDict):
     chunk_id: str
@@ -149,7 +101,7 @@ class RetrievalResult(_AsDict):
     source: str = ""  # e.g. "bm25s" / "bm25s_paper" / "faiss_qwen3"
 
 
-# 5. EvidenceLocator -- where one piece of evidence sits. Which fields apply
+# 4. EvidenceLocator -- where one piece of evidence sits. Which fields apply
 # depends on source_type, so every field is optional.
 @dataclass
 class EvidenceLocator(_AsDict):
@@ -173,7 +125,7 @@ class EvidenceLocator(_AsDict):
     cited_paper: str | None = None
 
 
-# 6. Evidence -- one piece of submitted evidence.
+# 5. Evidence -- one piece of submitted evidence.
 @dataclass
 class Evidence(_AsDict):
     paper_id: str
@@ -182,7 +134,7 @@ class Evidence(_AsDict):
     evidence_text_or_value: str | None = None  # kept for reference; not required for submission
 
 
-# 7. Answer -- one submitted answer. Which field applies depends on answer_types.
+# 6. Answer -- one submitted answer. Which field applies depends on answer_types.
 @dataclass
 class Answer(_AsDict):
     freeform: dict | None = None  # e.g. {"text": "14.70"}
@@ -190,7 +142,7 @@ class Answer(_AsDict):
     table: dict | None = None  # e.g. {"schema": [{"name": ..., "type": ..., "is_row_key": True}], "rows": [...]}
 
 
-# 8. Prediction -- the submission record for one Query.
+# 7. Prediction -- the submission record for one Query.
 @dataclass
 class Prediction(_AsDict):
     query_id: str

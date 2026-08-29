@@ -93,8 +93,7 @@ agent/reading.py     反復エージェント（分解 → 読解 → 再検索 
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
   --queries data/validation_inputs.jsonl \
-  --output predictions.jsonl \
-  --production-input
+  --output predictions.jsonl
 
 uv run python scripts/evaluate.py --gold data/validation.jsonl --pred predictions.jsonl
 ```
@@ -394,8 +393,7 @@ tmux new-session -d -s littrace-exp \
   "PYTHONUNBUFFERED=1 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
   --queries data/validation_inputs.jsonl \
-  --output predictions_{識別子}.jsonl \
-  --production-input 2>&1 | tee logs/{識別子}.log"
+  --output predictions_{識別子}.jsonl 2>&1 | tee logs/{識別子}.log"
 
 tmux ls                        # 生きているか
 tmux attach -t littrace-exp    # 進捗を直接見る（抜けるのは Ctrl-b d）
@@ -407,9 +405,13 @@ tmux attach -t littrace-exp    # 進捗を直接見る（抜けるのは Ctrl-b 
 予測ファイルは全55件が終わってから一括で書き出される実装なので、**途中経過は
 `wc -l predictions_*.jsonl` では測れない**——進捗はログの `N/55 done` で見る。
 
-**評価は `--production-input` を付けて回す。** `data/validation_inputs.jsonl` は55件すべてに
-`task_family` が入っているが、本番入力には無い。与えたまま評価すると「正解を教えてもらった
-状態」の点数になり本番と乖離する。
+**検証入力と本番入力は、検索から見ると同じもの。** `data/validation_inputs.jsonl` は55件
+すべてに `task_family` を持っているが、**`Query` にその項目は無い**（`contracts.py`）ので
+渡しても読まれない。かつて `--production-input` でこれを落としていたのは、
+`TaskFamilyClassifier`（サブクエリ本数の振り分け）と `paper_cutoff`（提出本数の振り分け）が
+`task_family` を読んでいたため。両方を削除した時点でフラグは出力を変えられなくなったので、
+**「付けろ」と案内し続けて付け忘れの再走行を招かないようフラグごと削除した**
+（検証55件で、エージェントに通した `Prediction` と LLM へのプロンプトが完全一致することを確認済み）。
 
 LLM は非決定的（温度指定を受け付けない）でクエリは55件しかないので、数ポイントの差は
 ノイズの可能性がある。結論を出す前に複数回まわすこと。
@@ -450,8 +452,8 @@ gold と重なる query_id が0件のときは本番走行と見なして採点�
 
 **本番入力のフィールドは6つ**（`query_id` / `benchmark` / `question` / `answer_types` /
 `multiple_choice_options` / `table_schema`）。`answer_types` は multiple_choice 50 / table 21 で
-**freeform は0件**。`task_family` / `primary_evidence_type` は無いので `--production-input` は
-付けても付けなくても結果が同じ。
+**freeform は0件**。`Query` が読むのは `query_id` / `question` / `answer_types` /
+`table_schema` の4つだけなので、検証入力との差は検索に効かない。
 
 ---
 

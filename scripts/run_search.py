@@ -17,8 +17,7 @@ Usage:
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --queries data/validation_inputs.jsonl \\
-      --output predictions.jsonl \\
-      --production-input
+      --output predictions.jsonl
 
 **Scoring is a separate step**, scripts/evaluate.py, called by hand:
     uv run python scripts/evaluate.py --gold data/validation.jsonl --pred predictions.jsonl
@@ -188,30 +187,17 @@ def load_chunks(path: Path) -> list[Chunk]:
     return chunks
 
 
-# The fields production input actually carries — this is the settled spec.
-# **multiple_choice's `options` is not given in production**, so it is not here.
-# `multiple_choice_options` does exist in production input (50 of the 71 queries in
-# data/test_inputs.jsonl), but `Query.from_dict` reads `options` (the oracle field
-# joined in from validation gold), so listing it changes nothing on the Query. It is
-# named here only to keep this an honest description of the production input.
-_PRODUCTION_FIELDS = (
-    "query_id",
-    "question",
-    "answer_types",
-    "multiple_choice_options",
-    "table_schema",
-)
-
-
-def load_queries(path: Path, production_input: bool = False) -> list[Query]:
+def load_queries(path: Path) -> list[Query]:
     """Load the queries.
 
-    With production_input=True the fields production input does not carry
-    (task_family / primary_evidence_type / benchmark) are dropped before the Query
-    is built. The local validation_inputs.jsonl has task_family on all 55 queries
-    and production has none, so **leaving it in scores the system as though it had
-    been told part of the answer**, and the number drifts from what production
-    would give. Comparison runs use this.
+    **A validation record and a production record give the same Query here.** The
+    fields only the validation data carries (task_family, primary_evidence_type,
+    benchmark, and the joined-in multiple_choice options) are not on Query at all,
+    because nothing in retrieval ever read them: the estimator that used
+    task_family, and the submission cutoff that varied by it, are both gone. There
+    used to be a `--production-input` flag that stripped them before building the
+    Query; with nothing left to strip it could no longer change a run's output, so
+    it was removed rather than left as a no-op that the docs told people to pass.
     """
     queries = []
     with path.open(encoding="utf-8") as f:
@@ -219,10 +205,7 @@ def load_queries(path: Path, production_input: bool = False) -> list[Query]:
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
-            if production_input:
-                record = {k: v for k, v in record.items() if k in _PRODUCTION_FIELDS}
-            queries.append(Query.from_dict(record))
+            queries.append(Query.from_dict(json.loads(line)))
     return queries
 
 
@@ -236,12 +219,6 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument(
         "--build", action="store_true", help="preprocess and build the indexes (first run only)"
-    )
-    parser.add_argument(
-        "--production-input",
-        action="store_true",
-        help="drop task_family / primary_evidence_type and run on the same fields "
-        "production gives (use this for comparison runs)",
     )
     parser.add_argument(
         "--dump-runs",
@@ -299,12 +276,7 @@ def main() -> None:
             sys.exit(1)
     print("indexes loaded")
 
-    queries = load_queries(Path(args.queries), production_input=args.production_input)
-    if args.production_input:
-        print(
-            "running on the same fields production gives "
-            "(query_id / question / answer_types / table_schema)"
-        )
+    queries = load_queries(Path(args.queries))
     print(f"searching for {len(queries)} questions...")
 
     # --dump-runs writes each subquery's results to a separate file. Deliberately

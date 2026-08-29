@@ -43,8 +43,7 @@ to swapping methods.
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
   --queries data/validation_inputs.jsonl \
-  --output predictions.jsonl \
-  --production-input
+  --output predictions.jsonl
   # --build only on the first run (preprocessing + building the indexes); the
   # indexes already exist, so it is normally unnecessary
 

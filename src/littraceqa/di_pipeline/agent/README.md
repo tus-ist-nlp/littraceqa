@@ -242,9 +242,11 @@ indexer, the fuser, the reranker or the attribute filter does.
 - **Read `candidate_recall` and `evidence_candidate_recall`, nothing else.**
   `evaluate.py` leaves the submission-side metrics (paper_* / evidence_* / the
   answer ones) out by default; `--metrics all` adds them.
-- Run `scripts/run_search.py` with `--production-input`. The local
-  `validation_inputs.jsonl` carries task_family and production does not; evaluating
-  with it left in scores the system as though it had been told part of the answer.
+- A validation record and a production record give the same `Query`. The local
+  `validation_inputs.jsonl` carries task_family and production does not, but
+  task_family is not a `Query` field, so it reaches nothing. (`--production-input`
+  used to strip it, back when the estimator and the cutoff read it; with both gone
+  the flag could no longer change a run, and it was removed.)
 - The LLM is non-deterministic (the deployment does not accept a temperature) and
   there are only 55 queries, so a difference of a few points may be noise. Run it
   more than once before concluding anything.
