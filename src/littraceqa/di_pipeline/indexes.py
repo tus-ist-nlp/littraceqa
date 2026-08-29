@@ -34,10 +34,25 @@ from transformers import AutoTokenizer
 from littraceqa.di_pipeline.contracts import Chunk, RetrievalResult, filter_chunk_types
 
 _CHUNKS_FILENAME = "chunks.jsonl"
+_PAPERS_FILENAME = "papers.jsonl"
 
 
-class BM25Index:
-    name = "bm25s"
+class _BM25Base:
+    """The machinery both BM25 indexes share: persist, load, search.
+
+    **A subclass says only what a document is** — `_documents()` turns the corpus
+    into the units it indexes — plus its `name` and the name of the sidecar written
+    beside the index.
+
+    That sidecar exists because bm25s stores the terms and nothing else: none of a
+    Chunk's metadata (paper_id, chunk_type, ...) survives `BM25.save`. The jsonl
+    written next to it, in the same row order, is what turns a hit back into a Chunk.
+    """
+
+    name: str = ""
+    # The jsonl written beside the index. **The two indexes use different names and
+    # neither may change**: BM25MLTExpander reads bm25s_paper/papers.jsonl directly.
+    sidecar: str = ""
 
     def __init__(
         self,
@@ -69,7 +84,7 @@ class BM25Index:
         self.method = method
         self.stopwords = stopwords
         self._stemmer = self._build_stemmer(stemmer)
-        self._chunks: list[Chunk] = []
+        self._docs: list[Chunk] = []
         self._retriever: bm25s.BM25 | None = None
 
     @staticmethod
@@ -80,55 +95,59 @@ class BM25Index:
 
         return Stemmer.Stemmer(stemmer)
 
+    def _documents(self, chunks: Iterable[Chunk]) -> list[Chunk]:
+        """The units this index scores. One chunk each, unless a subclass says otherwise."""
+        return list(chunks)
+
     def _tokenize(self, texts: list[str]):
         return bm25s.tokenize(texts, stopwords=self.stopwords, stemmer=self._stemmer)
 
     def build(self, chunks: Iterable[Chunk]) -> None:
-        self._chunks = list(chunks)
-        corpus_tokens = self._tokenize([chunk.text for chunk in self._chunks])
+        self._docs = self._documents(chunks)
+        corpus_tokens = self._tokenize([doc.text for doc in self._docs])
         retriever = bm25s.BM25(k1=self.k1, b=self.b, method=self.method)
         retriever.index(corpus_tokens)
         retriever.save(str(self.index_dir))
-        self._save_chunks()
+        self._save_docs()
         self._retriever = retriever
 
     def load(self) -> None:
         self._retriever = bm25s.BM25.load(str(self.index_dir), load_corpus=False)
-        self._chunks = self._load_chunks()
+        self._docs = self._load_docs()
 
     def search(self, query: str, top_k: int) -> list[RetrievalResult]:
         if self._retriever is None:
             raise RuntimeError("index is not built or loaded; call build() or load() first")
-        k = min(top_k, len(self._chunks))
+        k = min(top_k, len(self._docs))
         if k <= 0:
             return []
         query_tokens = self._tokenize([query])
         doc_indices, scores = self._retriever.retrieve(query_tokens, k=k)
         results: list[RetrievalResult] = []
         for doc_index, score in zip(doc_indices[0], scores[0]):
-            chunk = self._chunks[int(doc_index)]
+            doc = self._docs[int(doc_index)]
             results.append(
                 RetrievalResult(
-                    chunk_id=chunk.chunk_id,
-                    paper_id=chunk.paper_id,
+                    chunk_id=doc.chunk_id,
+                    paper_id=doc.paper_id,
                     score=float(score),
-                    text=chunk.text,
-                    chunk_type=chunk.chunk_type,
-                    metadata=chunk.metadata,
+                    text=doc.text,
+                    chunk_type=doc.chunk_type,
+                    metadata=doc.metadata,
                     source=self.name,
                 )
             )
         return results
 
-    def _save_chunks(self) -> None:
-        path = self.index_dir / _CHUNKS_FILENAME
+    def _save_docs(self) -> None:
+        path = self.index_dir / self.sidecar
         with path.open("w", encoding="utf-8") as f:
-            for chunk in self._chunks:
-                f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+            for doc in self._docs:
+                f.write(json.dumps(doc.to_dict(), ensure_ascii=False) + "\n")
 
-    def _load_chunks(self) -> list[Chunk]:
-        path = self.index_dir / _CHUNKS_FILENAME
-        chunks: list[Chunk] = []
+    def _load_docs(self) -> list[Chunk]:
+        path = self.index_dir / self.sidecar
+        docs: list[Chunk] = []
         with path.open(encoding="utf-8") as f:
             for line_number, line in enumerate(f, start=1):
                 line = line.strip()
@@ -138,32 +157,20 @@ class BM25Index:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
                     raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
-                chunks.append(Chunk(**record))
-        return chunks
+                docs.append(Chunk(**record))
+        return docs
+
+
+class BM25Index(_BM25Base):
+    """One document per chunk. Strong when a question's terms land inside one chunk."""
+
+    name = "bm25s"
+    sidecar = _CHUNKS_FILENAME
 
 
 # ============================================================================
 # BM25 over whole papers
 # ============================================================================
-#
-# Sparse retrieval over whole papers, with BM25.
-#
-# Where bm25_index.py makes one document per chunk, this groups the Chunks by
-# paper_id and makes **one document per paper**. Both are used together: when a
-# question's terms are scattered across a paper, no single chunk holds them all and
-# the chunk index goes weak.
-#
-# Every Chunk's text carries the same prefix, `"[{venue} {year}] {title}\n{body}"`.
-# Concatenating them as they are would repeat the venue and title words once per
-# chunk and skew the BM25 score, so the prefix is kept once per paper and only the
-# bodies are joined.
-#
-# **A hit here has no real chunk_id** — it gets the pseudo id `"{paper_id}#paper"` —
-# so it is never handed to ReadingAgent as evidence. It ranks papers and nothing
-# else; `PAPER_LEVEL_SOURCES` in retrieve.py keeps these pseudo chunks from
-# being chosen to represent a paper whenever a real chunk exists.
-
-_PAPERS_FILENAME = "papers.jsonl"
 
 
 def _paper_prefix(metadata: dict) -> str:
@@ -171,7 +178,13 @@ def _paper_prefix(metadata: dict) -> str:
 
 
 def _build_paper_chunks(chunks: Iterable[Chunk]) -> list[Chunk]:
-    """Collapse the Chunks of each paper into one, keeping the prefix only once."""
+    """Collapse the Chunks of each paper into one, keeping the prefix only once.
+
+    Every Chunk's text carries the same prefix, `"[{venue} {year}] {title}\n{body}"`.
+    Concatenating them as they are would repeat the venue and title words once per
+    chunk and skew the BM25 score, so the prefix is kept once and only the bodies
+    are joined.
+    """
     bodies: dict[str, list[str]] = {}
     metadata: dict[str, dict] = {}
     for chunk in chunks:
@@ -192,74 +205,23 @@ def _build_paper_chunks(chunks: Iterable[Chunk]) -> list[Chunk]:
     ]
 
 
-class BM25PaperIndex:
+class BM25PaperIndex(_BM25Base):
+    """One document per paper.
+
+    Used alongside the chunk index: when a question's terms are scattered across a
+    paper, no single chunk holds them all and the chunk index goes weak.
+
+    **A hit here has no real chunk_id** — it gets the pseudo id `"{paper_id}#paper"` —
+    so it is never handed to ReadingAgent as evidence. It ranks papers and nothing
+    else; `PAPER_LEVEL_SOURCES` in retrieve.py keeps these pseudo chunks from being
+    chosen to represent a paper whenever a real chunk exists.
+    """
+
     name = "bm25s_paper"
+    sidecar = _PAPERS_FILENAME
 
-    def __init__(self, index_dir: str):
-        self.index_dir = Path(index_dir)
-        self.index_dir.mkdir(parents=True, exist_ok=True)
-        self._papers: list[Chunk] = []
-        self._retriever: bm25s.BM25 | None = None
-
-    def build(self, chunks: Iterable[Chunk]) -> None:
-        self._papers = _build_paper_chunks(chunks)
-        corpus_tokens = bm25s.tokenize(
-            [paper.text for paper in self._papers], stopwords="en"
-        )
-        retriever = bm25s.BM25()
-        retriever.index(corpus_tokens)
-        retriever.save(str(self.index_dir))
-        self._save_papers()
-        self._retriever = retriever
-
-    def load(self) -> None:
-        self._retriever = bm25s.BM25.load(str(self.index_dir), load_corpus=False)
-        self._papers = self._load_papers()
-
-    def search(self, query: str, top_k: int) -> list[RetrievalResult]:
-        if self._retriever is None:
-            raise RuntimeError("index is not built or loaded; call build() or load() first")
-        k = min(top_k, len(self._papers))
-        if k <= 0:
-            return []
-        query_tokens = bm25s.tokenize([query], stopwords="en")
-        doc_indices, scores = self._retriever.retrieve(query_tokens, k=k)
-        results: list[RetrievalResult] = []
-        for doc_index, score in zip(doc_indices[0], scores[0]):
-            paper = self._papers[int(doc_index)]
-            results.append(
-                RetrievalResult(
-                    chunk_id=paper.chunk_id,
-                    paper_id=paper.paper_id,
-                    score=float(score),
-                    text=paper.text,
-                    chunk_type=paper.chunk_type,
-                    metadata=paper.metadata,
-                    source=self.name,
-                )
-            )
-        return results
-
-    def _save_papers(self) -> None:
-        path = self.index_dir / _PAPERS_FILENAME
-        with path.open("w", encoding="utf-8") as f:
-            for paper in self._papers:
-                f.write(json.dumps(paper.to_dict(), ensure_ascii=False) + "\n")
-
-    def _load_papers(self) -> list[Chunk]:
-        path = self.index_dir / _PAPERS_FILENAME
-        papers: list[Chunk] = []
-        with path.open(encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"{path}:{line_number} is not valid JSON") from exc
-                papers.append(Chunk(**record))
-        return papers
+    def _documents(self, chunks: Iterable[Chunk]) -> list[Chunk]:
+        return _build_paper_chunks(chunks)
 
 
 # ============================================================================

@@ -1,20 +1,7 @@
-"""The LitTraceQA retrieval pipeline."""
+"""The LitTraceQA retrieval pipeline.
 
-from littraceqa.di_pipeline.contracts import (
-    Answer,
-    Chunk,
-    Evidence,
-    EvidenceLocator,
-    Prediction,
-    Query,
-    RetrievalResult,
-)
-__all__ = [
-    "Answer",
-    "Chunk",
-    "Evidence",
-    "EvidenceLocator",
-    "Prediction",
-    "Query",
-    "RetrievalResult",
-]
+`pipeline.py` is the entry point; `README.md` beside it lists what is in each
+module. **Nothing is re-exported here** — every caller names the module it wants
+(`from littraceqa.di_pipeline.contracts import Query`), so there is one import path
+per name rather than two.
+"""

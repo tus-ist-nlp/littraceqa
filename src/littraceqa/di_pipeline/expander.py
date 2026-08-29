@@ -105,14 +105,49 @@ def _interleave(
     return merged[:limit]
 
 
-class Specter2PaperExpander:
+class _AnchorExpander:
+    """The shape every expander shares: load once, map each anchor, interleave.
+
+    **A subclass writes two methods and nothing else** — `_load()` to read whatever
+    it needs off disk, and `_neighbors(paper_id)` to return one paper's neighbours,
+    nearest first. Loading is deferred to the first `rank()` so that a --build-only
+    run, or a test, can construct one before its index exists.
+
+    An anchor the subclass cannot resolve returns an empty list, which contributes
+    nothing at any rank; `rank()` therefore never fails a query over a missing anchor.
+    """
+
+    neighbors: int
+
+    def __init__(self) -> None:
+        self._is_loaded = False
+
+    def _load(self) -> None:  # pragma: no cover - subclasses override
+        raise NotImplementedError
+
+    def _neighbors(self, paper_id: str) -> list[str]:  # pragma: no cover
+        raise NotImplementedError
+
+    def _pools(self, anchors: list[str]) -> list[list[str]]:
+        """Each anchor's neighbours, nearest first."""
+        if not anchors:
+            return []
+        if not self._is_loaded:
+            self._load()
+            self._is_loaded = True
+        return [self._neighbors(anchor) for anchor in anchors]
+
+    def rank(self, anchors: list[str]) -> list[str]:
+        return _interleave(self._pools(anchors), self.neighbors)
+
+
+class Specter2PaperExpander(_AnchorExpander):
     """Neighbours in SPECTER2(proximity) space, read from the prebuilt faiss index."""
 
     def __init__(self, index_dir: str, neighbors: int = 20):
+        super().__init__()
         self.index_dir = Path(index_dir)
         self.neighbors = neighbors
-        # Loading is deferred to the first rank(), so a --build-only run or a test
-        # can construct this without the index existing.
         self._index: faiss.Index | None = None
         self._row_of: dict[str, int] = {}
         self._pid_of: dict[int, str] = {}
@@ -132,34 +167,20 @@ class Specter2PaperExpander:
                     self._pid_of[row] = paper_id
                     self._chunk_of[paper_id] = chunk
 
-    def _pools(self, anchors: list[str]) -> list[list[str]]:
-        """Each anchor's neighbours, nearest first."""
-        if not anchors:
+    def _neighbors(self, paper_id: str) -> list[str]:
+        row = self._row_of.get(paper_id)
+        if row is None:
             return []
-        if self._index is None:
-            self._load()
         assert self._index is not None
+        vector = self._index.reconstruct(row).reshape(1, -1)
+        _, ids = self._index.search(vector, self.neighbors + 1)
+        return [
+            self._pid_of[i]
+            for i in ids[0]
+            if i >= 0 and i in self._pid_of and self._pid_of[i] != paper_id
+        ]
 
-        pools: list[list[str]] = []
-        for anchor in anchors:
-            row = self._row_of.get(anchor)
-            if row is None:
-                continue
-            vector = self._index.reconstruct(row).reshape(1, -1)
-            _, ids = self._index.search(vector, self.neighbors + 1)
-            pools.append(
-                [
-                    self._pid_of[i]
-                    for i in ids[0]
-                    if i >= 0 and i in self._pid_of and self._pid_of[i] != anchor
-                ]
-            )
-        return pools
-
-    def rank(self, anchors: list[str]) -> list[str]:
-        return _interleave(self._pools(anchors), self.neighbors)
-
-class BibCouplingExpander:
+class BibCouplingExpander(_AnchorExpander):
     """Papers that are near by bibliographic coupling (shared references).
 
     Pulls the arXiv IDs each paper cites out of its full text and measures Jaccard
@@ -180,6 +201,7 @@ class BibCouplingExpander:
         neighbors: int = 20,
         min_shared: int = 2,
     ):
+        super().__init__()
         self.chunks_path = Path(chunks)
         self.cache_path = Path(cache_path)
         self.neighbors = neighbors
@@ -250,16 +272,6 @@ class BibCouplingExpander:
         # Measured: 40%+ of queries reordered between runs, moving cr@20 by 0.4pt.
         return sorted(scores, key=lambda p: (-scores[p], p))[: self.neighbors]
 
-    def _pools(self, anchors: list[str]) -> list[list[str]]:
-        if not anchors:
-            return []
-        if self._refs is None:
-            self._load()
-        return [self._neighbors(a) for a in anchors]
-
-    def rank(self, anchors: list[str]) -> list[str]:
-        """Ordered by bibliographic-coupling proximity."""
-        return _interleave(self._pools(anchors), self.neighbors)
 
 def _json_string_prefix(line: str, start: int, max_chars: int) -> str:
     """Decode the first ``max_chars`` of the JSON string value starting at ``start``.
@@ -287,7 +299,7 @@ def _json_string_prefix(line: str, start: int, max_chars: int) -> str:
     return "".join(out)
 
 
-class BM25MLTExpander:
+class BM25MLTExpander(_AnchorExpander):
     """More-like-this over full paper text: query `bm25s_paper` with the anchor's title+abstract.
 
     Independent of both SPECTER2 (semantic proximity of abstracts) and bibliographic
@@ -314,6 +326,7 @@ class BM25MLTExpander:
         # which does no harm as an MLT query.
         query_chars: int = 1200,
     ):
+        super().__init__()
         self.index_dir = Path(index_dir)
         self.cache_path = Path(cache_path)
         self.neighbors = neighbors
@@ -366,16 +379,6 @@ class BM25MLTExpander:
             if 0 <= int(i) < len(self._pids) and self._pids[int(i)] != paper_id
         ]
 
-    def _pools(self, anchors: list[str]) -> list[list[str]]:
-        if not anchors:
-            return []
-        if self._bm25 is None:
-            self._load()
-        return [self._neighbors(a) for a in anchors]
-
-    def rank(self, anchors: list[str]) -> list[str]:
-        """Ordered by full-text BM25 proximity."""
-        return _interleave(self._pools(anchors), self.neighbors)
 
 class FusedPaperExpander:
     """Fuse several expanders' neighbours with RRF.

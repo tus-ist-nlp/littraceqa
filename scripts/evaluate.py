@@ -82,6 +82,41 @@ CANDIDATE_RECALL_SCENARIOS = ("single", "multi", "total")
 # never the numerator or denominator.
 
 
+class RecallSeries:
+    """One candidate_recall series: per scenario, per k, one recall per query.
+
+    The three series below differ only in **which gold papers are the denominator**
+    and **which bucket a query falls into**; the bookkeeping is identical, so it is
+    written once here rather than three times.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.by_scenario: dict[str, dict[int, list[float]]] = {
+            scenario: {k: [] for k in CANDIDATE_RECALL_KS}
+            for scenario in CANDIDATE_RECALL_SCENARIOS
+        }
+
+    def add(self, scenarios: list[str], k: int, recall: float) -> None:
+        for scenario in scenarios:
+            self.by_scenario[scenario][k].append(recall)
+
+    def macros(self) -> dict[str, float | None]:
+        """`{name}_at{k}_{scenario}_macro`, in ascending k so it reads as a table."""
+        return {
+            f"{self.name}_at{k}_{scenario}_macro": macro_or_none(self.by_scenario[scenario][k])
+            for scenario in CANDIDATE_RECALL_SCENARIOS
+            for k in CANDIDATE_RECALL_KS
+        }
+
+    def counts(self) -> dict[str, int]:
+        """How many queries each scenario was measured over, to sanity-check the rest."""
+        return {
+            scenario: len(self.by_scenario[scenario][CANDIDATE_RECALL_KS[0]])
+            for scenario in CANDIDATE_RECALL_SCENARIOS
+        }
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as handle:
@@ -448,24 +483,17 @@ def evaluate(
     table_cell_accuracy: list[float] = []
     table_cell_correct = 0
     table_cell_total = 0
-    # scenario -> k -> per-query recall. single/multi are split by gold's
-    # task_family; total is every query (so it is their weighted mean).
-    candidate_recall: dict[str, dict[int, list[float]]] = {
-        scenario: {k: [] for k in CANDIDATE_RECALL_KS}
-        for scenario in CANDIDATE_RECALL_SCENARIOS
-    }
-    # The same shape, with the denominator narrowed to the evidence-backed gold.
-    evidence_candidate_recall: dict[str, dict[int, list[float]]] = {
-        scenario: {k: [] for k in CANDIDATE_RECALL_KS}
-        for scenario in CANDIDATE_RECALL_SCENARIOS
-    }
-    # And the same again with the single/multi split redone by the number of
+    # All of gold as the denominator; single/multi split by gold's task_family, and
+    # total every query (so total is their weighted mean).
+    candidate_recall = RecallSeries("candidate_recall")
+    # The denominator narrowed to the evidence-backed gold, same split.
+    evidence_candidate_recall = RecallSeries("evidence_candidate_recall")
+    # The same denominator again, with the split redone by the number of
     # evidence-backed gold papers — a diagnostic series that exists only to line up
     # with the external team's numbers (see the comment at the top).
-    evidence_candidate_recall_by_backed: dict[str, dict[int, list[float]]] = {
-        scenario: {k: [] for k in CANDIDATE_RECALL_KS}
-        for scenario in CANDIDATE_RECALL_SCENARIOS
-    }
+    evidence_candidate_recall_by_backed = RecallSeries(
+        "evidence_candidate_recall_by_backed"
+    )
 
     per_query_rows: list[dict[str, Any]] = []
 
@@ -505,8 +533,7 @@ def evaluate(
             for k in CANDIDATE_RECALL_KS:
                 recall = recall_at_k(gold_paper_ids, ranked, k)
                 row[f"candidate_recall_at{k}"] = recall
-                for scenario in scenarios:
-                    candidate_recall[scenario][k].append(recall)
+                candidate_recall.add(scenarios, k, recall)
 
             # A query with no evidence-backed gold has an empty denominator, and
             # recall_at_k() returns 1.0 on empty gold (to match prf). **Including it
@@ -524,10 +551,8 @@ def evaluate(
                 for k in CANDIDATE_RECALL_KS:
                     recall = recall_at_k(backed_paper_ids, ranked, k)
                     row[f"evidence_candidate_recall_at{k}"] = recall
-                    for scenario in scenarios:
-                        evidence_candidate_recall[scenario][k].append(recall)
-                    for scenario in backed_scenarios:
-                        evidence_candidate_recall_by_backed[scenario][k].append(recall)
+                    evidence_candidate_recall.add(scenarios, k, recall)
+                    evidence_candidate_recall_by_backed.add(backed_scenarios, k, recall)
 
         p, r, f = prf(evidence_set(gold), evidence_set(pred))
         evidence_precision.append(p)
@@ -594,34 +619,15 @@ def evaluate(
     return {
         "metrics": {
             # Whether retrieval had the paper as a candidate at all, before the LLM
-            # narrowed anything. Broken down by gold's task_family, as a curve over
-            # k, each scenario in ascending k so it reads as a table.
-            **{
-                f"candidate_recall_at{k}_{scenario}_macro": macro_or_none(
-                    candidate_recall[scenario][k]
-                )
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-                for k in CANDIDATE_RECALL_KS
-            },
+            # narrowed anything, broken down by gold's task_family as a curve over k.
+            **candidate_recall.macros(),
             # The same candidate lists measured against the evidence-backed gold
             # only: retrieval's real strength, with the unreachable gold excluded.
-            **{
-                f"evidence_candidate_recall_at{k}_{scenario}_macro": macro_or_none(
-                    evidence_candidate_recall[scenario][k]
-                )
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-                for k in CANDIDATE_RECALL_KS
-            },
+            **evidence_candidate_recall.macros(),
             # The same numbers again with only the single/multi split redone by
             # evidence-backed count. total matches the series above exactly — same
             # numerator, same denominator, only a different bucket.
-            **{
-                f"evidence_candidate_recall_by_backed_at{k}_{scenario}_macro": macro_or_none(
-                    evidence_candidate_recall_by_backed[scenario][k]
-                )
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-                for k in CANDIDATE_RECALL_KS
-            },
+            **evidence_candidate_recall_by_backed.macros(),
             **(submission_metrics if include_submission else {}),
         },
         "details": {
@@ -630,25 +636,16 @@ def evaluate(
             "extra_prediction_count": len(extra_predictions),
             # How many queries each scenario was measured over, to sanity-check the numbers.
             "candidate_recall_ks": list(CANDIDATE_RECALL_KS),
-            "candidate_recall_counts": {
-                scenario: len(candidate_recall[scenario][CANDIDATE_RECALL_KS[0]])
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-            },
+            "candidate_recall_counts": candidate_recall.counts(),
             # Only queries with evidence-backed gold count here; the shortfall
             # against candidate_recall_counts is how many queries have no backed gold.
-            "evidence_candidate_recall_counts": {
-                scenario: len(evidence_candidate_recall[scenario][CANDIDATE_RECALL_KS[0]])
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-            },
+            "evidence_candidate_recall_counts": evidence_candidate_recall.counts(),
             # The counts once the split is redone by backed count — how far it
             # diverges from the task_family split, i.e. from the external team's
             # single/multi ratio.
-            "evidence_candidate_recall_by_backed_counts": {
-                scenario: len(
-                    evidence_candidate_recall_by_backed[scenario][CANDIDATE_RECALL_KS[0]]
-                )
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-            },
+            "evidence_candidate_recall_by_backed_counts": (
+                evidence_candidate_recall_by_backed.counts()
+            ),
             "table_cell_correct": table_cell_correct,
             "table_cell_total": table_cell_total,
             "missing_predictions": missing_predictions,
