@@ -222,6 +222,25 @@ class MinerUChunker:
             buffer = []
             buffer_page = None
 
+        def append(text: str, page: int) -> None:
+            """Add one piece of body text, flushing first if the page changed.
+
+            **The rule for where body text breaks lives here and nowhere else.**
+            It used to be repeated verbatim in the text, list and equation branches,
+            so changing the break condition meant changing three places — and
+            missing one would silently shift the chunk boundaries for that block
+            type alone, with no error to notice.
+
+            `flush()` rebinds `buffer` to a fresh list, so appending afterwards
+            correctly lands in the new one.
+            """
+            nonlocal buffer_page
+            if buffer_page is not None and page != buffer_page:
+                flush()
+            buffer.append(text)
+            if buffer_page is None:
+                buffer_page = page
+
         for block in blocks:
             block_type = block.get("type")
             if block_type in _SKIPPED_TYPES:
@@ -239,30 +258,23 @@ class MinerUChunker:
                     flush()
                     section = text
                     continue
-                if buffer_page is not None and page != buffer_page:
-                    flush()
-                buffer.append(text)
-                buffer_page = page if buffer_page is None else buffer_page
+                append(text, page)
                 last_text = text
 
             elif block_type == "list":
                 items = _join(block.get("list_items") or [])
                 if not items:
                     continue
-                if buffer_page is not None and page != buffer_page:
-                    flush()
-                buffer.append(items)
-                buffer_page = page if buffer_page is None else buffer_page
+                append(items, page)
 
             elif block_type == "equation":
                 equation = (block.get("text") or "").strip()
                 if not equation:
                     continue
-                if buffer_page is not None and page != buffer_page:
-                    flush()
-                buffer.append(equation)
-                buffer_page = page if buffer_page is None else buffer_page
+                append(equation, page)
 
+                # The numbered-equation chunk comes after the append, so it carries
+                # the body text that preceded it as context.
                 equation_id = _extract_equation_id(equation)
                 if equation_id:
                     chunks.append(
