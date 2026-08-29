@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-"""検索を回して予測 jsonl を書き出す。
+"""Run the search and write the prediction jsonl.
 
-システムの構成そのものは `littraceqa.di_pipeline.pipeline` にある。ここが受け取るのは
-**実行環境の場所（paths）と入出力だけ**で、手法のつまみは引数に出てこない。
+**The system itself is `littraceqa.di_pipeline.pipeline`.** What this takes is the
+locations for this machine (paths) and the input and output — none of the method's
+knobs appear as arguments.
 
-使い方:
-    # 初回: 前処理 + 索引構築をしてから検索
+Usage:
+    # first time: preprocess and build the indexes, then search
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl \\
       --build
 
-    # 2回目以降: 既存の索引を読み込んで検索
+    # afterwards: load the existing indexes and search
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl \\
       --production-input
 
-指標が要るときは検索と切り離して scripts/evaluate.py を直接呼ぶ:
+**Scoring is a separate step**, scripts/evaluate.py, called by hand:
     uv run python scripts/evaluate.py --gold data/validation.jsonl --pred predictions.jsonl
 """
 
@@ -58,12 +59,12 @@ def load_papers(path: Path) -> list[dict]:
     return papers
 
 
-# 採点の基準になる gold。分割実行(val_a/val_b)の網羅率もこれで測る。
+# The gold that scoring goes against; also what a split run's coverage is measured on.
 GOLD_PATH = Path("data/validation.jsonl")
 
 
 def read_predictions(path: Path) -> dict[str, dict]:
-    """予測 jsonl を query_id -> レコードで読む。"""
+    """Read a prediction jsonl as query_id -> record."""
     records = {}
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -76,12 +77,13 @@ def read_predictions(path: Path) -> dict[str, dict]:
 
 
 def merge_predictions(output_path: Path, others: list[str]) -> tuple[Path, list[str]]:
-    """今回の予測に他の分割実行の予測を結合し、結合後のファイルパスを返す。
+    """Join other split runs into this one; returns the path of the joined file.
 
-    val_a(28件)/val_b(27件) のように分けて回すと、片側だけを 55件の gold に対して
-    採点することになり、全 macro 指標が網羅率のぶんだけ薄まる（val_a だけだと約半分）。
-    別構成との比較でその数字を使うと誤った結論になるので、もう片方が既にあるなら
-    結合してから採点する。query_id が衝突したときは今回の実行を優先する。
+    Running in halves (val_a, 28 queries; val_b, 27) and scoring one of them against
+    the 55-query gold **dilutes every macro metric by the coverage** — roughly half,
+    for val_a alone. Comparing that number against another configuration leads
+    straight to a wrong conclusion, so the halves are joined before scoring. On a
+    query_id collision this run wins.
     """
     merged = read_predictions(output_path)
     for other in others:
@@ -109,10 +111,11 @@ def merge_predictions(output_path: Path, others: list[str]) -> tuple[Path, list[
 
 
 def dump_runs(handle, query_id: str, runs: list) -> None:
-    """サブクエリ1本 = 1行で、検索が返した順位とスコアを書き出す。
+    """One line per subquery: the ranking and scores retrieval returned.
 
-    テキストは載せない（chunk_id から chunk_store で引ける／土台ファイルが
-    数百MBになるため）。オフライン再生に要るのは順位とスコアだけ。
+    **No text** — it can be looked up from the chunk_id through chunk_store, and
+    including it would make the file hundreds of MB. Replaying the candidate
+    assembly offline needs only the ranks and the scores.
     """
     for run in runs:
         handle.write(
@@ -139,11 +142,13 @@ def dump_runs(handle, query_id: str, runs: list) -> None:
 
 
 def check_coverage(scored_path: Path) -> dict[str, Any]:
-    """採点対象が gold の何件を覆っているかを返し、欠けていれば警告する。
+    """How many of the gold queries the file to be scored covers; warns if any are missing.
 
-    **重なりが0件なら本番走行**。本番入力(`data/test_inputs.jsonl`)の query_id は
-    `ltqa_*` で、検証の `q_*` と1件も重ならない。この2つを突き合わせると
-    例外は出ずに全指標 0.0 が正常に返ってくるので、採点を案内してはいけない。
+    **No overlap at all means this was a production run.** Production input
+    (data/test_inputs.jsonl) uses `ltqa_*` query_ids, which share nothing with
+    validation's `q_*`. Scoring the two against each other raises no exception — it
+    returns 0.0 for every metric, perfectly normally — so scoring must not be
+    suggested.
     """
     if not GOLD_PATH.exists():
         return {}
@@ -181,11 +186,12 @@ def load_chunks(path: Path) -> list[Chunk]:
     return chunks
 
 
-# 本番の入力に実際に入っているフィールドはこの4つだけ（確定仕様）。
-# multiple_choice の options は**本番では与えられない**ので、ここには入れない。
-# `multiple_choice_options` は本番入力に実在する（`data/test_inputs.jsonl` 71件中50件）。
-# ただし `Query.from_dict` が読むのは `options`（validation の gold から結合する oracle 用）
-# なので、残しても Query には載らない——本番入力の定義を正しく保つためだけに並べてある。
+# The fields production input actually carries — this is the settled spec.
+# **multiple_choice's `options` is not given in production**, so it is not here.
+# `multiple_choice_options` does exist in production input (50 of the 71 queries in
+# data/test_inputs.jsonl), but `Query.from_dict` reads `options` (the oracle field
+# joined in from validation gold), so listing it changes nothing on the Query. It is
+# named here only to keep this an honest description of the production input.
 _PRODUCTION_FIELDS = (
     "query_id",
     "question",
@@ -196,14 +202,14 @@ _PRODUCTION_FIELDS = (
 
 
 def load_queries(path: Path, production_input: bool = False) -> list[Query]:
-    """クエリを読み込む。
+    """Load the queries.
 
-    production_input=True にすると、本番入力に無いフィールド
-    （task_family / primary_evidence_type / benchmark）を捨ててから Query を作る。
-    手元の validation_inputs.jsonl は55件すべてに task_family が入っているが、
-    本番入力には無い。task_family は提出論文数（cutoff）を決めるのに使うので、
-    これを与えたまま評価すると「正解を教えてもらった状態」の点数になり、
-    本番の点数と乖離する。比較実験ではこちらを使うこと。
+    With production_input=True the fields production input does not carry
+    (task_family / primary_evidence_type / benchmark) are dropped before the Query
+    is built. The local validation_inputs.jsonl has task_family on all 55 queries
+    and production has none, so **leaving it in scores the system as though it had
+    been told part of the answer**, and the number drifts from what production
+    would give. Comparison runs use this.
     """
     queries = []
     with path.open(encoding="utf-8") as f:
@@ -218,64 +224,46 @@ def load_queries(path: Path, production_input: bool = False) -> list[Query]:
     return queries
 
 
-
-
-# reranker の実効設定として記録する属性（インスタンス側の名前 -> 記録名）。
-# yaml に書かれていない既定値（instruction / compile など）も残さないと、
-# 「この数字がどの設定で出たのか」が後から再現できない。
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--paths", required=True,
-        help="configs/paths/*.yaml（実行環境ごとの pdf_dir / chunks_dir / index_dir）",
+        help="configs/paths/*.yaml (this machine's pdf_dir / chunks_dir / index_dir)",
     )
     parser.add_argument("--queries", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
-        "--build", action="store_true", help="前処理 + 索引構築をする（初回のみ）"
+        "--build", action="store_true", help="preprocess and build the indexes (first run only)"
     )
     parser.add_argument(
         "--production-input",
         action="store_true",
-        help="task_family / primary_evidence_type を捨てて本番と同じ4フィールドで走らせる"
-        "（比較実験ではこちらを使う）",
+        help="drop task_family / primary_evidence_type and run on the same fields "
+        "production gives (use this for comparison runs)",
     )
     parser.add_argument(
         "--dump-runs",
         default=None,
         metavar="RUNS.JSONL",
-        help="サブクエリ1本ごとの検索結果（step / subquery / 上位チャンクの順位とスコア）を"
-        "書き出す。あとから候補列の組み立てだけをオフラインでやり直すための土台。",
+        help="write out each subquery's results (step / subquery / the top chunks' "
+        "ranks and scores), so the candidate assembly can be replayed offline",
     )
     parser.add_argument(
         "--merge-with",
         nargs="+",
         default=[],
         metavar="PREDICTIONS.JSONL",
-        help="他の分割実行の予測 jsonl を結合して1本にまとめる。"
-        "val_a(28件)/val_b(27件) のように分けて回したとき、片側だけを 55件の gold に"
-        "採点すると macro が網羅率のぶん薄まるため、採点前に結合しておく。",
+        help="join other split runs' prediction jsonl into one file. Scoring one "
+        "half (val_a, 28 queries; val_b, 27) against the 55-query gold dilutes the "
+        "macro metrics by the coverage, so they are joined before scoring.",
     )
     args = parser.parse_args()
 
     paths = Paths.load(args.paths)
 
     if args.build:
-        # 前処理と索引構築だけ。ここではまだチャンクが無いので agent は組み立てない。
+        # Preprocessing and index building only. The chunks do not exist yet, so no
+        # agent is assembled here.
         papers = load_papers(paths.paper_metadata)
         chunks = []
         for paper in tqdm(papers, desc="前処理中"):
@@ -287,8 +275,9 @@ def main() -> None:
                 f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
         print(f"{len(chunks)} チャンクを {paths.chunks} に保存しました")
 
-        # 検索の索引3本と、ランキングB が読む SPECTER2 索引。後者は融合に渡らないが、
-        # ここで作らないと再構築する方法が無くなる。
+        # The three search indexes, plus the SPECTER2 index ranking B reads. The
+        # latter never reaches the fuser, but without building it here there would be
+        # no way to rebuild it at all.
         for indexer in [*build_indexers(paths), build_expander_index(paths)]:
             print(f"  {indexer.name} を構築中...")
             indexer.build(chunks)
@@ -313,9 +302,9 @@ def main() -> None:
         print("本番と同じ4フィールド（query_id/question/answer_types/table_schema）で走らせます")
     print(f"{len(queries)} 件の質問に対して検索中...")
 
-    # --dump-runs: サブクエリ1本ごとの検索結果を別ファイルに落とす。
-    # Prediction.trace には入れない（提出ファイルが膨らむため）。候補列の組み立てを
-    # あとからオフラインでやり直したいとき用の土台。
+    # --dump-runs writes each subquery's results to a separate file. Deliberately
+    # not in Prediction.trace, which would bloat the submission — this is the basis
+    # for replaying just the candidate assembly offline.
     runs_file = open(args.dump_runs, "w", encoding="utf-8") if args.dump_runs else None
 
     predictions = []
@@ -337,13 +326,13 @@ def main() -> None:
             f.write(json.dumps(pred, ensure_ascii=False) + "\n")
     print(f"予測結果を {output_path} に書き出しました")
 
-    # 分割実行を単独で採点すると macro が網羅率のぶん薄まるので、結合しておく。
+    # Scoring a split run on its own dilutes the macro metrics by the coverage.
     scored_path = output_path
     if args.merge_with:
         scored_path, _ = merge_predictions(output_path, args.merge_with)
     coverage = check_coverage(scored_path)
 
-    # 本番走行(重なり0件)では採点そのものが誤りなので、案内も出さない。
+    # On a production run (no overlap) scoring is itself the mistake; do not suggest it.
     if coverage.get("covered", 0):
         print(
             "\n採点するには:\n"

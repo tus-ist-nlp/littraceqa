@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
-"""複数マシンで分割ビルドした faiss_qwen3 索引スライスを、1つの索引に合体する。
+"""Join the faiss_qwen3 index slices built on several machines into one index.
 
-scripts/build_faiss_qwen3_shard.py が各マシンで作った
-  {index_dir}__shard{i}of{N}/index.faiss   (IndexFlatIP、担当スライスのベクトル)
-  {index_dir}__shard{i}of{N}/chunks.jsonl  (同じ並びのチャンク)
-を shard 0,1,...,N-1 の順に連結して、通常の run_search.py が読める形の
+scripts/build_faiss_qwen3_shard.py leaves, on each machine,
+  {index_dir}__shard{i}of{N}/index.faiss   (IndexFlatIP, that slice's vectors)
+  {index_dir}__shard{i}of{N}/chunks.jsonl  (the chunks, in the same order)
+and this concatenates them in shard order 0,1,...,N-1 into the shape run_search.py
+expects:
   {output}/index.faiss
   {output}/chunks.jsonl
-を作る。
 
-faiss_qwen3.py の build() は「memmap の i 行目 = chunks の i 行目」の対応で
-IndexFlatIP に順番に add しているので、index の i 番目のベクトルは chunks.jsonl の
-i 行目に対応する。よって「各スライスのベクトルとチャンクを、同じ shard 順で
-そのまま連結する」だけで、元の全件を1マシンで作ったのと同一の索引になる
-(IndexFlatIP は全ベクトルを平坦に持つだけで、順序以外の内部状態を持たないため)。
+**Concatenating in order is all it takes.** faiss_qwen3.py's build() adds to the
+IndexFlatIP so that row i of the memmap is line i of chunks.jsonl, so vector i of
+the index is line i of the chunks; and an IndexFlatIP holds nothing but the flat
+list of vectors, no internal state beyond their order. The result is therefore
+identical to building the whole corpus on one machine.
 
-ベクトルは faiss_qwen3.py の build() で L2 正規化済み。reconstruct で取り出しても
-正規化は保たれるので、再正規化はしない。
+The vectors were already L2-normalised in build(), and reconstruct preserves that,
+so they are not normalised again.
 
-メモリ安全のため、8B(全体41.6GB)を一度に RAM に載せず _ADD_ROWS 行ずつ
-reconstruct して add する。
+To stay inside memory, the 8B index (41.6GB in total) is never loaded at once: rows
+are reconstructed and added _ADD_ROWS at a time.
 
-使い方(2分割の例):
+Usage (two shards):
     uv run python scripts/merge_faiss_qwen3.py \
       --parts /data2/iseakira/pdfs/index/mineru/faiss_qwen3_8b__shard0of2 \
               /data2/iseakira/pdfs/index/mineru/faiss_qwen3_8b__shard1of2 \
       --output /data2/iseakira/pdfs/index/mineru/faiss_qwen3_8b
 
---parts は shard 0,1,...,N-1 の順で並べること(順番が命)。
-nlp02 で作ったスライスは、事前に scp/rsync で nlp01 に集めておく。
+**--parts must be in shard order 0,1,...,N-1** — the order is the whole contract.
+Slices built on another machine have to be collected here (scp/rsync) first.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ import numpy as np
 
 _CHUNKS_FILENAME = "chunks.jsonl"
 _INDEX_FILENAME = "index.faiss"
-_ADD_ROWS = 100_000  # faiss_qwen3.py と揃える
+_ADD_ROWS = 100_000  # keep in step with faiss_qwen3.py
 
 
 def count_lines(path: Path) -> int:
@@ -60,17 +60,18 @@ def main() -> None:
         "--parts",
         nargs="+",
         required=True,
-        help="スライス索引ディレクトリを shard 0,1,...,N-1 の順に並べる",
+        help="the slice index directories, in shard order 0,1,...,N-1",
     )
-    parser.add_argument("--output", required=True, help="合体後の索引ディレクトリ")
+    parser.add_argument("--output", required=True, help="directory for the joined index")
     args = parser.parse_args()
 
     part_dirs = [Path(p) for p in args.parts]
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # まず全スライスの健全性を確認する(index件数 == chunks行数)。
-    # 途中まで書いてから食い違いに気づくと索引がずれて全て無駄になるので、先に全部見る。
+    # Check every slice first (index count == chunks line count). Noticing a
+    # mismatch halfway through leaves the index misaligned and the whole merge
+    # wasted, so nothing is written until all of them have been verified.
     part_indexes = []
     dim = None
     total_vectors = 0
@@ -102,7 +103,7 @@ def main() -> None:
         f"合計 {total_vectors:,} ベクトル({dim}次元)を {output_dir} に合体します"
     )
 
-    # ベクトルを shard 順に連結して新しい IndexFlatIP に add する。
+    # Concatenate the vectors in shard order into a fresh IndexFlatIP.
     merged = faiss.IndexFlatIP(dim)
     for part, index in zip(part_dirs, part_indexes):
         n = index.ntotal
@@ -115,7 +116,7 @@ def main() -> None:
     faiss.write_index(merged, str(output_dir / _INDEX_FILENAME))
     print(f"index.faiss を書き出しました({merged.ntotal:,} ベクトル)")
 
-    # chunks.jsonl を shard 順にそのまま連結する。
+    # Concatenate the chunks.jsonl files in the same shard order.
     out_chunks = output_dir / _CHUNKS_FILENAME
     with out_chunks.open("w", encoding="utf-8") as out:
         for part in part_dirs:

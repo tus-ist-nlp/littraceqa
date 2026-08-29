@@ -1,56 +1,59 @@
 #!/usr/bin/env python3
-"""faiss_qwen3 索引を「コーパスの担当スライスぶんだけ」ビルドする分散ビルド用スクリプト。
+"""Build one machine's slice of the faiss_qwen3 index (the distributed build).
 
-Qwen3-Embedding-8B の索引構築は4GPUでも約31時間かかる。これを複数マシン
-(nlp01 + nlp02 の 8GPU) に分けて各マシンが担当スライスだけを埋め込み、あとで
-scripts/merge_faiss_qwen3.py で1索引に合体することで所要時間を半減させる。
+Building the Qwen3-Embedding-8B index takes about 31 hours even on four GPUs.
+Splitting it across machines (nlp01 + nlp02, 8 GPUs) so each embeds only its own
+slice, then joining the slices with scripts/merge_faiss_qwen3.py, halves that.
 
-このスクリプトは faiss_qwen3 indexer 「1つだけ」を担当スライスで build する。
-bm25s は全コーパスを1ドキュメント順で舐める必要があり分割に向かないので、
-分散対象にしない(bm25s は既存の run_search.py --build で全コーパス版が
-既に作られている前提)。faiss_qwen3.py 本体には一切手を入れない。
+**This builds the faiss_qwen3 index and nothing else.** bm25s has to walk the whole
+corpus in document order and does not split usefully, so it is left to the ordinary
+`run_search.py --build` on one machine. faiss_qwen3.py itself is untouched.
 
-パラメータ(model/batch_size/max_tokens 等)は index/faiss_qwen3.py の PRODUCTION_PARAMS を
-そのまま使うので、検索側と手打ちの値がズレる事故が起きない(devices だけはマシンごとに
-空きGPUが違うのでコマンドラインで渡す)。索引の出力先も検索側と同じ規約
-{index_dir}/{process}/{INDEX_NAME} で導出する。
+The parameters (model / batch_size / max_tokens ...) come from PRODUCTION_PARAMS in
+index/faiss_qwen3.py, so **the build and the search can never drift apart** through
+a value retyped in two places. `devices` is the exception — which GPUs are free
+differs per machine, so it comes from the command line. The output path is derived
+by the same rule search uses, `{index_dir}/{process}/{INDEX_NAME}`.
 
-スライスの決め方は faiss_qwen3.py の _embed_shard と同じ整数分割式:
+Slices are cut by the same integer split as _embed_shard in faiss_qwen3.py:
     start = n * shard_index // num_shards
     end   = n * (shard_index + 1) // num_shards
-全マシンが「同一の chunks.jsonl(行の並びが1バイトも違わない)」を見る前提なので、
-各マシンで num_shards を揃え shard_index だけを変えれば、重複なく全件を覆える。
+This assumes **every machine sees a byte-identical chunks.jsonl**, line order
+included; given that, keeping num_shards the same and varying only shard_index
+covers all the chunks exactly once.
 
-使い方(例: nlp01=前半, nlp02=後半 の2分割):
-    # nlp01 で
+Usage (two shards: nlp01 takes the first half, nlp02 the second):
+    # on nlp01
     uv run python scripts/build_faiss_qwen3_shard.py \
       --paths configs/paths/default.yaml \
       --devices cuda:0,cuda:1,cuda:2,cuda:3 \
       --shard-index 0 --num-shards 2
 
-    # nlp02 で(chunks.jsonl を転送済み、nlp02 用 paths を使う)
+    # on nlp02 (chunks.jsonl already transferred, using nlp02's paths)
     uv run python scripts/build_faiss_qwen3_shard.py \
       --paths configs/paths/nlp02.yaml \
       --devices cuda:0,cuda:1,cuda:2,cuda:3 \
       --shard-index 1 --num-shards 2
 
-OOM対策は3段構えになっている(詳細は index/faiss_qwen3.py の各パラメータのコメント)。
+OOM is guarded three ways (the details are on each parameter in
+index/faiss_qwen3.py):
 
-1. **max_batch_tokens**: 件数固定ではなく「バッチ件数 x バッチ内最長トークン数」を
-   予算で抑える。チャンクは長さ順にソートしてからバッチ化されるので、件数固定だと
-   末尾に長い外れ値が集まり batch_size x max_tokens (8x8192=65,536) になる。
-   実測のトークン分布は中央値265・p99 738・8192張り付きは0.002%なので、予算方式なら
-   長い外れ値だけ自動的に1件ずつになり、大多数のバッチはむしろ大きくできて速い。
-2. **oom_retries**: それでもOOMしたらバッチを半分に割って再試行する。
-3. **resume**: 途中で落ちても _embeddings.done の完了フラグから続きを再開する。
-   同じコマンドを再実行すればよい(数十時間のビルドをやり直さずに済む)。
+1. **max_batch_tokens**: budget "rows x longest row in the batch" rather than a
+   fixed row count. Chunks are sorted by length before batching, so a fixed count
+   collects the long outliers into the last batches, at batch_size x max_tokens
+   (8x8192 = 65,536). The measured token distribution is median 265, p99 738, with
+   0.002% reaching 8192 — so under a budget the long outliers end up alone while
+   most batches grow *larger*, which is also faster.
+2. **oom_retries**: if it still OOMs, halve the batch and retry.
+3. **resume**: a crash resumes from the completion flags in _embeddings.done — just
+   run the same command again, rather than redoing tens of hours.
 
-さらに実行時に
+Setting
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-を付けると断片化が緩和される。
+on the command line eases fragmentation further.
 
-空きGPUはマシンごとに違うので --devices で上書きする。8Bはfp16でもピーク19.3GB
-使うため、**空きが20GB未満のGPUは指定しない**こと。
+Which GPUs are free differs per machine, hence --devices. **Do not name a GPU with
+less than 20GB free**: the 8B model peaks at 19.3GB even in fp16.
 """
 
 from __future__ import annotations
@@ -63,10 +66,11 @@ import yaml
 
 from littraceqa.di_pipeline.contracts import Chunk
 
-# di_pipeline.pipeline を import すると reranker(torch) や expander(faiss/bm25s)、
-# LLM クライアントまで芋づるで読み込まれ、それらを入れていないマシン(分散ビルド先の
-# nlp02 など)で失敗する。ここで要るのは埋め込み索引だけなので、そのモジュールを
-# 直接読む。**モデル設定は本番と同じ定数を共有する**(2箇所に書かない)。
+# Importing di_pipeline.pipeline drags in the reranker (torch), the expanders
+# (faiss/bm25s) and the LLM client, which fails on a machine that has none of them
+# installed — nlp02, where this build runs. Only the embedding index is needed, so
+# that module is imported directly. **The model settings are still the same shared
+# constant**, never a second copy.
 from littraceqa.di_pipeline.index.faiss_qwen3 import (
     INDEX_NAME,
     PRODUCTION_PARAMS,
@@ -75,13 +79,13 @@ from littraceqa.di_pipeline.index.faiss_qwen3 import (
 
 
 def load_paths(path: str) -> dict:
-    """configs/paths/*.yaml を dict で読む(重い import を避けるため yaml 直読み)。"""
+    """Read configs/paths/*.yaml as a dict, straight through yaml (no heavy imports)."""
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def shard_bounds(n: int, shard_index: int, num_shards: int) -> tuple[int, int]:
-    """faiss_qwen3.py の _embed_shard と同じ整数分割で担当範囲[start, end)を返す。"""
+    """This shard's range [start, end), by the same integer split as _embed_shard."""
     if not (0 <= shard_index < num_shards):
         raise ValueError(
             f"shard_index={shard_index} は 0..{num_shards - 1} の範囲で指定してください"
@@ -105,18 +109,19 @@ def load_chunks(path: Path) -> list[Chunk]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--paths", required=True, help="configs/paths/*.yaml")
-    parser.add_argument("--process-name", default="mineru", help="chunksファイル名の接頭辞")
-    parser.add_argument("--shard-index", type=int, required=True, help="担当スライス番号(0始まり)")
-    parser.add_argument("--num-shards", type=int, required=True, help="全マシン合計のスライス数")
-    parser.add_argument("--chunks", default=None, help="chunks.jsonlのパス(既定は paths から導出)")
-    parser.add_argument("--index-dir", default=None, help="出力先(既定は paths から導出)")
+    parser.add_argument("--process-name", default="mineru", help="prefix of the chunks file name")
+    parser.add_argument("--shard-index", type=int, required=True, help="this shard's number (from 0)")
+    parser.add_argument("--num-shards", type=int, required=True, help="shards across all machines")
+    parser.add_argument("--chunks", default=None, help="path to chunks.jsonl (default: derived from paths)")
+    parser.add_argument("--index-dir", default=None, help="output directory (default: derived from paths)")
     parser.add_argument(
         "--devices",
         default=None,
         help=(
-            "使うGPU(例: 'cuda:0,cuda:1')。マシンごとに空きGPUが違うので、"
-            "構築のときだけここで指定する(検索側は devices[0] しか使わない)。"
-            "8Bはfp16でもピーク19.3GB使うので、空きが20GB未満のGPUは指定しないこと"
+            "GPUs to use (e.g. 'cuda:0,cuda:1'). Which ones are free differs per "
+            "machine, so they are named here for the build only (search uses "
+            "devices[0] alone). The 8B model peaks at 19.3GB even in fp16, so do "
+            "not name a GPU with less than 20GB free"
         ),
     )
     parser.add_argument(
@@ -124,15 +129,16 @@ def main() -> None:
         type=int,
         default=None,
         help=(
-            "1バッチのパディング後トークン数の上限(OOM対策)。既定値を上書きする。"
-            "VRAMに余裕がないマシンでは下げる"
+            "cap on a batch's padded token count (the OOM guard), overriding the "
+            "default. Lower it on a machine with less VRAM to spare"
         ),
     )
     args = parser.parse_args()
 
     paths = load_paths(args.paths)
     params = dict(PRODUCTION_PARAMS)
-    # マシンごとに空きGPU・VRAMが違うので、ここだけコマンドラインで指定する。
+    # The one setting that comes from the command line: free GPUs and VRAM differ
+    # per machine.
     if args.devices:
         params["devices"] = args.devices
     if args.max_batch_tokens:
@@ -148,8 +154,8 @@ def main() -> None:
         if args.index_dir
         else f"{paths['index_dir']}/{args.process_name}/{INDEX_NAME}"
     )
-    # 分割ビルドでは各スライスを別ディレクトリに出す(あとで merge する)。
-    # 誤って本番の索引パスをスライスで上書きしないよう、末尾に shard 情報を足す。
+    # Each slice goes to its own directory, to be merged later. **The shard is part
+    # of the name** so that a slice can never overwrite the real index by mistake.
     index_dir = f"{index_dir}__shard{args.shard_index}of{args.num_shards}"
 
     print(f"chunks を読み込み中: {chunks_path}")

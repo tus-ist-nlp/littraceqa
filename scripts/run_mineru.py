@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""MinerU(pipeline バックエンド)で PDF 群を Markdown / content_list.json に変換する。
+"""Convert PDFs to Markdown / content_list.json with MinerU (pipeline backend).
 
-本体パイプラインとは依存が両立しないため、隔離 venv (.venv-mineru) で実行する
-（詳細は requirements-mineru.txt）。ここで書き出した content_list.json を
-本体側の MinerUChunker が読んで Chunk 化する。
+**Runs in an isolated venv (.venv-mineru)**, because MinerU's dependencies cannot
+coexist with this package's; see requirements-mineru.txt. The content_list.json
+written here is what MinerUChunker reads on the main side.
 
-27,000件規模を現実的な時間で終わらせるため、GPU ごとに1プロセス立てて
-paper_id で分割(シャード)して並列に流す。既に content_list.json がある論文は
-飛ばすので、中断しても同じコマンドで再開できる。
+To get through 27,000 papers in a realistic time, one process is started per GPU
+and the papers are sharded by paper_id. **Papers that already have a
+content_list.json are skipped, so an interrupted run resumes with the same
+command.**
 
-構築:
+Setup:
     bash scripts/setup_mineru_env.sh
 
-実行(4GPU 全部使う):
+Run (all four GPUs):
     .venv-mineru/bin/python scripts/run_mineru.py \\
       --paths configs/paths/default.yaml --gpus 0,1,2,3
 
-出力先は paths.yaml の pdf_dir の兄弟 `mineru/` を既定とする
-（構成にパスを直書きしない方針のため。--mineru-dir で上書き可）。
+Output goes to `mineru/`, a sibling of paths.yaml's pdf_dir, by default — paths are
+derived rather than configured. --mineru-dir overrides it.
 """
 
 from __future__ import annotations
@@ -32,23 +33,23 @@ from pathlib import Path
 
 import yaml
 
-# MinerU の import 前に設定する必要がある。
+# Must be set before MinerU is imported.
 os.environ.setdefault("MINERU_DEVICE_MODE", "cuda")
 os.environ.setdefault("MINERU_MODEL_SOURCE", "huggingface")
 
 
 def default_mineru_dir(pdf_dir: Path) -> Path:
-    """pdf_dir と衝突しない兄弟ディレクトリを既定の出力先にする。"""
+    """The default output location: a sibling of pdf_dir, so the two cannot collide."""
     return pdf_dir.parent / "mineru"
 
 
 def content_list_path(mineru_dir: Path, paper_id: str) -> Path:
-    """do_parse が書き出す content_list.json の位置。"""
+    """Where do_parse writes a paper's content_list.json."""
     return mineru_dir / paper_id / "auto" / f"{paper_id}_content_list.json"
 
 
 def select_pdfs(pdf_dir: Path, mineru_dir: Path, shard: int, num_shards: int, overwrite: bool) -> list[Path]:
-    """このシャードが担当する、まだ未処理の PDF を返す。"""
+    """This shard's PDFs that have not been converted yet."""
     pdfs = sorted(pdf_dir.glob("*.pdf"))
     mine = [p for i, p in enumerate(pdfs) if i % num_shards == shard]
     if overwrite:
@@ -57,7 +58,7 @@ def select_pdfs(pdf_dir: Path, mineru_dir: Path, shard: int, num_shards: int, ov
 
 
 def parse_batch(pdfs: list[Path], mineru_dir: Path) -> None:
-    """PDF をまとめて do_parse に渡す。まとめるほどモデル呼び出しが効率的になる。"""
+    """Hand do_parse a batch of PDFs; the larger the batch, the better the model calls amortise."""
     from mineru.cli.common import do_parse
 
     do_parse(
@@ -66,8 +67,8 @@ def parse_batch(pdfs: list[Path], mineru_dir: Path) -> None:
         [p.read_bytes() for p in pdfs],
         ["en"] * len(pdfs),
         backend="pipeline",
-        # 索引には Markdown と content_list.json しか使わない。
-        # bbox 描画済み PDF や model 出力は容量を食うだけなので落とす。
+        # Only the Markdown and content_list.json are ever used. The bbox-annotated
+        # PDFs and the raw model output are pure disk cost, so they are turned off.
         f_draw_layout_bbox=False,
         f_draw_span_bbox=False,
         f_dump_model_output=False,
@@ -79,7 +80,7 @@ def parse_batch(pdfs: list[Path], mineru_dir: Path) -> None:
 
 
 def run_shard(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> int:
-    """1シャード分を処理する。戻り値は失敗件数。"""
+    """Process one shard. Returns the number of failures."""
     pdfs = select_pdfs(pdf_dir, mineru_dir, args.shard, args.num_shards, args.overwrite)
     if args.limit:
         pdfs = pdfs[: args.limit]
@@ -98,7 +99,7 @@ def run_shard(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> int:
         try:
             parse_batch(batch, mineru_dir)
         except Exception as exc:
-            # バッチのどれか1件が壊れていても他を巻き添えにしないよう、1件ずつ再試行する。
+            # One broken PDF must not take its batch down with it: retry one by one.
             print(f"[shard {args.shard}] バッチ失敗、1件ずつ再試行します: {exc}", file=sys.stderr, flush=True)
             for pdf in batch:
                 try:
@@ -124,9 +125,10 @@ def run_shard(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> int:
 
 
 def orchestrate(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> int:
-    """GPU ごとに自分自身を --shard 付きで起動して並列に流す。
+    """Launch this script again, once per GPU, with --shard.
 
-    親プロセスでは CUDA を初期化しない(子が CUDA_VISIBLE_DEVICES を見て掴む)。
+    **The parent never initialises CUDA** — each child picks up its GPU through
+    CUDA_VISIBLE_DEVICES.
     """
     gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
     todo = len(select_pdfs(pdf_dir, mineru_dir, 0, 1, args.overwrite))
@@ -170,14 +172,14 @@ def orchestrate(args: argparse.Namespace, pdf_dir: Path, mineru_dir: Path) -> in
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--paths", required=True, help="configs/paths/*.yaml")
-    parser.add_argument("--gpus", default="0", help="使う GPU の番号をカンマ区切りで（例: 0,1,2,3）")
-    parser.add_argument("--batch-size", type=int, default=8, help="1回の do_parse に渡す PDF 数")
-    parser.add_argument("--mineru-dir", help="出力先（既定: pdf_dir の兄弟 mineru/）")
-    parser.add_argument("--limit", type=int, help="各シャードの処理件数を制限する（動作確認用）")
-    parser.add_argument("--overwrite", action="store_true", help="既に変換済みの論文も再処理する")
-    # 以下は orchestrate() が子プロセスを起動するときに使う。手動指定も可。
-    parser.add_argument("--shard", type=int, help="このプロセスが担当するシャード番号")
-    parser.add_argument("--num-shards", type=int, default=1, help="シャード総数")
+    parser.add_argument("--gpus", default="0", help="GPU numbers to use, comma-separated (e.g. 0,1,2,3)")
+    parser.add_argument("--batch-size", type=int, default=8, help="PDFs per do_parse call")
+    parser.add_argument("--mineru-dir", help="output directory (default: mineru/ beside pdf_dir)")
+    parser.add_argument("--limit", type=int, help="cap the papers per shard (for a smoke run)")
+    parser.add_argument("--overwrite", action="store_true", help="convert papers that are already done")
+    # The next two are what orchestrate() passes to its children; usable by hand too.
+    parser.add_argument("--shard", type=int, help="the shard number this process handles")
+    parser.add_argument("--num-shards", type=int, default=1, help="how many shards in total")
     args = parser.parse_args()
 
     with open(args.paths, encoding="utf-8") as f:
@@ -191,8 +193,8 @@ def main() -> int:
     return 1 if run_shard(args, pdf_dir, mineru_dir) else 0
 
 
-# MinerU は PDF レンダリング用の ProcessPoolExecutor を spawn で起動する。
-# spawn の子は __main__ を再読み込みするため、このガードが無いと変換処理が
-# 子プロセス内で再帰的に走り BrokenProcessPool で落ちる。
+# MinerU starts a ProcessPoolExecutor for PDF rendering with spawn, and a spawned
+# child re-imports __main__. **Without this guard the conversion runs again inside
+# each child** and the whole thing dies with BrokenProcessPool.
 if __name__ == "__main__":
     sys.exit(main())

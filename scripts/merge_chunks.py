@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""複数の chunks.jsonl を1つに結合する汎用マージスクリプト。
+"""Join several chunks.jsonl files into one.
 
-本文チャンク（marker / docint など、本文ソースは問わない）と図表チャンク
-（figure_vlm）のように、別々の Preprocessor で生成した chunks.jsonl を
-まとめて1つの索引対象にするために使う。
+For combining the output of preprocessors that each cover part of a paper, so that
+one index can be built over the result. Chunks with a chunk_id already seen are
+dropped, keeping the first.
 
-使い方:
+Usage:
     uv run python scripts/merge_chunks.py \\
-      --inputs marker_chunks.jsonl figure_chunks.jsonl \\
+      --inputs body_chunks.jsonl figure_chunks.jsonl \\
       --output chunks.jsonl
 """
 
@@ -33,7 +33,7 @@ def load_chunks(path: Path) -> list[Chunk]:
 
 
 def merge_chunks(chunk_lists: list[list[Chunk]], strict: bool = False) -> list[Chunk]:
-    """複数の Chunk リストを chunk_id の重複を除いて1つに結合する。"""
+    """Join several Chunk lists into one, dropping repeated chunk_ids."""
     seen: set[str] = set()
     merged: list[Chunk] = []
     duplicate_ids: list[str] = []
@@ -61,13 +61,13 @@ def merge_chunks(chunk_lists: list[list[Chunk]], strict: bool = False) -> list[C
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--inputs", nargs="+", required=True, help="結合する chunks.jsonl のパス（複数指定可）"
+        "--inputs", nargs="+", required=True, help="chunks.jsonl files to join (several allowed)"
     )
-    parser.add_argument("--output", required=True, help="結合後の出力先 jsonl パス")
+    parser.add_argument("--output", required=True, help="where to write the joined jsonl")
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="chunk_id の重複を検出したら警告ではなくエラーで停止する",
+        help="stop with an error on a repeated chunk_id instead of warning",
     )
     args = parser.parse_args()
 

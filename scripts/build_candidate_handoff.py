@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""検索結果の候補論文を質問に貼り合わせ、読解エージェント用の1ファイルにまとめる。
+"""Glue the retrieved candidate papers onto the questions, in one file for the
+reading agent.
 
-読解エージェントを別実装で作るとき、必要な入力は「質問」と「検索が拾った候補論文」の
-2つだが、いまは前者が data/validation_inputs.jsonl、後者が predictions_*.jsonl の
-`candidate_papers` に分かれている。両方を突き合わせる手間を毎回かけないよう、
-1行1クエリの JSONL に合成する。
+Building a reading agent separately needs two things — the question and the papers
+retrieval found — and right now they live apart: the questions in
+data/validation_inputs.jsonl, the candidates in `candidate_papers` inside
+predictions_*.jsonl. This joins them into one JSONL, one query per line, so that
+does not have to be redone every time.
 
-出力の形（本番入力の5フィールド + 候補 + メタ + gold）:
+The shape (production's five fields, plus candidates, meta and gold):
 
     {
       "query_id": "q_001",
       "question": "...",
       "answer_types": ["freeform", "multiple_choice"],
-      "multiple_choice_options": null,   # 本番入力では埋まる。検証データでは常に null
+      "multiple_choice_options": null,   # filled in production; always null from validation
       "table_schema": null,
       "candidate_papers": [
         {"rank": 1, "paper_id": "acl2025_00005", "title": "...", "venue": "ACL", "year": 2025},
@@ -23,24 +25,24 @@
                 "evidence": [...], "answer": {...}}
     }
 
-**gold を `_gold` の下に隔離してあるのは事故防止のため。** 同じ階層に並べると、
-`gold_papers[].title`（どの論文かの答えそのもの）、`answer.multiple_choice.options`
-（**検証データでのみ** oracle 実験専用と決めた項目。本番入力は選択肢を
-`multiple_choice_options` としてトップレベルで与えるので、そちらは gold ではない）、
-`task_family` / `primary_evidence_type`（本番入力に存在しない項目）を、悪意なく
-読んでしまう。トップレベルの5フィールドだけが本番と同じ入力で、`_gold` は採点のときだけ
-触ってよい。
+**Gold is quarantined under `_gold` to prevent accidents.** At the same level it
+would be read in all innocence: `gold_papers[].title` is the answer to "which
+paper" itself; `answer.multiple_choice.options` is oracle-only **in the validation
+data** (production gives the options as top-level `multiple_choice_options`, where
+they are not gold); `task_family` and `primary_evidence_type` do not exist in
+production input at all. Only the five top-level fields are the same input
+production gives; `_gold` may be touched at scoring time and nowhere else.
 
-候補に title/venue/year を付けてあるのは gold ではないので安全（本文を引く前に
-候補一覧を眺められるようにするため）。本文と図表画像が要るときは paper_id を
-littraceqa.chunk_store.ChunkStore に渡す。
+The title/venue/year on each candidate are not gold and are safe — they are there
+so the candidate list can be read before pulling any full text. For the text and
+the figure images, hand the paper_id to littraceqa.chunk_store.ChunkStore.
 
-使い方:
+Usage:
     uv run python scripts/build_candidate_handoff.py \\
       --predictions predictions_8b_chunk_b_merged.jsonl \\
       --output data/validation_with_candidates.jsonl
 
-    # 本番入力を模して gold を落とす（配布用）
+    # imitate production input by dropping gold (for handing out)
     uv run python scripts/build_candidate_handoff.py \\
       --predictions predictions_8b_chunk_b_merged.jsonl --no-gold \\
       --output data/validation_with_candidates_blind.jsonl
@@ -58,17 +60,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 Record = dict[str, Any]
 
-# 本番入力に実在するフィールド。ここを増やすと評価が本番と乖離する。
+# The fields production input really has. **Adding one here makes the evaluation
+# drift from production.**
 #
-# **`multiple_choice_options` は本番入力に入っている**（2026-08-13 に HF から取得した
-# `data/test_inputs.jsonl` 71件のうち50件が持っている）。検証データでは選択肢が gold 側
-# （`answer.multiple_choice.options`）にしか無く oracle 専用だったので長らく除いていたが、
-# 本番では入力そのものが与えるので gold ではない。71件中50件が multiple_choice なので、
-# 落とすと読解チームはこのファイルだけでは答えられない。
+# `multiple_choice_options` **is** in production input: 50 of the 71 queries in
+# data/test_inputs.jsonl (pulled from HF on 2026-08-13) carry it. It was left out
+# for a long time because in the validation data the options exist only on the gold
+# side (`answer.multiple_choice.options`), which is oracle-only — but in production
+# the input itself supplies them, so they are not gold. With 50 of 71 queries
+# multiple_choice, dropping it would leave the reading team unable to answer from
+# this file alone.
 #
-# ⚠ **検証データから作ったときは常に None になる**（`validation_inputs.jsonl` に
-# このフィールドが無いため）。「選択肢が無い問題」ではなく「選択肢は `_gold` の下にある」
-# と読むこと。
+# WARNING: built from validation data it is **always None**, because
+# validation_inputs.jsonl has no such field. Read that as "the options are under
+# `_gold`", not as "this question has no options".
 PRODUCTION_FIELDS = (
     "query_id",
     "question",
@@ -77,7 +82,8 @@ PRODUCTION_FIELDS = (
     "table_schema",
 )
 
-# 採点にしか使ってはいけないフィールド。トップレベルから _gold へ移す。
+# Fields that may be used for scoring and nothing else; moved from the top level
+# into _gold.
 GOLD_FIELDS = (
     "task_family",
     "primary_evidence_type",
@@ -93,7 +99,7 @@ def read_jsonl(path: Path) -> list[Record]:
 
 
 def load_paper_titles(path: Path) -> dict[str, Record]:
-    """paper_id -> {title, venue, year}。候補一覧の見出しにだけ使う。"""
+    """paper_id -> {title, venue, year}, used only as a heading in the candidate list."""
     titles: dict[str, Record] = {}
     with path.open(encoding="utf-8") as handle:
         for line in handle:
@@ -164,7 +170,7 @@ def build_rows(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--predictions", type=Path, required=True, help="候補論文の供給元 predictions_*.jsonl"
+        "--predictions", type=Path, required=True, help="the predictions_*.jsonl the candidates come from"
     )
     parser.add_argument("--inputs", type=Path, default=ROOT / "data/validation_inputs.jsonl")
     parser.add_argument("--gold", type=Path, default=ROOT / "data/validation.jsonl")
@@ -176,10 +182,11 @@ def main(argv: list[str] | None = None) -> int:
         "--max-candidates",
         type=int,
         default=0,
-        help="候補の上限（0で predictions にあるだけ全部。既定の予測は上限50本）",
+        help="cap on candidates per query (0 takes every one in the predictions; the "
+        "predictions themselves hold at most 50)",
     )
     parser.add_argument(
-        "--no-gold", action="store_true", help="_gold を出力しない（配布用のブラインド版）"
+        "--no-gold", action="store_true", help="omit _gold (the blind version, for handing out)"
     )
     args = parser.parse_args(argv)
 
@@ -192,9 +199,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     titles = load_paper_titles(args.metadata)
 
-    # 構成は pipeline.py 1本に固定なので、どの構成で作ったかは予測ファイル名で足りる。
-    # （以前は results/experiments.jsonl から実行記録を引いて search/agent の
-    #   構成名を載せていたが、そのファイルを書く仕組みは最終構成では持たない。）
+    # There is one configuration, pipeline.py, so the prediction file's name is
+    # enough to say which run produced these candidates. (This used to look the run
+    # up in results/experiments.jsonl and record the search/agent configuration
+    # names; nothing writes that file in the final system.)
     meta_base: Record = {"source_predictions": args.predictions.name}
 
     rows, missing = build_rows(
