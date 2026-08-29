@@ -1,252 +1,266 @@
 # src/littraceqa/di_pipeline/agent/
 
-`Query` を受け取り `Prediction` を返す検索エージェント層。`retriever`（と必要なら
-`llm`）を DI で注入して使う。retriever が「どの論文か」までを担い、agent が
-「その中のどこが根拠か（evidence）」を担う。**回答（freeform / multiple_choice /
-table）は生成しない**——回答生成も提出論文の選定も読解チーム側の担当で、
-我々が渡すのは候補列と evidence まで。
+The agent layer: takes a `Query` and returns a `Prediction`. The retriever settles
+*which paper*; the agent settles *where in it the evidence is*. **No answer is
+generated** — freeform / multiple_choice / table, and choosing which papers to
+submit, all belong to the reading team. What this hands over is the candidate list
+and the evidence.
 
-## ファイル
+## Files
 
-- `reading.py` — `ReadingAgent`: 検索 → 読解 → 不足分の再検索 を反復する本体。
-  設定は `ReadingConfig` / `CombineConfig`
-- `evidence.py` — `RetrievalResult` から提出用 `Evidence`（locator 付き）を組み立てる
-- `json_utils.py` — LLM 応答からの JSON 抽出
+- `reading.py` — `ReadingAgent`: retrieve, read, re-search for what is missing, and
+  repeat. Its settings are `ReadingConfig` and `CombineConfig`.
+- `evidence.py` — turn a `RetrievalResult` into the submitted `Evidence`, locator
+  and all
+- `json_utils.py` — pulling JSON out of an LLM response
 
 ---
 
-# ReadingAgent の設計
+# How ReadingAgent works
 
-## 一言で
+## In one sentence
 
-**「検索 → LLM に候補を読ませて根拠を確定 → 足りなければ何が欠けているか聞いて
-再検索」を繰り返す、反復型の検索エージェント。**
+**An iterative search agent: retrieve, have an LLM read the candidates and settle
+the evidence, and when that is not enough, ask what is missing and search again.**
 
-## 全体フロー（`run()`）
+## The whole flow (`run()`)
 
 ```
 run(query):
-  0. _extract_attribute_filter()  会議名・年の制約を「元の質問から1回だけ」抽出
-  1. _decompose()                 質問を検索用サブクエリに分解
-  ┌─ for step in range(max_steps=3):              ← 反復ループ
-  │  2. retriever.retrieve(subquery, retrieve_top_k) を各サブクエリで実行
-  │     → 結果を chunks: dict[chunk_id -> RetrievalResult] に蓄積
-  │  3. _candidate_papers()        チャンクを論文単位に集約、上位を候補に
-  │  4. _read_and_judge()          LLM に候補を読ませて判定
+  0. _extract_attribute_filter()  take the venue/year constraint ONCE, from the question
+  1. _decompose()                 split the question into search subqueries
+  ┌─ for step in range(max_steps=3):              ← the loop
+  │  2. retriever.retrieve(subquery, retrieve_top_k) for each subquery
+  │     → accumulate into chunks: dict[chunk_id -> RetrievalResult]
+  │  3. _candidate_papers()        group the chunks per paper, keep the top ones
+  │  4. _read_and_judge()          the LLM reads the candidates and judges
   │     → {paper_ids, evidence_chunk_ids, sufficient, missing}
-  │  5. verdict["sufficient"] が true なら break
-  │  6. _refine(missing)           欠けているものを聞いて新サブクエリ → 2 へ
+  │  5. break when verdict["sufficient"]
+  │  6. _refine(missing)           ask what is missing, get new subqueries → 2
   └─
-  7. _build_prediction()          提出物（Prediction）を組み立て
-                                  （answer は空。回答生成は読解チーム側の担当）
+  7. _build_prediction()          assemble the Prediction
+                                  (answer stays empty; generating it is the
+                                   reading team's job)
 ```
 
-LLM 呼び出しは **1周につき最大2回**（`_decompose` / `_refine` が1回、`_read_and_judge`
-が1回）。回答生成を外したので、以前あった「クエリ1件につき+1回」は無い。
+**At most two LLM calls per pass**: one for `_decompose` / `_refine`, one for
+`_read_and_judge`. With answer generation gone, the extra call per query is gone
+with it.
 
-## 各ステップの設計判断
+## The decisions behind each step
 
-### 0. 属性フィルタの抽出（`_extract_attribute_filter`）
+### 0. Extracting the attribute filter (`_extract_attribute_filter`)
 
-質問が「Which NAACL 2025 papers ...」のように検索範囲を会議名で明示している場合、
-その制約を**元の `query.question` から1回だけ**取り出し、反復全体で使い回す。
+When a question names the venue it is searching in ("Which NAACL 2025 papers ..."),
+that constraint is taken **once, from `query.question`**, and reused across every
+step of the loop.
 
-- **サブクエリからは取らない。** `_decompose()` は「NAACL 2025」のような制約語を
-  落とすことがあるため、サブクエリから抽出すると発火しない。
-- 制約が取れたときだけ `retrieve(..., attribute_filter=...)` に渡す。取れなければ
-  引数自体を渡さず、**制約が無い質問の挙動は従来と完全に同一**に保つ。
-- 抽出器は retriever が持つ（`pipeline.build_retriever()` が `AttributeExtractor` を渡す）。
-  無効な構成では None を返す。詳細は `retrieve/attribute_filter.py`。
+- **Never from a subquery.** `_decompose()` sometimes drops terms like "NAACL 2025",
+  so extracting from a subquery would simply never fire.
+- It is passed as `retrieve(..., attribute_filter=...)` only when something was
+  found. Otherwise the argument is not passed at all, and **a question with no
+  constraint behaves exactly as it did before**.
+- The extractor belongs to the retriever (`pipeline.build_retriever()` hands it an
+  `AttributeExtractor`). Without one this returns None. See
+  `retrieve/attribute_filter.py`.
 
-### 1. 分解（`_decompose`）
+### 1. Splitting (`_decompose`)
 
-single/multi の**両方で常に分解する**。single でも「どの論文か」と「その中の
-どの表か」は別々の検索語になりうるため。
+**Always splits**, single-paper and multi-paper alike: even for a single paper,
+"which paper" and "which table inside it" can want different search terms.
 
-**件数は `SUBQUERY_COUNT`（4本）に固定で、task_family では分岐しない。** 以前は
-single「1〜3個」/ multi「3〜6個」と分けていたが、そのためだけに
-`TaskFamilyClassifier.infer()` が**クエリ1件につき LLM を1回**呼んでいた
-（本番入力に task_family が無いため）。実測で買えていたのは平均0.58本:
+**The count is fixed at `SUBQUERY_COUNT` (4) and never branches on task_family.** It
+used to ask for 1-3 on single-paper questions and 3-6 on multi-paper ones, and that
+branch alone cost **an LLM call per query** to guess task_family, which production
+input does not carry. Measured, it bought 0.58 extra subqueries:
 
-| gold | step0 のサブクエリ数 | 分布 |
+| gold | subqueries at step 0 | distribution |
 |---|---|---|
-| single 26件 | 平均 3.08 | 26件中25件が上限の3本 |
-| multi 29件 | 平均 3.66 | 29件中17件が下限の3本 |
+| single, 26 queries | 3.08 on average | 25 of 26 at the cap of 3 |
+| multi, 29 queries | 3.66 on average | 17 of 29 at the floor of 3 |
 
-推定精度も LLM 0.67 / ヒューリスティック 0.673（55件実測）で差が無く、分岐する
-根拠が無かった。両者を挟む4本に固定して LLM 呼び出しを1回減らした。
+The two estimators were also indistinguishable in accuracy (LLM 0.670, heuristic
+0.673 over 55 queries), so there was no basis for branching at all. Fixing the count
+at 4 sits between the measured averages and removes one LLM call.
 
-指示文も「1本の論文で足りることも複数にまたがることもある。主役の論文を引き当てる
-言い換えと、必要な事実ごとの分解の両方を書け」という1文に統一してある
-（片方に決め打ちすると、外したときに他方が丸ごと欠けるため）。
+The wording is one sentence covering both cases too — "the evidence may live in a
+single paper or be spread across several; write both paraphrases that reliably
+retrieve the paper(s) in focus and separate subqueries per distinct fact" —
+because committing to either loses the other outright when the guess is wrong.
 
-LLM が空を返したら元の質問1本にフォールバックする。
+An empty response falls back to the original question as the only subquery.
 
-**プロンプトの先頭に `CORPUS_NOTE`（「投げ先はローカル索引であって Web検索エンジン
-ではない」）を必ず置く。** これが無いと LLM は `site:arxiv.org` / `filetype:pdf` の
-ような Google 検索クエリを書く。実測では `_refine()` の出力の 29〜41% がそれで、
-ローカルの BM25/faiss には1件もヒットせず 2〜3周目の検索が空振りしていた
-（構成別の内訳は CLAUDE.md）。`_decompose` / `_refine` の両方に置いてある。
+**`CORPUS_NOTE` ("this goes to a local index, not a web search engine") must lead
+the prompt.** Without it the LLM writes Google queries with `site:arxiv.org` and
+`filetype:pdf`. Measured, 29-41% of `_refine()`'s output carried them; they match
+nothing in the local BM25 and faiss indexes, so rounds 2 and 3 of the loop were
+retrieving pure noise. It sits at the head of both `_decompose` and `_refine`.
 
-**属性制約が取れているときは `_constraint_note()` でサブクエリの先頭に
-`[NAACL 2025]` を付けさせる。** 絞り込み自体は attribute_filter が担当するので、
-これは検索語としての制約。title_abstract チャンクの本文が実際に
-`[ACL 2025] タイトル…` で始まるため BM25 の語として効く。
+**When a constraint was extracted, `_constraint_note()` asks for `[NAACL 2025]` at
+the front of each subquery.** The narrowing itself is attribute_filter's job, so
+this is the constraint **as a search term**: a title_abstract chunk's text really
+does begin `[ACL 2025] Title...`, so the same tag works as a BM25 term.
 
-### 2. 検索と蓄積
+### 2. Retrieving and accumulating
 
-各サブクエリの結果を `chunks` dict に貯める。同じ chunk_id が複数のサブクエリで
-当たったら**スコアの高い方を残す**（後勝ちにすると、サブクエリ1で最上位だった
-チャンクがサブクエリ3の低スコアで上書きされ、論文順位が「最後に投げた
-サブクエリ」に引きずられるため）。
+Each subquery's results go into the `chunks` dict. When several subqueries hit the
+same chunk_id, **the higher score wins** — last-write-wins would let subquery 3's
+low score overwrite subquery 1's top hit, dragging the paper ranking towards
+whichever subquery ran last.
 
-### 3. 候補集約（`_candidate_papers`）
+### 3. Assembling the candidates (`_candidate_papers`)
 
-チャンクを `paper_id` でグループ化し、論文ごとに最高スコアで並べる。上位
-`max_candidates`（既定20）論文まで、各論文 `chunks_per_paper`（既定2）チャンクを
-候補にする。**この件数が「LLM が読める上限」になる**点に注意（ステップ2で拾って
-いないチャンクは候補に入らない）。
+Group the chunks by `paper_id` and order the papers by their best chunk. The top
+`max_candidates` (20) papers become candidates, with `chunks_per_paper` (2) chunks
+each. **That count is the ceiling on what the LLM can read** — a chunk not retrieved
+in step 2 is not a candidate at all.
 
-### 4. 読解と判定（`_read_and_judge`）— 心臓部
+### 4. Reading and judging (`_read_and_judge`) — the heart of it
 
-候補チャンクを**全文**（`snippet_chars`、既定1800文字）LLM に見せ、1回の呼び出しで
-4つを同時に返させる。
+The candidate chunks are shown to the LLM **in full** (`snippet_chars`, 1800
+characters), and one call returns everything at once:
 
 ```json
 {"papers": [{"paper_id": "...", "evidence_chunk_ids": ["..."]}],
  "sufficient": true, "missing": ""}
 ```
 
-| フィールド | 用途 |
+| field | what it is for |
 |---|---|
-| `paper_ids` | LLM が根拠を確認した論文。**提出には使わない**（選定は読解チーム側の担当）。ランキングB の起点（`anchor_from: verdict`）にだけ使う |
-| `evidence_chunk_ids` | 提出する evidence の元チャンク |
-| `sufficient` | **反復の停止条件**。ここが true で break |
-| `missing` | 次に何を検索するか（`_refine` に渡す） |
+| `paper_ids` | the papers the LLM confirmed. **Not used for the submission** (choosing is the reading team's job); used only as the anchors of ranking B (`anchor_from: verdict`) |
+| `evidence_chunk_ids` | the chunks the submitted evidence comes from |
+| `sufficient` | **the loop's stopping condition**; true breaks |
+| `missing` | what to search for next (handed to `_refine`) |
 
-**捏造ガード**: 候補一覧に無い paper_id、実在しない chunk_id、他論文の chunk_id は
-すべて弾く。`_format_paper()` が各候補を「`[paper_id] title (venue year)` + 各
-チャンクの chunk_id・type・page/table_id/figure_id/equation_id・本文」の形で
-提示するので、LLM は locator まで見て根拠を選べる。
+**Guards against invention**: a paper_id absent from the candidate list, a chunk_id
+that does not exist, and a chunk_id belonging to another paper are all rejected.
+`_format_paper()` presents each candidate as `[paper_id] title (venue year)` plus,
+per chunk, its chunk_id, type, page / table_id / figure_id / equation_id and text,
+so the LLM can choose evidence down to the locator.
 
-**本数の打ち切りはここではやらない。** `paper_cutoff` で一括して決める（比較実験で
-本数の決め方を揃えられるようにするため）。
+**Nothing is truncated here.** The submission is the top `max_papers` of the
+candidate list, decided in `_build_prediction`.
 
-### 5. 停止判定（`run()` 内）
+### 5. Stopping (inside `run()`)
 
 ```python
-if verdict is not None and verdict["sufficient"]:   # LLMが「足りた」
+if verdict is not None and verdict["sufficient"]:   # the LLM says it has enough
     break
-if step == self.max_steps - 1:                       # 反復上限
+if step == self.config.max_steps - 1:               # the iteration cap
     break
 subqueries = self._refine(query, missing, tried)
-if not subqueries:                                   # LLMが「これ以上探しても無い」
+if not subqueries:                                  # the LLM says more searching is futile
     break
 ```
 
-**検索が何本返したかではなく、LLM が根拠として確認できた論文で足りているかで
-打ち切る。** これが「本数で止める反復」との決定的な違い。
+**It stops on whether the papers the LLM could confirm are enough, never on how many
+results came back.** That is the whole difference from an iteration that counts.
 
-### 6. 再分解（`_refine`）
+### 6. Re-splitting (`_refine`)
 
-`missing`（何が欠けているか）と `tried`（既に投げたサブクエリ）を渡し、
-**重複しない**新しいサブクエリを作らせる。これ以上探しても見つからないと LLM が
-判断すれば空リストを返し、ループを抜ける。
+Given `missing` (what is absent) and `tried` (the subqueries already issued), the
+LLM writes new, **non-overlapping** subqueries. If it judges that further searching
+will find nothing, it returns an empty list and the loop ends.
 
-### 7. 提出物の組み立て（`_build_prediction`）
+### 7. Assembling the prediction (`_build_prediction`)
 
-Prediction に**2つの論文リスト**を乗せる。ここが評価と直結する。
+The Prediction carries **two lists of papers**, and the difference matters for
+evaluation.
 
 ```python
-gold_papers       = candidate_papers の順位 + apply_paper_cutoff  # 提出セット
-candidate_papers  = to_gold_papers(全チャンク, max=50)            # 検索が拾えた候補
+candidate_papers = to_gold_papers(every chunk)[:50]   # what retrieval found
+gold_papers      = candidate_papers[:max_papers]      # what is submitted
 ```
 
-- `candidate_papers` は**打ち切り前**の「検索が拾えた候補」。`candidate_recall@k` は
-  これで測る。**検索力（拾えたか）と選定力（LLM がどれだけ絞れたか）を分離**する
-  ため。indexer / reranker / 属性フィルタの改善はこの指標に出る。
-- `gold_papers` は cutoff の後。実提出の paper P/R/F1 はこちら。**選定はしない**
-  ——どれを提出するかは読解チーム側の担当なので、候補列の順位をそのまま渡す。
-  verdict が一度も返らなかった場合も同じ経路。
-- 各ステップの `trace`（subqueries / attribute_filter / n_chunks / selected /
-  sufficient / missing）も残す。後から挙動を追える。
+- `candidate_papers` is what retrieval found, **before the cut**.
+  `candidate_recall@k` is measured on it, which is what **separates retrieval (did
+  it find the paper?) from selection (how well was it narrowed?)**. Improvements to
+  an indexer, the reranker or the attribute filter show up here.
+- `gold_papers` is after the cut. **No selection happens** — which papers to submit
+  belongs to the reading team, so the candidate ranking is passed straight through.
+  A query where no verdict ever came back takes the same path.
+- The per-step `trace` (subqueries / attribute_filter / n_chunks / selected /
+  sufficient / missing) is kept, so a run can be followed afterwards.
 
-evidence は `evidence_from_result()` で locator 付き `Evidence` に変換する。ただし
-cutoff で落ちた論文の evidence は出さない。
+Evidence becomes a located `Evidence` through `evidence_from_result()`, except for
+papers the cut removed.
 
-## 提出論文は選定しない
+## The papers to submit are not chosen
 
-提出するのは候補列の順位そのまま（`max_papers` で頭打ち）。**どれを提出するかの選定は
-読解チーム側の担当**なので、検索エージェントは順位を渡すところで止める。
+The submission is the candidate ranking as it stands, capped at `max_papers`.
+**Choosing belongs to the reading team**, so the search agent stops at handing over
+the ranking.
 
-**それでも `_read_and_judge()` は呼ぶ。** 1回の LLM 呼び出しが返す3つのうち、
-選定（`paper_ids`）以外の2つが別の役割を持っているため——`sufficient` は
-**反復の停止条件そのもの**（これが無いと `max_steps` 固定になる）、
-`evidence_chunk_ids` は根拠チャンク（`evidence_f1`）。`paper_ids` 自体も
-ランキングB の起点（`anchor_from: verdict`）として順位付けには使う。
+**`_read_and_judge()` is still called.** Of the three things one LLM call returns,
+the two that are not the selection have jobs of their own: `sufficient` **is the
+loop's stopping condition** (without it the loop is fixed at `max_steps`), and
+`evidence_chunk_ids` is the evidence (`evidence_f1`). `paper_ids` does reach the
+ranking, as the anchors of ranking B (`anchor_from: verdict`).
 
-## 提出本数の決め方
+## How many papers are submitted
 
-候補列の先頭 `max_papers`（既定10）本。**それだけ。**
+The first `max_papers` (10) of the candidate list. **That is all.**
 
-以前は `task_family`（single/multi）を LLM に推定させて本数を振り分ける経路もあったが、
-本番入力に `task_family` が無く、質問から推定しても正解率0.67程度で当てにならない。
-推定のためだけにクエリ1件につき LLM を1回余分に呼んでいたので、経路ごと削除した。
+There used to be a path that guessed `task_family` (single/multi) with an LLM and
+varied the count by it. Production input has no task_family, and guessing it from
+the question is right about 0.67 of the time — not enough to rely on. It cost an
+extra LLM call per query for nothing, so the path was removed.
 
-## 主要パラメータ（`ReadingConfig`）
+## The settings (`ReadingConfig`)
 
-つまみは `ReadingConfig`（`agent/reading.py`）に集めてあり、`ReadingAgent` には
-`config=ReadingConfig(...)` の形で1つのオブジェクトとして渡す。**どの param が存在するかの
-定義はこの dataclass だけ**で、綴り間違いはコンストラクタの TypeError で止まる。
-`ReadingAgent.__init__` が名前付きで受けるのは協働オブジェクト
-（`retriever` / `llm` / `paper_expander`）と、設定オブジェクト2つ
-（`config` / `combine`）だけ。
+The knobs live in `ReadingConfig` (`agent/reading.py`) and reach `ReadingAgent` as
+one object, `config=ReadingConfig(...)`. **This dataclass is the single definition
+of which params exist**, and a misspelling stops at the constructor with a
+TypeError. `ReadingAgent.__init__` names only the collaborators (`retriever` /
+`llm` / `paper_expander`) and the two settings objects (`config` / `combine`).
 
-| param | 既定 | 意味 |
+| param | default | meaning |
 |---|---|---|
-| `max_steps` | 3 | 反復の上限 |
-| `retrieve_top_k` | 20 | 1サブクエリで受け取る**チャンク**数（論文数ではない） |
-| `max_candidates` | 20 | LLM に見せる**論文**数。`candidate_recall@20` と揃える |
-| `chunks_per_paper` | 2 | 1論文あたり LLM に見せるチャンク数 |
-| `snippet_chars` | 1800 | 1チャンクを何文字まで見せるか |
-| `max_papers` | 10 | 提出本数の上限 |
-| `paper_score_skip_chunk_types` | なし | 論文の代表スコアに使わないチャンク種別（`[table]` が実測での最良） |
+| `max_steps` | 3 | cap on iterations |
+| `retrieve_top_k` | 20 | how many **chunks** one subquery returns (not papers) |
+| `max_candidates` | 20 | how many **papers** the LLM sees; matches `candidate_recall@20` |
+| `chunks_per_paper` | 2 | chunks shown per paper |
+| `snippet_chars` | 1800 | how much of a chunk is shown |
+| `max_papers` | 10 | cap on the submitted papers |
+| `paper_score_skip_chunk_types` | none | chunk types excluded from a paper's representative score (`["table"]` measured best) |
 
-`max_candidates: 20` は評価指標 `candidate_recall@20` と揃えてある。ここが15だと
-16〜20位の論文は検索で拾えても LLM が見られず提出候補に入らないため、指標上の
-改善が実スコアに乗らないズレが生じる。
+`max_candidates: 20` is deliberately equal to the metric's k. At 15, papers ranked
+16-20 could be retrieved and still never be seen by the LLM, so a gain in the metric
+would not reach the real score.
 
-## 検索側との関係
+## The relationship with retrieval
 
-agent は retriever の出力（chunk 単位の `RetrievalResult` 列）を受け取るだけで、
-検索側の強化はそのまま `candidate_papers`（＝`candidate_recall`）に効く。
-retriever の中で何が起きているかは後半の
-**「# 検索パイプライン（`HybridRetriever`）」** に分けて書く。agent 側のコード
-（`_decompose` / `_read_and_judge` 等）は無変更のまま、indexer / fuser / reranker /
-属性フィルタの差分がすべて retriever の中で完結する。
+The agent receives nothing but the retriever's output — a list of chunk-level
+`RetrievalResult`s — so strengthening retrieval lands directly on
+`candidate_papers`, and therefore on `candidate_recall`. What happens inside the
+retriever is described below, in **"The retrieval pipeline (`HybridRetriever`)"**.
+The agent's own code (`_decompose`, `_read_and_judge`, ...) does not change when an
+indexer, the fuser, the reranker or the attribute filter does.
 
-## 評価時の注意（CLAUDE.md 3.1 も参照）
+## When evaluating (see CLAUDE.md as well)
 
-- **見るのは `candidate_recall` / `evidence_candidate_recall` だけ。** `evaluate.py`
-  は提出物側の指標（paper_* / evidence_* / 回答系）を既定で出さない
-  （`--metrics all` で足せる）。
-- `scripts/run_search.py` は `--production-input` を付けて回す。手元の
-  `validation_inputs.jsonl` には task_family が入っているが本番には無い。付けたまま
-  評価すると `_decompose()` の分岐が「正解を教えてもらった」状態になる。
-- LLM は非決定的（Opus 4.8 は temperature を受け付けない）でクエリは55件しか
-  ないので、数ポイントの差はノイズの可能性がある。結論の前に複数回まわす。
+- **Read `candidate_recall` and `evidence_candidate_recall`, nothing else.**
+  `evaluate.py` leaves the submission-side metrics (paper_* / evidence_* / the
+  answer ones) out by default; `--metrics all` adds them.
+- Run `scripts/run_search.py` with `--production-input`. The local
+  `validation_inputs.jsonl` carries task_family and production does not; evaluating
+  with it left in scores the system as though it had been told part of the answer.
+- The LLM is non-deterministic (the deployment does not accept a temperature) and
+  there are only 55 queries, so a difference of a few points may be noise. Run it
+  more than once before concluding anything.
 
 ---
 
-# 検索パイプライン（`HybridRetriever`）
+# The retrieval pipeline (`HybridRetriever`)
 
-ReadingAgent の**ステップ2**（`self.retriever.retrieve(subquery, retrieve_top_k, ...)`）が
-呼ぶ検索の実体。実装は agent 層ではなく `src/littraceqa/di_pipeline/retrieve/` に
-あるが、agent の反復ループの一部としてここに併記する。入力は**サブクエリ1本**、
-出力は**chunk 単位の `RetrievalResult` 列**（論文単位に畳むのは agent 側の
-`_candidate_papers` / `to_gold_papers` の仕事）。
+The search that **step 2** above
+(`self.retriever.retrieve(subquery, retrieve_top_k, ...)`) actually calls. It lives
+in `src/littraceqa/di_pipeline/retrieve/` rather than in the agent layer, but it is
+described here because it is part of the loop. In goes **one subquery**; out comes
+a list of **chunk-level `RetrievalResult`s** — collapsing those to papers is the
+agent's job (`_candidate_papers`, `to_gold_papers`).
 
-## agent → retriever → agent の全体像
+## agent → retriever → agent
 
 ```
 ReadingAgent.run(query)
@@ -254,83 +268,97 @@ ReadingAgent.run(query)
   step1 _decompose(query)                          → [subquery, ...]
   ┌ for step in range(max_steps):
   │   for subquery in subqueries:
-  │     results = HybridRetriever.retrieve(subquery, top_k, attribute_filter)  ← ★ここ
+  │     results = HybridRetriever.retrieve(subquery, top_k, attribute_filter)  ← here
   │       │
-  │       │  === retrieve() の中身（retrieve/hybrid.py）===
-  │       │  a. attribute_filter が None かつ extractor があれば subquery から抽出
-  │       │     （eval_retrieval.py 用のフォールバック。agent は step0 の値を渡す）
-  │       │  b. _run_indexers(): 各 indexer を引く（下記）      → runs: list[list]
-  │       │  c. fuser.fuse(runs, top_k=fuse_k):  RRF で1本のランキングに融合
-  │       │       fuse_k = reranker あり ? (pool_k or top_k*3) : top_k
-  │       │  d. reranker あり: reranker.rerank(query, fused, top_k) で並べ替え
-  │       │     reranker なし: fused[:top_k]
+  │       │  === inside retrieve() (retrieve/hybrid.py) ===
+  │       │  a. with no attribute_filter but an extractor, derive one from the
+  │       │     subquery (a fallback for callers that send a raw question; the
+  │       │     agent always passes step 0's value)
+  │       │  b. _run_indexers(): query each index (below)      → runs: list[list]
+  │       │  c. fuser.fuse(runs, top_k=fuse_k): RRF into one ranking
+  │       │       fuse_k = with a reranker ? (pool_k or top_k*3) : top_k
+  │       │  d. seed expansion, then the reranker, blended by rank
   │       ▼
-  │     results（chunk 単位）を chunks dict に蓄積（同じ chunk_id はスコア高い方を残す）
-  │   _candidate_papers() → _read_and_judge() → sufficient 判定 → _refine()
+  │     accumulate results into the chunks dict (same chunk_id, higher score wins)
+  │   _candidate_papers() → _read_and_judge() → sufficient? → _refine()
   └
   _build_prediction()
 ```
 
-retriever が返すのは常に **chunk 単位**。「どの論文か」に畳むのは agent
-（`candidate_papers` は `to_gold_papers`、提出は `_read_and_judge` の LLM 選定）。
-この分担が「retriever は gold paper の特定、evidence は agent」という
-プロジェクト方針（CLAUDE.md）の実装上の現れ。
+The retriever always returns **chunks**. Collapsing to papers is the agent's
+(`candidate_papers` via `to_gold_papers`). That division is how the project's rule —
+retrieval identifies the gold paper, the agent identifies the evidence — appears in
+the code.
 
-## b. 各 indexer の実行（`_run_indexers`）
+## b. Querying each index (`_run_indexers`)
 
-indexer 群は `pipeline.build_indexers()` で決まり（例: `bm25s` + `faiss_specter2` +
-`faiss_qwen3`）、それぞれ `search(query, k) -> list[RetrievalResult]` を持つ。
-**制約の有無で2つのコードパスに分かれる**。
+The indexes come from `pipeline.build_indexers()` — `bm25s`, `bm25s_paper` and
+`faiss_qwen3` — and each has `search(query, k) -> list[RetrievalResult]`. **There are
+two code paths, depending on whether a constraint was found.**
 
-**制約なし**（本番の質問の大多数）:
+**No constraint** (the vast majority of questions):
 ```
-runs = [indexer.search(query, per_index_k) for indexer in indexers]   # 各索引 per_index_k=100 件
+runs = [indexer.search(query, per_index_k) for indexer in indexers]   # 100 each
 ```
-従来と完全に同一。属性フィルタ機能を足しても、制約が取れない質問は損失ゼロ。
+Byte for byte what it was before. Adding the attribute filter costs a question with
+no constraint nothing at all.
 
-**制約あり**（「Which NAACL 2025 papers ...」など会議名が一意に取れたとき）:
+**With a constraint** ("Which NAACL 2025 papers ...", where exactly one venue was
+extracted):
 ```
-fetch_k = _fetch_k(filter)                 # 絞った後に per_index_k 残るよう選択率から逆算
+fetch_k = _fetch_k(filter)                 # work back from selectivity so per_index_k survives
 for indexer in indexers:
-    raw  = indexer.search(query, fetch_k)  # 多めに取る
-    kept = filter_results(raw, filter)     # metadata の venue/year で落とす
-    if len(kept) < min_filtered_results:   # 枯れたら fail-open（そのランだけ制約なしに戻す）
+    raw  = indexer.search(query, fetch_k)  # over-fetch
+    kept = filter_results(raw, filter)     # drop by venue/year in the metadata
+    if len(kept) < min_filtered_results:   # drained: fail open for this run only
         kept = raw
     runs.append(kept[:per_index_k])
 ```
-- **索引は無改修。** `RetrievalResult.metadata` に venue/year が既に載っているので、
-  取得後に落とすだけ。どの indexer にも同じように効く。
-- `fetch_k = per_index_k / selectivity * fetch_safety`、上限 `max_fetch_k`
-  （`_fetch_k`）。コーパスは 2025 が 91.3% なので年だけでは絞らない設計。
-- 発火条件は「会議名が一意に取れたとき」だけ。年のみ / `all venues` / 会議名が
-  2種類以上 のときは抽出せず制約なしパスを通る（`attribute_filter.py`）。
+- **No index changes.** venue and year are already in `RetrievalResult.metadata`, so
+  this is over-fetching and dropping, and every index benefits alike.
+- `fetch_k = per_index_k / selectivity * fetch_safety`, capped at `max_fetch_k`.
+  **Do not raise that cap**: matching it to per_index_k blew faiss search up from
+  1.5s to 91.1s on NAACL.
+- It fires only when exactly one venue can be extracted. A bare year, "all venues",
+  or two venue names all skip extraction and take the unconstrained path
+  (`attribute_filter.py`).
 
-## c. 融合（`PaperRRFFuser`, `retrieve/paper_rrf.py`）
+## c. Fusing (`PaperRRFFuser`, `retrieve/paper_rrf.py`)
 
-複数索引のランキングを**論文単位**の Reciprocal Rank Fusion で1本に統合する。`k=60`、
-全索引 weight 1.0。スコアの絶対値ではなく**順位**で混ぜるので、BM25（語彙）と
-埋め込み（意味）のようにスケールが違う索引を素直に合成できる。**1つの run の中では
-同じ論文に何チャンク当たっても1票**——チャンク単位で混ぜると、長い論文・表が多い論文が
-チャンク数だけで上位を占有してしまう（評価は論文単位なので、この歪みは指標に直接効く）。
+Several indexes' rankings become one, through **paper-level** Reciprocal Rank
+Fusion at `k=60`. Mixing on **rank** rather than absolute score is what lets BM25
+(vocabulary) and an embedding (meaning) combine at all, their scales being
+unrelated. **Within one run a paper gets one vote however many of its chunks were
+hit** — fused per chunk, long papers and table-heavy papers occupy the top on chunk
+count alone, and since the metric is per paper that distortion lands straight on the
+score.
 
-## d. reranker（`Qwen3Reranker`, `retrieve/reranker.py`）
+## d. Seed expansion and the reranker
 
-RRF 後の候補を `pool_k` 件プールし、クエリ×チャンクを yes/no 判定型モデルで採点し直す。
-`pool_k` を書かないと候補が増えず reranker の効果が出ない（CLAUDE.md 参照）。
-`rerank_blend` を書くと順位を置き換えずに融合前の順位と混ぜる。
-`reranker=None` にすれば融合結果の上位 `top_k` をそのまま返す。
+Before the reranker, `_seed_expand()` appends the top paper's title+abstract to the
+question and queries again, fusing the two rounds. **A question does not know what a
+paper calls itself**, and this borrows the corpus's own vocabulary; no LLM is
+involved. It runs before the reranker so that reranker inference stays at one pass.
 
-## この層の主要パラメータ（`HybridRetriever.__init__`）
+`Qwen3Reranker` then scores query x chunk with a yes/no model over the `pool_k`
+candidates. With `rerank_blend`, its ranking does not replace the fused one: the two
+are blended with RRF and the pre-fusion top `protect_top` are kept at the front.
+The reranker judges "does this answer the question", so it always demotes the peer
+gold papers a question never names — blending is what keeps ranking A from being
+exposed to that.
 
-| param | 既定 | 意味 |
+## This layer's settings (`HybridRetriever.__init__`)
+
+| param | production | meaning |
 |---|---|---|
-| `per_index_k` | 100 | 1索引が返す chunk 数（融合前） |
-| `pool_k` | None | reranker に渡す候補数。None なら `top_k*3` |
-| `fetch_safety` | 1.5 | 制約あり時の取得件数の逆算係数 |
-| `max_fetch_k` | 5000 | 制約あり時の1索引あたり取得上限 |
-| `min_filtered_results` | 10 | 絞り込み後これ未満なら fail-open |
-| `rerank_blend` | None | 融合前の順位と reranker の順位を RRF で混ぜる設定。None なら reranker が順位を置き換える（従来） |
+| `per_index_k` | 100 | chunks one index returns, before fusion |
+| `pool_k` | 200 | candidates handed to the reranker (None means `top_k*3`) |
+| `fetch_safety` | 1.5 | the over-fetch factor when a constraint applies |
+| `max_fetch_k` | 3000 | cap on one index's fetch when a constraint applies |
+| `min_filtered_results` | 10 | fewer than this after filtering fails open |
+| `seed_expansion` | `SeedExpansion(512)` | how much of the top paper's text is borrowed |
+| `rerank_blend` | `RerankBlend(0.6, 0.4, 60, 20)` | blend the reranker's rank instead of replacing the order |
 
-`per_index_k` / `pool_k` / 属性フィルタ関連はすべて `pipeline.build_retriever()` で
-渡している。agent 側の `retrieve_top_k`（1サブクエリで受け取る chunk 数）とは
-別物なので混同しないこと。
+All of them are passed in `pipeline.build_retriever()`. **Do not confuse
+`per_index_k` and `pool_k` with the agent's `retrieve_top_k`** (how many chunks one
+subquery hands back); they are different things.
