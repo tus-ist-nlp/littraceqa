@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from littraceqa.di_pipeline.contracts import RetrievalResult
 from littraceqa.di_pipeline.retrieve.hybrid import HybridRetriever, SeedExpansion, to_gold_papers
@@ -221,29 +220,3 @@ class TestSeedExpansion:
         assert calls == ["元の質問"]
 
 
-
-
-def _search_style_paths() -> list[str]:
-    """実在する search_style を全部拾う。
-
-    以前は新設した4本を名指ししていたが、ブランチによって置いてある構成が
-    変わる（最終構成だけの版・論文の再現に要る版・ablation 全部入りの版）ので、
-    **実在するものを対象にする**。名指しだと、そのファイルを持たないブランチで
-    テストが落ちる一方、新しく足した構成は明示的に書き足すまで検証されない。
-    """
-    from pathlib import Path
-
-    return sorted(str(p) for p in Path("configs/search_style").rglob("*.yaml"))
-
-
-@pytest.mark.parametrize("path", _search_style_paths())
-def test_search_styles_load(path):
-    from littraceqa.common import ROOT
-    from littraceqa.di_pipeline.config import load_config
-
-    cfg = load_config(str(ROOT / path))
-    assert isinstance(cfg["per_index_k"], int)
-    assert cfg["fuser"]["name"] in ("rrf", "paper_rrf")
-    # 索引パスは compose_config が導出するので yaml には書かない。
-    for indexer in cfg["indexers"]:
-        assert "index_dir" not in indexer.get("params", {})

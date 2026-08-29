@@ -210,7 +210,7 @@ uv run python scripts/evaluate.py --gold data/validation.jsonl --pred prediction
 - `bm25_mlt`: 論文全文の more-like-this。anchor の title+abstract をクエリにして構築済みの
   `bm25s_paper` 索引を引く。LLM 呼び出しゼロ・追加構築ゼロ。`papers.jsonl`(2.5GB) は
   **クエリ時には読まない**（BM25 本体は `mmap=True`、行番号→paper_id は初回1回だけ pickle 化）。
-- `fused`: 上記を RRF 融合（agent yaml の `expansion.sources` に並べると自動でこれになる）。
+- `fused`: 上記を RRF 融合（`build_expander()` の `sources` に並べる）。
 
 **併用の根拠は「違う gold を拾う」こと**——候補圏外 gold 37本の回収は SPECTER2 15本 /
 書誌結合 11本 / 全文MLT 16本で、**MLT だけが拾えた gold が2本**、既存2つだけが拾えたのが

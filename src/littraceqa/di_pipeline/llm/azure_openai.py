@@ -1,10 +1,7 @@
 """Azure OpenAI を呼び出す LLM クライアント。
 
-`LLMClient` Protocol（base.py）を満たすので、agent_style の yaml で
-
-    llm: { name: azure_openai, params: {} }
-
-と書けば ReadingAgent / TaskFamilyClassifier から使える。
+`LLMClient` Protocol（base.py）を満たす。組み立てているのは
+`pipeline.build_agent()` の1箇所だけで、そこから ReadingAgent に渡される。
 
 設定は .env から読む（値はコードに書かない）:
 
@@ -92,7 +89,8 @@ class AzureOpenAILLM:
                 "    AZURE_OPENAI_API_KEY=...\n"
                 "    AZURE_OPENAI_API_VERSION=2025-04-01-preview\n"
                 "    AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-5.4\n"
-                "LLM を使わずに動かすなら agent_style の yaml から llm を外してください。"
+                "LLM 無しで動かせるのはテストだけで（llm/fake.py の FakeLLM を"
+                "ReadingAgent に直接渡す）、本番の検索は LLM 必須。"
             )
 
         self.deployment = deployment

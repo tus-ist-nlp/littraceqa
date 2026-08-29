@@ -20,7 +20,7 @@ from littraceqa.di_pipeline.contracts import MULTI, SINGLE
 # 候補上位 k 本に gold 論文が入っていたか。paper_recall_macro は「LLM がどう絞ったか」と
 # 「検索がそもそも拾えていたか」が混ざるが、こちらは絞り込み前の検索力だけを見る。
 #
-# 看板は recall@20（agent_style/reading.yaml の max_candidates=20 と一致＝LLM が実際に
+# 看板は recall@20（pipeline.py の ReadingConfig.max_candidates=20 と一致＝LLM が実際に
 # 見られる範囲＝実システムの天井）。k を並べてカーブで見るのは、recall@20 だけだと
 # 「1位で当てた」と「20位でギリギリ入った」が区別できず、reranker や RRF 重みを
 # いじる余地があるのかが見えないため:

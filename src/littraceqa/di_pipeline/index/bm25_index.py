@@ -32,14 +32,15 @@ class BM25Index:
         stopwords: str | None = "en",
         stemmer: str | None = None,
     ):
-        """BM25 のスコアリング・トークナイズ系パラメータを config から差し替えられる。
+        """BM25 のスコアリング・トークナイズ系パラメータ。実効値は
+        `pipeline.build_indexers()` にあり、そこでは全部既定のまま使っている。
 
         - k1 / b / method: bm25s.BM25 のスコアリングパラメータ。**既定値のまま使っている**
           （validation の recall で振って既定を超えなかった）。build 時にスコア行列へ
           焼き込まれるので、変えたら索引を作り直すこと。
         - stopwords / stemmer: bm25s.tokenize のトークナイズ系。build と search で
           同じ設定を使う必要があるため、この2つはインスタンスに保持して両方で使う
-          （yaml が build 時・load 時の両方で同じ params を渡す前提）。
+          （構築時と検索時で同じインスタンス生成コード＝`build_indexers()` を通る）。
         - stemmer は言語名（例: "english"）を渡すと PyStemmer で語幹化する。
           省略時は語幹化しない。PyStemmer 未導入の環境で stemmer を指定すると
           build/load 時に ImportError になる。

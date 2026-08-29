@@ -135,7 +135,8 @@ class MinerUChunker:
     ):
         self.pdf_dir = Path(pdf_dir)
         # scripts/run_mineru.py の既定の出力先と合わせる。pdf_dir と衝突しない
-        # 兄弟ディレクトリに自動導出する(process_style yaml にはパスを書かない方針)。
+        # 兄弟ディレクトリに自動導出する(構成にパスを直書きしない方針。
+        # configs/paths/*.yaml に載るのは pdf_dir までで、mineru/ は書かない)。
         self.mineru_dir = Path(mineru_dir) if mineru_dir else self.pdf_dir.parent / "mineru"
         self.max_chars_per_chunk = max_chars_per_chunk
 

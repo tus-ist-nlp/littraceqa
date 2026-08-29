@@ -17,7 +17,7 @@ paper_id で分割(シャード)して並列に流す。既に content_list.json
       --paths configs/paths/default.yaml --gpus 0,1,2,3
 
 出力先は paths.yaml の pdf_dir の兄弟 `mineru/` を既定とする
-（process_style yaml にはパスを書かない方針のため。--mineru-dir で上書き可）。
+（構成にパスを直書きしない方針のため。--mineru-dir で上書き可）。
 """
 
 from __future__ import annotations
