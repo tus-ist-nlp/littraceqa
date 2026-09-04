@@ -15,21 +15,108 @@ import re
 from pathlib import Path
 from typing import Any
 
-from littraceqa.di_pipeline.agent.task_family import MULTI, SINGLE
+from littraceqa.search.contracts import CANDIDATE_PAPERS_LIMIT, MULTI, SINGLE
 
-# 候補上位 k 本に gold 論文が入っていたか。paper_recall_macro は「LLM がどう絞ったか」と
-# 「検索がそもそも拾えていたか」が混ざるが、こちらは絞り込み前の検索力だけを見る。
+# Whether the gold papers are among the top k candidates. paper_recall_macro mixes
+# "how the LLM narrowed things down" with "whether retrieval had them at all"; this
+# looks only at retrieval, before any narrowing.
 #
-# 看板は recall@20（agent_style/reading.yaml の max_candidates=20 と一致＝LLM が実際に
-# 見られる範囲＝実システムの天井）。k を並べてカーブで見るのは、recall@20 だけだと
-# 「1位で当てた」と「20位でギリギリ入った」が区別できず、reranker や RRF 重みを
-# いじる余地があるのかが見えないため:
-#   recall@1 が高い          -> 順位付けまで的確
-#   recall@1 低 / @20 高     -> 拾えているが順位が弱い（reranker/RRF重みが効く）
-#   recall@20 も低い         -> そもそも索引に引っかかっていない（索引構成/分解の問題）
-# 上限50は reading.py の CANDIDATE_PAPERS_LIMIT（予測に残す候補本数）に合わせている。
-CANDIDATE_RECALL_KS = (1, 5, 10, 20, 50)
+# **The headline is recall@20** — it matches ReadingConfig.max_candidates=20 in
+# pipeline.py, which is what the LLM actually gets to see, and therefore the ceiling
+# of the real system. The curve over several k is there because recall@20 alone
+# cannot tell "hit at rank 1" from "scraped in at rank 20", and so cannot say
+# whether the reranker or the fusion has anything left to give:
+#   recall@1 high         -> the ranking is right, not just the retrieval
+#   recall@1 low, @20 high -> found, but ranked weakly (reranker/fusion can help)
+#   recall@20 low too      -> not being retrieved at all (an index or decomposition
+#                             problem)
+# **The deep end of the curve is imported, not restated.** CANDIDATE_PAPERS_LIMIT
+# is how many candidates a prediction keeps, and measuring past what was recorded
+# measures nothing — so the two cannot drift apart, which a comment promising they
+# match could not guarantee.
+#
+# The last k is "everything recorded plus the at most 20 the paper-to-paper
+# expansion adds" — the real length of the candidate list with expansion on.
+# **Never put a k deeper than what is recorded.** recall_at_k only looks at ranked[:k], so k=100 against a
+# prediction holding 50 candidates returns exactly the @50 value. That is
+# arithmetically right and factually misleading: it is not "the result of looking
+# 100 deep" but "nothing past 50 was recorded", and in a row of numbers it reads as
+# a gain at @100 (which is exactly how it was misread). 100 used to sit here; no
+# experiment ever had more than 70 candidates, so it was corrected to 70.
+# CANDIDATE_PAPERS_LIMIT is **a recording limit, not retrieval's limit** —
+# internally retrieval ranks far deeper (per_index_k / pool_k). Measuring deeper
+# means raising the limit and running again. With 50-candidate lists, @70 is short
+# of denominator and is a rough indication only.
+CANDIDATE_RECALL_KS = (1, 5, 10, 20, CANDIDATE_PAPERS_LIMIT, CANDIDATE_PAPERS_LIMIT + 20)
 CANDIDATE_RECALL_SCENARIOS = ("single", "multi", "total")
+
+# evidence_candidate_recall: candidate_recall with the denominator narrowed to the
+# gold papers that actually have evidence attached.
+#
+# **Some multi_paper gold cannot be retrieved even in principle.** Those papers are
+# named in gold_papers but carry no evidence at all — 29 of the 120 gold papers
+# (24%) across the 55 validation queries. The two groups behave completely
+# differently:
+#
+#   91 evidence-backed   recall@10 0.615 / @20 0.736 / @50 0.813
+#   29 unbacked          recall@10 0.103 / @20 0.207 / @50 0.345
+#
+# The unbacked ones are peer papers on the same topic that the question never names,
+# so no amount of searching with the question brings them near — q_036 asks "what
+# batch size does TCM use?" and its gold lists IMM and sCT alongside. Measured over
+# all gold, that unreachable group is always mixed in, the ceiling sticks, and the
+# effect of changing an index or the reranker looks smaller than it is. Narrowing
+# the denominator shows the movement in the part that can actually be moved.
+#
+# **paper_recall / paper_f1 keep all of gold as their denominator** — that is the
+# scoring spec and does not change. This is a diagnostic for choosing what to work
+# on, not a prediction of the submitted score.
+#
+# evidence_candidate_recall_by_backed: the same denominator as above, with **only
+# the single/multi split** redone by the number of evidence-backed gold papers.
+#
+# The external team counts single/multi over gold reduced to the papers that back
+# the answer, so the same 55 queries come out single 43 / multi 12 where ours
+# (by task_family) are 26 / 29 — the classification is nearly reversed. Comparing
+# the task_family numbers directly shows a difference that is only the difference in
+# the single ratio. Reporting the realigned series as well makes single/multi
+# comparable. total matches the existing series exactly: only the bucket changes,
+# never the numerator or denominator.
+
+
+class RecallSeries:
+    """One candidate_recall series: per scenario, per k, one recall per query.
+
+    The three series below differ only in **which gold papers are the denominator**
+    and **which bucket a query falls into**; the bookkeeping is identical, so it is
+    written once here rather than three times.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.by_scenario: dict[str, dict[int, list[float]]] = {
+            scenario: {k: [] for k in CANDIDATE_RECALL_KS}
+            for scenario in CANDIDATE_RECALL_SCENARIOS
+        }
+
+    def add(self, scenarios: list[str], k: int, recall: float) -> None:
+        for scenario in scenarios:
+            self.by_scenario[scenario][k].append(recall)
+
+    def macros(self) -> dict[str, float | None]:
+        """`{name}_at{k}_{scenario}_macro`, in ascending k so it reads as a table."""
+        return {
+            f"{self.name}_at{k}_{scenario}_macro": macro_or_none(self.by_scenario[scenario][k])
+            for scenario in CANDIDATE_RECALL_SCENARIOS
+            for k in CANDIDATE_RECALL_KS
+        }
+
+    def counts(self) -> dict[str, int]:
+        """How many queries each scenario was measured over, to sanity-check the rest."""
+        return {
+            scenario: len(self.by_scenario[scenario][CANDIDATE_RECALL_KS[0]])
+            for scenario in CANDIDATE_RECALL_SCENARIOS
+        }
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -88,6 +175,23 @@ def paper_id_set(record: dict[str, Any]) -> set[str]:
         if paper_id:
             paper_ids.add(paper_id)
     return paper_ids
+
+
+def evidence_backed_paper_ids(record: dict[str, Any]) -> set[str]:
+    """The gold papers with at least one piece of evidence attached.
+
+    A paper listed in gold_papers with no evidence at all offers no handle to reach
+    it from the question, so retrieval cannot get it in principle — and it cannot
+    contribute to evidence_f1 either, having no evidence. It is therefore left out
+    of the denominator when measuring how much headroom is left.
+    """
+    backed = {
+        normalize_id(item.get("paper_id"))
+        for item in (record.get("evidence") or [])
+        if isinstance(item, dict)
+    }
+    backed.discard("")
+    return paper_id_set(record) & backed
 
 
 def normalize_visible_id(value: Any, prefix: str) -> str:
@@ -155,10 +259,11 @@ def prf(gold: set[Any], pred: set[Any]) -> tuple[float, float, float]:
 
 
 def candidate_paper_ids(record: dict[str, Any]) -> list[str] | None:
-    """予測レコードの candidate_papers（関連度順）を正規化して返す。
+    """A prediction's candidate_papers, normalised, still in relevance order.
 
-    このフィールドを持たない古い予測ファイルとは区別したいので、「無い」場合は
-    空リストではなく None を返す（呼び出し側で指標そのものを出さないため）。
+    **Absent returns None, not an empty list**, so an older prediction file without
+    the field can be told apart from one where retrieval found nothing — the caller
+    omits the metric entirely rather than reporting 0.0.
     """
     papers = record.get("candidate_papers")
     if not isinstance(papers, list):
@@ -172,24 +277,44 @@ def candidate_paper_ids(record: dict[str, Any]) -> list[str] | None:
         else:
             paper_id = ""
         paper_id = normalize_id(paper_id)
-        # 順位が意味を持つのでソートせず、重複だけ落として出現順を保つ。
+        # The order is the ranking, so nothing is sorted; only repeats are dropped.
         if paper_id and paper_id not in paper_ids:
             paper_ids.append(paper_id)
     return paper_ids
 
 
 def recall_at_k(gold: set[str], ranked: list[str], k: int) -> float:
-    """関連度順 ranked の上位 k 本で gold をどれだけ拾えたか。
+    """How much of gold the top k of `ranked` covers.
 
-    gold が空のときに 1.0 を返すのは prf() の recall と挙動を揃えるため。
+    Empty gold returns 1.0, matching the recall in prf().
     """
     if not gold:
         return 1.0
     return len(gold & set(ranked[:k])) / len(gold)
 
 
+def gold_ranks(gold_paper_ids: set[str], ranked: list[str]) -> list[int | None]:
+    """Each gold paper's rank in candidate_papers (1-based; None if absent).
+
+    **A macro average flattens "just missed, rank 21" and "never retrieved at all"
+    into the same 0.** Which of the two it is decides what to do next — go deeper,
+    or change the index — so the ranks are kept.
+    """
+    positions = {paper_id: i + 1 for i, paper_id in enumerate(ranked)}
+    return [positions.get(paper_id) for paper_id in sorted(gold_paper_ids)]
+
+
+def attribute_filter_of(record: dict[str, Any]) -> str:
+    """What the attribute filter matched, from the trace reading.py leaves behind."""
+    for step in record.get("trace") or []:
+        af = step.get("attribute_filter")
+        if af:
+            return f"{af.get('venue') or ''} {af.get('year') or ''}".strip()
+    return ""
+
+
 def macro_or_none(values: list[float]) -> float | None:
-    """該当クエリが1件も無ければ None を返す（mean() の 0.0 と区別する）。"""
+    """None when no query fell into this bucket — distinct from mean()'s 0.0."""
     if not values:
         return None
     return mean(values)
@@ -320,7 +445,20 @@ def mean(values: list[float]) -> float:
     return 0.0
 
 
-def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, Any]]) -> dict[str, Any]:
+def evaluate(
+    gold_records: list[dict[str, Any]],
+    pred_records: list[dict[str, Any]],
+    per_query: bool = False,
+    include_submission: bool = False,
+) -> dict[str, Any]:
+    """Score the predictions. **By default only retrieval's metrics.**
+
+    `include_submission=True` (`--metrics all` on the CLI) adds the submission-side
+    metrics (paper_* / evidence_* / the answer ones). They are off by default
+    because choosing which papers to submit and generating the answers both belong
+    to the reading team, and what this side raises is candidate_recall — **printed
+    side by side, the numbers we cannot move get read as improvement or regression.**
+    """
     gold_by_id = {normalize_id(record.get("query_id")): record for record in gold_records}
     pred_by_id = {normalize_id(record.get("query_id")): record for record in pred_records}
     pred_by_id.pop("", None)
@@ -328,8 +466,9 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
     missing_predictions = sorted(set(gold_by_id) - set(pred_by_id))
     extra_predictions = sorted(set(pred_by_id) - set(gold_by_id))
 
-    # 1件でも候補列を持てば新形式の予測ファイルとみなす。ファイル全体に無ければ
-    # （この変更より前に作った予測）指標を None にして、黙って 0.0 を出さない。
+    # One record with a candidate list makes this a new-format prediction file. If
+    # no record has one (a prediction made before the field existed) the metric is
+    # None — never a silent 0.0.
     has_candidate_papers = any("candidate_papers" in record for record in pred_records)
 
     paper_precision: list[float] = []
@@ -346,27 +485,47 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
     table_cell_accuracy: list[float] = []
     table_cell_correct = 0
     table_cell_total = 0
-    # シナリオ -> k -> クエリごとの recall。single/multi は gold の task_family で振り分け、
-    # total は全クエリ（＝single と multi の加重平均になる）。
-    candidate_recall: dict[str, dict[int, list[float]]] = {
-        scenario: {k: [] for k in CANDIDATE_RECALL_KS}
-        for scenario in CANDIDATE_RECALL_SCENARIOS
-    }
+    # All of gold as the denominator; single/multi split by gold's task_family, and
+    # total every query (so total is their weighted mean).
+    candidate_recall = RecallSeries("candidate_recall")
+    # The denominator narrowed to the evidence-backed gold, same split.
+    evidence_candidate_recall = RecallSeries("evidence_candidate_recall")
+    # The same denominator again, with the split redone by the number of
+    # evidence-backed gold papers — a diagnostic series that exists only to line up
+    # with the external team's numbers (see the comment at the top).
+    evidence_candidate_recall_by_backed = RecallSeries(
+        "evidence_candidate_recall_by_backed"
+    )
+
+    per_query_rows: list[dict[str, Any]] = []
 
     for query_id, gold in gold_by_id.items():
         pred = pred_by_id.get(query_id, {})
+        row: dict[str, Any] = {
+            "query_id": query_id,
+            "task_family": gold.get("task_family"),
+            "answer_types": sorted(gold.get("answer_types") or []),
+            "has_prediction": query_id in pred_by_id,
+            "n_gold_papers": len(paper_id_set(gold)),
+            "n_pred_papers": len(paper_id_set(pred)),
+            "attribute_filter": attribute_filter_of(pred),
+        }
 
         p, r, f = prf(paper_id_set(gold), paper_id_set(pred))
         paper_precision.append(p)
         paper_recall.append(r)
         paper_f1.append(f)
+        row["paper_f1"] = f
 
         if has_candidate_papers:
-            # 打ち切り前の候補上位 k 本に gold 論文が入っていたか（＝検索力）。
+            # Whether gold is in the top k candidates before any cut — retrieval alone.
             gold_paper_ids = paper_id_set(gold)
             ranked = candidate_paper_ids(pred) or []
-            # task_family は本番入力から削られる（run_search.py --production-input）ため、
-            # 予測側ではなく必ず gold 側から読む。未知/欠落なら total にだけ入れる。
+            row["n_candidates"] = len(ranked)
+            row["gold_ranks"] = gold_ranks(gold_paper_ids, ranked)
+            # Production input has no task_family, and `Query` does not carry it
+            # either, so it is **always read from gold, never from the prediction**.
+            # Unknown or missing counts towards total only.
             task_family = normalize_id(gold.get("task_family"))
             scenarios = ["total"]
             if task_family == SINGLE:
@@ -375,22 +534,46 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
                 scenarios.append("multi")
             for k in CANDIDATE_RECALL_KS:
                 recall = recall_at_k(gold_paper_ids, ranked, k)
-                for scenario in scenarios:
-                    candidate_recall[scenario][k].append(recall)
+                row[f"candidate_recall_at{k}"] = recall
+                candidate_recall.add(scenarios, k, recall)
+
+            # A query with no evidence-backed gold has an empty denominator, and
+            # recall_at_k() returns 1.0 on empty gold (to match prf). **Including it
+            # would pad the average with free full marks**, so it is left out and
+            # macro_or_none reports the bucket as empty.
+            backed_paper_ids = evidence_backed_paper_ids(gold)
+            row["n_evidence_backed_papers"] = len(backed_paper_ids)
+            if backed_paper_ids:
+                # The series whose split is redone by evidence-backed count: a query
+                # whose task_family is multi but which has one backed gold paper
+                # lands on the single side.
+                backed_scenarios = ["total"]
+                backed_scenarios.append("single" if len(backed_paper_ids) == 1 else "multi")
+                row["backed_scenario"] = backed_scenarios[1]
+                for k in CANDIDATE_RECALL_KS:
+                    recall = recall_at_k(backed_paper_ids, ranked, k)
+                    row[f"evidence_candidate_recall_at{k}"] = recall
+                    evidence_candidate_recall.add(scenarios, k, recall)
+                    evidence_candidate_recall_by_backed.add(backed_scenarios, k, recall)
 
         p, r, f = prf(evidence_set(gold), evidence_set(pred))
         evidence_precision.append(p)
         evidence_recall.append(r)
         evidence_f1.append(f)
+        row["evidence_f1"] = f
 
         answer_types = set(gold.get("answer_types") or [])
         if "multiple_choice" in answer_types:
             mc_total += 1
-            mc_correct += int(multiple_choice_prediction(pred) == multiple_choice_gold(gold))
+            correct = int(multiple_choice_prediction(pred) == multiple_choice_gold(gold))
+            mc_correct += correct
+            row["multiple_choice_correct"] = bool(correct)
 
         if "freeform" in answer_types:
             freeform_total += 1
-            freeform_exact_correct += int(freeform_prediction(pred) == freeform_gold(gold))
+            correct = int(freeform_prediction(pred) == freeform_gold(gold))
+            freeform_exact_correct += correct
+            row["freeform_correct"] = bool(correct)
 
         if "table" in answer_types:
             metrics = table_metrics(gold, pred)
@@ -398,6 +581,10 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
             table_cell_accuracy.append(float(metrics["cell_accuracy"]))
             table_cell_correct += int(metrics["cell_correct"])
             table_cell_total += int(metrics["cell_total"])
+            row["table_row_f1"] = float(metrics["row_f1"])
+            row["table_cell_accuracy"] = float(metrics["cell_accuracy"])
+
+        per_query_rows.append(row)
 
     if mc_total:
         multiple_choice_accuracy = mc_correct / mc_total
@@ -412,44 +599,61 @@ def evaluate(gold_records: list[dict[str, Any]], pred_records: list[dict[str, An
     else:
         table_cell_accuracy_micro = None
 
+    # The submission-side metrics. **Off by default** (`--metrics all` adds them).
+    # ReadingAgent no longer selects which papers to submit — it passes the candidate
+    # ranking through — so paper_* is nothing but "what you get from submitting the
+    # top 10 candidates", and the answer metrics (multiple_choice / freeform / table)
+    # belong to the reading team.
+    submission_metrics = {
+        "paper_precision_macro": mean(paper_precision),
+        "paper_recall_macro": mean(paper_recall),
+        "paper_f1_macro": mean(paper_f1),
+        "evidence_precision_macro": mean(evidence_precision),
+        "evidence_recall_macro": mean(evidence_recall),
+        "evidence_f1_macro": mean(evidence_f1),
+        "multiple_choice_accuracy": multiple_choice_accuracy,
+        "freeform_exact_match": freeform_exact_match,
+        "table_row_f1_macro": mean(table_row_f1),
+        "table_cell_accuracy_macro": mean(table_cell_accuracy),
+        "table_cell_accuracy_micro": table_cell_accuracy_micro,
+    }
+
     return {
         "metrics": {
-            "paper_precision_macro": mean(paper_precision),
-            "paper_recall_macro": mean(paper_recall),
-            "paper_f1_macro": mean(paper_f1),
-            # 検索が候補として拾えていたか（LLM の絞り込み前）。gold の task_family 別に
-            # k を並べてカーブで出す。シナリオごとに k 昇順で並べて表で読みやすくする。
-            **{
-                f"candidate_recall_at{k}_{scenario}_macro": macro_or_none(
-                    candidate_recall[scenario][k]
-                )
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-                for k in CANDIDATE_RECALL_KS
-            },
-            "evidence_precision_macro": mean(evidence_precision),
-            "evidence_recall_macro": mean(evidence_recall),
-            "evidence_f1_macro": mean(evidence_f1),
-            "multiple_choice_accuracy": multiple_choice_accuracy,
-            "freeform_exact_match": freeform_exact_match,
-            "table_row_f1_macro": mean(table_row_f1),
-            "table_cell_accuracy_macro": mean(table_cell_accuracy),
-            "table_cell_accuracy_micro": table_cell_accuracy_micro,
+            # Whether retrieval had the paper as a candidate at all, before the LLM
+            # narrowed anything, broken down by gold's task_family as a curve over k.
+            **candidate_recall.macros(),
+            # The same candidate lists measured against the evidence-backed gold
+            # only: retrieval's real strength, with the unreachable gold excluded.
+            **evidence_candidate_recall.macros(),
+            # The same numbers again with only the single/multi split redone by
+            # evidence-backed count. total matches the series above exactly — same
+            # numerator, same denominator, only a different bucket.
+            **evidence_candidate_recall_by_backed.macros(),
+            **(submission_metrics if include_submission else {}),
         },
         "details": {
             "total": len(gold_records),
             "missing_prediction_count": len(missing_predictions),
             "extra_prediction_count": len(extra_predictions),
-            # 各シナリオが何件のクエリで測れたかの内訳（数字の妥当性確認用）。
+            # How many queries each scenario was measured over, to sanity-check the numbers.
             "candidate_recall_ks": list(CANDIDATE_RECALL_KS),
-            "candidate_recall_counts": {
-                scenario: len(candidate_recall[scenario][CANDIDATE_RECALL_KS[0]])
-                for scenario in CANDIDATE_RECALL_SCENARIOS
-            },
+            "candidate_recall_counts": candidate_recall.counts(),
+            # Only queries with evidence-backed gold count here; the shortfall
+            # against candidate_recall_counts is how many queries have no backed gold.
+            "evidence_candidate_recall_counts": evidence_candidate_recall.counts(),
+            # The counts once the split is redone by backed count — how far it
+            # diverges from the task_family split, i.e. from the external team's
+            # single/multi ratio.
+            "evidence_candidate_recall_by_backed_counts": (
+                evidence_candidate_recall_by_backed.counts()
+            ),
             "table_cell_correct": table_cell_correct,
             "table_cell_total": table_cell_total,
             "missing_predictions": missing_predictions,
             "extra_predictions": extra_predictions,
         },
+        **({"per_query": per_query_rows} if per_query else {}),
     }
 
 
@@ -457,11 +661,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate LitTraceQA development predictions.")
     parser.add_argument("--gold", default="data/validation.jsonl", help="Gold validation JSONL file.")
     parser.add_argument("--pred", required=True, help="Prediction JSONL file.")
+    parser.add_argument(
+        "--per-query",
+        action="store_true",
+        help="add a per-query diagnostic (gold's ranks, paper_f1, evidence_f1, "
+        "answer correctness) to the output under per_query",
+    )
+    parser.add_argument(
+        "--metrics",
+        choices=("retrieval", "all"),
+        default="retrieval",
+        help="retrieval (the default) reports the candidate_recall series only; all "
+        "adds the submission-side metrics (paper_* / evidence_* / the answer ones). "
+        "They are off by default because choosing the papers to submit and "
+        "generating the answers both belong to the reading team",
+    )
     args = parser.parse_args()
 
     gold_records = read_jsonl(Path(args.gold))
     pred_records = read_jsonl(Path(args.pred))
-    metrics = evaluate(gold_records, pred_records)
+    metrics = evaluate(
+        gold_records,
+        pred_records,
+        per_query=args.per_query,
+        include_submission=args.metrics == "all",
+    )
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 

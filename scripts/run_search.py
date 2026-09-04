@@ -1,36 +1,33 @@
 #!/usr/bin/env python3
-"""configs/{paths,process_style,search_style,agent_style}/*.yaml を組み合わせて
+"""Run the search and write the prediction jsonl.
 
-前処理・索引構築・検索・評価を一気通貫で実行する e2e スクリプト。
+**The system itself is `littraceqa.search.pipeline`.** What this takes is the
+locations for this machine (paths) and the input and output — none of the method's
+knobs appear as arguments.
 
-使い方:
-    # 初回: 前処理 + 索引構築をしてから検索
+Usage:
+    # first time: preprocess and build the indexes, then search
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
-      --process configs/process_style/mineru.yaml \\
-      --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
-      --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl \\
       --build
 
-    # 2回目以降: 既存の索引を読み込んで検索
+    # afterwards: load the existing indexes and search
     uv run python scripts/run_search.py \\
       --paths configs/paths/default.yaml \\
-      --process configs/process_style/mineru.yaml \\
-      --search configs/search_style/bm25_specter2_body_qwen3.yaml \\
-      --agent configs/agent_style/reading.yaml \\
       --queries data/validation_inputs.jsonl \\
       --output predictions.jsonl
+
+**Scoring is a separate step**, scripts/evaluate.py, called by hand:
+    uv run python scripts/evaluate.py --gold data/validation.jsonl --pred predictions.jsonl
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +37,14 @@ except ImportError:
     def tqdm(iterable, **kwargs):
         return iterable
 
-from littraceqa.di_pipeline.agent.json_utils import parse_json_object
-from littraceqa.di_pipeline.config import build_pipeline, compose_config, load_config
-from littraceqa.di_pipeline.contracts import Chunk, Query
+from littraceqa.search.contracts import Query, write_chunks_jsonl
+from littraceqa.search.pipeline import (
+    Paths,
+    build_agent,
+    build_expander_index,
+    build_indexers,
+    build_preprocessor,
+)
 
 
 def load_papers(path: Path) -> list[dict]:
@@ -56,469 +58,250 @@ def load_papers(path: Path) -> list[dict]:
     return papers
 
 
-def load_chunks(path: Path) -> list[Chunk]:
-    chunks = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            chunks.append(Chunk(**json.loads(line)))
-    return chunks
+# The gold that scoring goes against; also what a split run's coverage is measured on.
+GOLD_PATH = Path("data/validation.jsonl")
 
 
-# 本番の入力に実際に入っているフィールドはこの4つだけ（確定仕様）。
-# multiple_choice の options は**本番では与えられない**ので、ここには入れない。
-_PRODUCTION_FIELDS = ("query_id", "question", "answer_types", "table_schema")
-
-
-def load_mc_options(path: Path) -> dict[str, dict]:
-    """query_id -> multiple_choice の options だけを読む（gold は絶対に読まない）。
-
-    本番入力に options は無い（上記 _PRODUCTION_FIELDS）。よってこれを結合した実行は
-    「選択肢を教えてもらえたら何点取れるか」を見る **oracle 設定** であり、本番の点数
-    ではない。gold（正解の選択肢）は読まないので答えそのものの漏洩ではないが、
-    41/55 問が multiple_choice で、うち21問は freeform すら無い（選択肢が無いと
-    そもそも文字を決められない）ため、点数への影響は大きい。
-    """
-    options_map: dict[str, dict] = {}
+def read_predictions(path: Path) -> dict[str, dict]:
+    """Read a prediction jsonl as query_id -> record."""
+    records = {}
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             record = json.loads(line)
-            mc = (record.get("answer") or {}).get("multiple_choice") or {}
-            options = mc.get("options") if isinstance(mc, dict) else None
-            if options:
-                options_map[record["query_id"]] = options
-    return options_map
+            records[str(record.get("query_id", ""))] = record
+    return records
 
 
-def load_queries(
-    path: Path, production_input: bool = False, options_path: Path | None = None
-) -> list[Query]:
-    """クエリを読み込む。
+def merge_predictions(output_path: Path, others: list[str]) -> tuple[Path, list[str]]:
+    """Join other split runs into this one; returns the path of the joined file.
 
-    production_input=True にすると、本番入力に無いフィールド
-    （task_family / primary_evidence_type / benchmark）を捨ててから Query を作る。
-    手元の validation_inputs.jsonl は55件すべてに task_family が入っているが、
-    本番入力には無い。task_family は提出論文数（cutoff）を決めるのに使うので、
-    これを与えたまま評価すると「正解を教えてもらった状態」の点数になり、
-    本番の点数と乖離する。比較実験ではこちらを使うこと。
-
-    options_path があれば multiple_choice の選択肢だけを結合する（gold は読まない）。
-    ただし本番入力に options は無いので、これは oracle 設定であり本番の点数ではない。
-    production_input=True のときに自動で結合してはいけない（--production-input は
-    本番と情報量を揃えるためのフラグなので、そこで本番に無い情報を足し戻すと
-    フラグの意味が消える）。呼び出し側で options_path を渡さないこと。
+    Running in halves (val_a, 28 queries; val_b, 27) and scoring one of them against
+    the 55-query gold **dilutes every macro metric by the coverage** — roughly half,
+    for val_a alone. Comparing that number against another configuration leads
+    straight to a wrong conclusion, so the halves are joined before scoring. On a
+    query_id collision this run wins.
     """
-    options_map = load_mc_options(options_path) if options_path else {}
+    merged = read_predictions(output_path)
+    for other in others:
+        other_path = Path(other)
+        if not other_path.exists():
+            print(f"error: {other_path}, given to --merge-with, does not exist", file=sys.stderr)
+            sys.exit(1)
+        records = read_predictions(other_path)
+        overlap = sorted(set(records) & set(merged))
+        if overlap:
+            print(
+                f"warning: {other_path} shares {len(overlap)} query_id(s) with this "
+                f"run (e.g. {', '.join(overlap[:3])}); this run's predictions win.",
+                file=sys.stderr,
+            )
+        for query_id, record in records.items():
+            merged.setdefault(query_id, record)
+
+    merged_path = output_path.with_name(f"{output_path.stem}_merged{output_path.suffix}")
+    with merged_path.open("w", encoding="utf-8") as f:
+        for _, record in sorted(merged.items()):
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"joined into {len(merged)} queries and wrote {merged_path} (score this one)")
+    return merged_path, others
+
+
+def dump_runs(handle, query_id: str, runs: list) -> None:
+    """One line per subquery: the ranking and scores retrieval returned.
+
+    **No text** — it can be looked up from the chunk_id through chunk_store, and
+    including it would make the file hundreds of MB. Replaying the candidate
+    assembly offline needs only the ranks and the scores.
+    """
+    for run in runs:
+        handle.write(
+            json.dumps(
+                {
+                    "query_id": query_id,
+                    "step": run.step,
+                    "subquery": run.subquery,
+                    "results": [
+                        {
+                            "chunk_id": r.chunk_id,
+                            "paper_id": r.paper_id,
+                            "rank": rank,
+                            "score": r.score,
+                            "source": r.source,
+                        }
+                        for rank, r in enumerate(run.results, 1)
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
+def check_coverage(scored_path: Path) -> dict[str, Any]:
+    """How many of the gold queries the file to be scored covers; warns if any are missing.
+
+    **No overlap at all means this was a production run.** Production input
+    (data/test_inputs.jsonl) uses `ltqa_*` query_ids, which share nothing with
+    validation's `q_*`. Scoring the two against each other raises no exception — it
+    returns 0.0 for every metric, perfectly normally — so scoring must not be
+    suggested.
+    """
+    if not GOLD_PATH.exists():
+        return {}
+    gold_ids = set(read_predictions(GOLD_PATH))
+    pred_ids = set(read_predictions(scored_path))
+    covered = len(gold_ids & pred_ids)
+    total = len(gold_ids)
+    if covered == 0:
+        print(
+            f"\nNo query_id here appears in {GOLD_PATH}. Treating this as a run on "
+            "production input, so no scoring is suggested.\n"
+            "        Next, build the handoff file with "
+            "scripts/build_candidate_handoff.py --no-gold\n"
+        )
+        return {"covered": 0, "gold_total": total}
+    if covered < total:
+        print(
+            f"\nwarning: only {covered} of the {total} gold queries have a "
+            f"prediction, so every macro metric is diluted to about "
+            f"{covered / total:.0%}.\n"
+            f"        Run the remaining split with --merge-with {scored_path} to "
+            f"score all {total}. Do not compare this run's numbers against another "
+            f"configuration.\n",
+            file=sys.stderr,
+        )
+    return {"covered": covered, "gold_total": total}
+
+
+def load_queries(path: Path) -> list[Query]:
+    """Load the queries.
+
+    **A validation record and a production record give the same Query here.** The
+    fields only the validation data carries (task_family, primary_evidence_type,
+    benchmark, and the joined-in multiple_choice options) are not on Query at all,
+    because nothing in retrieval ever read them: the estimator that used
+    task_family, and the submission cutoff that varied by it, are both gone. There
+    used to be a `--production-input` flag that stripped them before building the
+    Query; with nothing left to strip it could no longer change a run's output, so
+    it was removed rather than left as a no-op that the docs told people to pass.
+    """
     queries = []
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
-            if production_input:
-                record = {k: v for k, v in record.items() if k in _PRODUCTION_FIELDS}
-            if not record.get("options") and record["query_id"] in options_map:
-                record["options"] = options_map[record["query_id"]]
-            queries.append(Query.from_dict(record))
+            queries.append(Query.from_dict(json.loads(line)))
     return queries
-
-
-def git_sha() -> str | None:
-    """実行時のコミットハッシュ。git 管理外なら None（記録は best effort）。"""
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if completed.returncode == 0:
-            return completed.stdout.strip()
-    except Exception:  # noqa: BLE001 - 由来情報が取れなくても実験は続行する。
-        pass
-    return None
-
-
-# reranker の実効設定として記録する属性（インスタンス側の名前 -> 記録名）。
-# yaml に書かれていない既定値（instruction / compile など）も残さないと、
-# 「この数字がどの設定で出たのか」が後から再現できない。
-_RERANKER_EFFECTIVE_ATTRS = {
-    "model_name": "model",
-    "device": "device",
-    "fp16": "fp16",
-    "batch_size": "batch_size",
-    "max_tokens": "max_tokens",
-    "instruction": "instruction",
-    "compile": "compile",
-}
-
-
-def _flatten(prefix: str, params: dict | None) -> dict:
-    """{"k": 60} -> {"fuser_k": 60}。ネストしたままだと差分比較で読めないため平らにする。"""
-    if not isinstance(params, dict):
-        return {}
-    return {f"{prefix}_{key}": value for key, value in params.items()}
-
-
-def tuned_params(cfg: dict, retriever_obj: Any = None) -> dict:
-    """チューニング対象のパラメータだけを平らな dict にまとめる。
-
-    experiments.jsonl には解決済みの cfg 全体も残すが、そちらは index_dir などの
-    環境依存の値も含んで長い。実験を横並び比較するときに見たいのは
-    「振ったつまみ」なので、それだけを抜き出す。
-
-    ネストした *_params は平らにする（reranker_max_tokens のように1つずつ列になり、
-    1つだけ変えた実験の差分が読めるようにするため）。reranker は yaml に書かない
-    既定値も効いてしまうので、組み立て済みインスタンスから実効値を拾う。
-    """
-    retriever = cfg.get("retriever", {})
-    agent = cfg.get("agent", {})
-    agent_params = agent.get("params", {})
-    fuser = retriever.get("fuser", {})
-    reranker = retriever.get("reranker", {})
-
-    # reranker: 実インスタンスの属性を優先し、取れなければ yaml 宣言値にフォールバック。
-    reranker_effective = _flatten("reranker", reranker.get("params"))
-    obj = getattr(retriever_obj, "reranker", None)
-    if obj is not None:
-        for attr, label in _RERANKER_EFFECTIVE_ATTRS.items():
-            if hasattr(obj, attr):
-                reranker_effective[f"reranker_{label}"] = getattr(obj, attr)
-
-    return {
-        # 検索側
-        "per_index_k": retriever.get("per_index_k"),
-        "pool_k": retriever.get("pool_k"),
-        "indexers": [ix.get("index_name", ix["name"]) for ix in retriever.get("indexers", [])],
-        "fuser": fuser.get("name"),
-        **_flatten("fuser", fuser.get("params")),
-        "reranker": reranker.get("name"),
-        **reranker_effective,
-        # エージェント側
-        "agent": agent.get("name"),
-        "agent_llm": (agent.get("llm") or {}).get("name"),
-        **{f"agent_{k}": v for k, v in agent_params.items()},
-    }
-
-
-def log_experiment(
-    args: argparse.Namespace,
-    metrics: dict,
-    n_queries: int,
-    cfg: dict,
-    retriever_obj: Any = None,
-    options_joined: bool = False,
-) -> None:
-    """どの組み合わせで何点だったかを results/experiments.jsonl に追記する。
-
-    設定ファイルの「パス」だけだと、同じ yaml を書き換えて振った実験が
-    全部同じ行に見えてしまい、後から「この数字はどのパラメータで出たのか」が
-    追えない。compose_config() が解決した実際の値ごと残す。
-
-    options_joined は multiple_choice の選択肢を与えた oracle 実行かどうか。
-    本番では options が来ないので、True の行の multiple_choice_accuracy は
-    本番の点数として読んではいけない。後から見分けられるように残す。
-    """
-    path = Path("results/experiments.jsonl")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "paths": args.paths,
-        "process": args.process,
-        "search": args.search,
-        "agent": args.agent,
-        "queries": args.queries,
-        "production_input": args.production_input,
-        "options_joined": options_joined,
-        "n_queries": n_queries,
-        "output": args.output,
-        "git_sha": git_sha(),
-        "tuned_params": tuned_params(cfg, retriever_obj),
-        "config": cfg,
-        "metrics": metrics,
-    }
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"実験結果を {path} に追記しました")
-
-
-def _load_matching_experiments(
-    process: str, search: str, agent: str, limit: int = 3
-) -> list[dict]:
-    """results/experiments.jsonl から同じ組み合わせの過去記録を、直近 limit 件取り出す。"""
-    path = Path("results/experiments.jsonl")
-    if not path.exists():
-        return []
-    matches = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            if (record.get("process"), record.get("search"), record.get("agent")) == (
-                process,
-                search,
-                agent,
-            ):
-                matches.append(record)
-    return matches[-limit:]
-
-
-def generate_comment(llm, args: argparse.Namespace, metrics: dict, n_queries: int) -> str:
-    """指標を読んで、LLM に簡潔な所感を書かせる。llm が無ければ固定文言を返す。
-
-    log_experiment() が今回の記録を results/experiments.jsonl に追記した後に
-    呼ばれる前提なので、直近の一致レコードの末尾(=今回分)を除いて過去分だけを渡す。
-    """
-    if llm is None:
-        return "(LLMコメントなし: このagent_styleはLLMを使用しない設定です)"
-
-    history = _load_matching_experiments(args.process, args.search, args.agent, limit=4)[:-1]
-    history_text = "\n".join(
-        f"- {record['timestamp']}: {json.dumps(record['metrics'], ensure_ascii=False)}"
-        for record in history
-    ) or "(同じ組み合わせの過去記録なし)"
-
-    prompt = (
-        "あなたは検索システムの実験結果を確認する研究者です。次の実験結果を読み、"
-        "指標の良し悪しや気になる点、次に試すとよさそうなことを日本語で簡潔にコメントしてください。\n\n"
-        f"設定: process={args.process}, search={args.search}, agent={args.agent}\n"
-        f"クエリ数: {n_queries} (production_input={args.production_input})\n"
-        f"今回の指標: {json.dumps(metrics, ensure_ascii=False)}\n\n"
-        f"同じ組み合わせの過去の実行記録(古い順):\n{history_text}\n\n"
-        '出力は JSON のみとし、{"comment": "..."} の形式で3〜5文程度にまとめてください。'
-    )
-    try:
-        parsed = parse_json_object(llm(prompt))
-    except Exception as exc:
-        return f"(LLMコメントの生成に失敗しました: {exc})"
-    if not parsed or not isinstance(parsed.get("comment"), str):
-        return "(LLMコメントの生成に失敗しました: 応答をパースできませんでした)"
-    return parsed["comment"]
-
-
-def write_report(
-    args: argparse.Namespace,
-    metrics: dict,
-    n_queries: int,
-    comment: str,
-    cfg: dict,
-    retriever_obj: Any = None,
-    options_joined: bool = False,
-) -> None:
-    """1回の実行につき、設定・指標・LLMコメントをまとめた Markdown を report/ に1枚書く。"""
-    process_name = Path(args.process).stem
-    search_name = Path(args.search).stem
-    agent_name = Path(args.agent).stem
-    now = datetime.now()
-
-    report_dir = Path("report")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{now.strftime('%Y%m%d_%H%M%S')}_{process_name}_{search_name}_{agent_name}.md"
-    path = report_dir / filename
-
-    lines = [
-        f"# {process_name} + {search_name} + {agent_name}",
-        "",
-        f"- 実行日時: {now.isoformat(timespec='seconds')}",
-        f"- paths: `{args.paths}`",
-        f"- process: `{args.process}`",
-        f"- search: `{args.search}`",
-        f"- agent: `{args.agent}`",
-        f"- queries: `{args.queries}` ({n_queries}件, production_input={args.production_input})",
-        f"- output: `{args.output}`",
-    ]
-    sha = git_sha()
-    if sha:
-        lines.append(f"- git: `{sha[:12]}`")
-    if options_joined:
-        lines.append(
-            "- **[oracle] multiple_choice の選択肢を与えて実行**（本番入力に options は"
-            "無いため、multiple_choice_accuracy は本番の点数ではない）"
-        )
-    # yaml は後から書き換わるので、レポート単体で「どの値で回したか」が分かるように
-    # 解決済みのパラメータをここに焼き込む。
-    lines.extend(
-        [
-            "",
-            "## 設定（この実行時の実際の値）",
-            "",
-            "| パラメータ | 値 |",
-            "|---|---|",
-        ]
-    )
-    for key, value in tuned_params(cfg, retriever_obj).items():
-        if value is None:
-            continue
-        lines.append(f"| {key} | `{json.dumps(value, ensure_ascii=False)}` |")
-    lines.extend(
-        [
-            "",
-            "## 指標",
-            "",
-            "| 指標 | 値 |",
-            "|---|---|",
-        ]
-    )
-    for key, value in metrics.items():
-        formatted = f"{value:.4f}" if isinstance(value, float) else str(value)
-        lines.append(f"| {key} | {formatted} |")
-    lines.extend(["", "## コメント", "", comment, ""])
-
-    path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"レポートを {path} に書き出しました")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--paths", required=True, help="configs/paths/*.yaml")
-    parser.add_argument("--process", required=True, help="configs/process_style/*.yaml")
-    parser.add_argument("--search", required=True, help="configs/search_style/*.yaml")
-    parser.add_argument("--agent", required=True, help="configs/agent_style/*.yaml")
+    parser.add_argument(
+        "--paths", required=True,
+        help="configs/paths/*.yaml (this machine's pdf_dir / chunks_dir / index_dir)",
+    )
     parser.add_argument("--queries", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
-        "--build", action="store_true", help="前処理 + 索引構築をする（初回のみ）"
+        "--build", action="store_true", help="preprocess and build the indexes (first run only)"
     )
     parser.add_argument(
-        "--production-input",
-        action="store_true",
-        help="task_family / primary_evidence_type を捨てて本番と同じ4フィールドで走らせる"
-        "（比較実験ではこちらを使う）",
-    )
-    parser.add_argument(
-        "--options-file",
+        "--dump-runs",
         default=None,
-        help="[oracle] multiple_choice の options を結合する jsonl（gold は読まない）。"
-        "本番入力に options は無いので、これを付けた実行は「選択肢を教えてもらえたら"
-        "何点取れるか」を見る ablation であり本番の点数ではない。"
-        "--production-input との併用時は無視される。",
+        metavar="RUNS.JSONL",
+        help="write out each subquery's results (step / subquery / the top chunks' "
+        "ranks and scores), so the candidate assembly can be replayed offline",
+    )
+    parser.add_argument(
+        "--merge-with",
+        nargs="+",
+        default=[],
+        metavar="PREDICTIONS.JSONL",
+        help="join other split runs' prediction jsonl into one file. Scoring one "
+        "half (val_a, 28 queries; val_b, 27) against the 55-query gold dilutes the "
+        "macro metrics by the coverage, so they are joined before scoring.",
     )
     args = parser.parse_args()
 
-    cfg = compose_config(
-        paths=load_config(args.paths),
-        process=load_config(args.process),
-        search=load_config(args.search),
-        agent=load_config(args.agent),
-    )
-    preprocessor, retriever, agent = build_pipeline(cfg)
+    paths = Paths.load(args.paths)
 
     if args.build:
-        chunks_path = Path(cfg["paths"]["chunks"])
+        # Preprocessing and index building only. The chunks do not exist yet, so no
+        # agent is assembled here.
+        papers = load_papers(paths.paper_metadata)
+        chunks = []
+        for paper in tqdm(papers, desc="preprocessing"):
+            chunks.extend(build_preprocessor(paths).process(paper))
 
-        if preprocessor is not None:
-            metadata_path = Path(
-                cfg.get("paths", {}).get("paper_metadata", "data/paper_metadata.jsonl")
-            )
-            papers = load_papers(metadata_path)
+        paths.chunks.parent.mkdir(parents=True, exist_ok=True)
+        write_chunks_jsonl(paths.chunks, chunks)
+        print(f"saved {len(chunks)} chunks to {paths.chunks}")
 
-            chunks = []
-            for paper in tqdm(papers, desc="前処理中"):
-                chunks.extend(preprocessor.process(paper))
-
-            chunks_path.parent.mkdir(parents=True, exist_ok=True)
-            with chunks_path.open("w", encoding="utf-8") as f:
-                for chunk in chunks:
-                    f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
-            print(f"{len(chunks)} チャンクを {chunks_path} に保存しました")
-
-        else:
-            if not chunks_path.exists():
-                print(f"エラー: {chunks_path} が存在しません", file=sys.stderr)
-                sys.exit(1)
-            chunks = load_chunks(chunks_path)
-
-        for indexer in retriever.indexers:
-            print(f"  {indexer.name} を構築中...")
+        # The three search indexes, plus the SPECTER2 index ranking B reads. The
+        # latter never reaches the fuser, but without building it here there would be
+        # no way to rebuild it at all.
+        for indexer in [*build_indexers(paths), build_expander_index(paths)]:
+            print(f"  building {indexer.name}...")
             indexer.build(chunks)
-        print("索引構築完了")
+        print("indexes built")
 
-    else:
-        print("既存の索引を読み込み中...")
-        for indexer in retriever.indexers:
-            try:
-                indexer.load()
-            except Exception as exc:
-                print(
-                    f"エラー: {indexer.name} の索引読み込みに失敗しました: {exc}\n"
-                    f"先に --build を付けて索引を構築してください。",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        print("読み込み完了")
+    agent = build_agent(paths)
+    print("loading the existing indexes...")
+    for indexer in agent.retriever.indexers:
+        try:
+            indexer.load()
+        except Exception as exc:
+            print(
+                f"error: could not load the {indexer.name} index: {exc}\n"
+                f"Build the indexes first, with --build.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    print("indexes loaded")
 
-    # multiple_choice の options の入手先を決める。本番入力に options は無いので、
-    # 結合するのは常に oracle 設定（--options-file を明示したときだけ）。
-    # --production-input との併用は矛盾（本番と揃えるフラグなのに本番に無い情報を足す）
-    # なので、その場合は結合しない。
-    options_path = Path(args.options_file) if args.options_file else None
-    if options_path is not None and args.production_input:
-        print(
-            "警告: --production-input と --options-file は併用できません"
-            "（本番入力に options は無い）。options の結合をスキップします。",
-            file=sys.stderr,
-        )
-        options_path = None
-    queries = load_queries(
-        Path(args.queries),
-        production_input=args.production_input,
-        options_path=options_path,
-    )
-    if args.production_input:
-        print("本番と同じ4フィールド（query_id/question/answer_types/table_schema）で走らせます")
-    if options_path is not None:
-        n_opt = sum(1 for q in queries if q.options)
-        print(
-            f"[oracle] multiple_choice options を {options_path} から結合しました"
-            f"（{n_opt}件）。本番では与えられないので、この点数は本番の点数ではありません。"
-        )
-    print(f"{len(queries)} 件の質問に対して検索中...")
+    queries = load_queries(Path(args.queries))
+    print(f"searching for {len(queries)} questions...")
+
+    # --dump-runs writes each subquery's results to a separate file. Deliberately
+    # not in Prediction.trace, which would bloat the submission — this is the basis
+    # for replaying just the candidate assembly offline.
+    runs_file = open(args.dump_runs, "w", encoding="utf-8") if args.dump_runs else None
 
     predictions = []
     for i, query in enumerate(queries):
         pred = agent.run(query)
         predictions.append(pred.to_dict())
+        if runs_file is not None:
+            dump_runs(runs_file, query.query_id, getattr(agent, "last_runs", []))
         if (i + 1) % 10 == 0:
-            print(f"  {i + 1}/{len(queries)} 完了")
+            print(f"  {i + 1}/{len(queries)} done")
+
+    if runs_file is not None:
+        runs_file.close()
+        print(f"wrote the per-subquery results to {args.dump_runs}")
 
     output_path = Path(args.output)
     with output_path.open("w", encoding="utf-8") as f:
         for pred in predictions:
             f.write(json.dumps(pred, ensure_ascii=False) + "\n")
-    print(f"予測結果を {output_path} に書き出しました")
+    print(f"wrote the predictions to {output_path}")
 
-    print("\n採点中...")
-    result = subprocess.run(
-        [
-            "uv", "run", "python", "scripts/evaluate.py",
-            "--gold", "data/validation.jsonl",
-            "--pred", str(output_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
+    # Scoring a split run on its own dilutes the macro metrics by the coverage.
+    scored_path = output_path
+    if args.merge_with:
+        scored_path, _ = merge_predictions(output_path, args.merge_with)
+    coverage = check_coverage(scored_path)
 
-    try:
-        metrics = json.loads(result.stdout)["metrics"]
-    except (json.JSONDecodeError, KeyError):
-        print("採点結果を解釈できなかったので実験ログには残しません", file=sys.stderr)
-        return
-    options_joined = options_path is not None
-    log_experiment(args, metrics, len(queries), cfg, retriever, options_joined)
-    comment = generate_comment(getattr(agent, "llm", None), args, metrics, len(queries))
-    write_report(args, metrics, len(queries), comment, cfg, retriever, options_joined)
+    # On a production run (no overlap) scoring is itself the mistake; do not suggest it.
+    if coverage.get("covered", 0):
+        print(
+            "\nTo score:\n"
+            f"  uv run python scripts/evaluate.py --gold {GOLD_PATH} --pred {scored_path}"
+        )
 
 
 if __name__ == "__main__":

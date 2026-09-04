@@ -16,33 +16,104 @@ uv sync
 The base install covers the dataset scripts (`scripts/`) and the
 provider-agnostic tools (`littraceqa.extract_pdf_archives`,
 `littraceqa.fix_chunk_locators`, `littraceqa.validate_submission`,
-`littraceqa.compare_runs`). The two RAG pipelines each need their own
-optional extra, and **the two are mutually exclusive in one environment**
-(`di_pipeline` pins `pypdfium2==4.30.0` transitively via `marker-pdf`, which
-conflicts with `azure`'s `pypdfium2>=5.11.0`; `uv` will refuse to resolve
-both extras together):
+`littraceqa.compare_runs`). The two pipelines each have their own optional
+extra. **They can now share one environment**: the `search` extra used to pin
+`pypdfium2==4.30.0` transitively through `marker-pdf`, which conflicted with
+`azure`'s `pypdfium2>=5.11.0`, but marker-pdf is no longer a dependency (nothing
+imported it) and the ban on installing both was lifted with it.
 
 ```bash
-uv sync --extra azure         # Azure RAG pipeline (baseline)
-uv sync --extra di_pipeline   # DI-based hybrid retrieval pipeline
+uv sync --extra azure          # the Azure RAG baseline
+uv sync --extra search         # the hybrid retrieval system
 ```
 
-## DI-based hybrid retrieval pipeline
+## Hybrid retrieval pipeline
 
-This pipeline lives under `src/littraceqa/di_pipeline/` (preprocessors,
-indexers, fusers/rerankers, and agents wired up via dependency injection —
-see `CLAUDE.md` and `configs/README.md` for the full design and usage) and
-is run via `scripts/run_search.py`, e.g.:
+The whole system is wired up in `src/littraceqa/search/pipeline.py` — read that
+file to see every stage and every tuned value in one place (`CLAUDE.md` explains why
+each value was chosen). Only machine-dependent paths live in `configs/paths/*.yaml`.
+It is run via `scripts/run_search.py`, e.g.:
 
 ```bash
 uv run python scripts/run_search.py \
   --paths configs/paths/default.yaml \
-  --process configs/process_style/mineru.yaml \
-  --search configs/search_style/abstract_specter2_body_qwen3.yaml \
-  --agent configs/agent_style/reading.yaml \
   --queries data/validation_inputs.jsonl \
   --output predictions.jsonl
 ```
+
+### Handing candidates off to a separate reading agent
+
+Retrieval and reading can be developed independently: retrieval decides *which
+papers*, reading decides *which passages answer the question*. Two helpers exist
+so a reading agent can be built against a frozen set of retrieval candidates,
+without re-running search (which costs hours of GPU time per configuration).
+
+**1. Build the handoff file.** `scripts/build_candidate_handoff.py` joins the
+questions with the `candidate_papers` of an existing prediction file:
+
+```bash
+uv run python scripts/build_candidate_handoff.py \
+  --predictions predictions_{run_id}.jsonl \
+  --output data/validation_with_candidates.jsonl
+```
+
+Each line carries the four production input fields, the ranked candidates, run
+provenance, and the gold — the last one quarantined under `_gold`:
+
+```jsonc
+{
+  "query_id": "q_001",
+  "question": "Among the two prompt compression methods, ...",
+  "answer_types": ["freeform", "multiple_choice"],
+  "table_schema": null,
+  "candidate_papers": [
+    {"rank": 1, "paper_id": "acl2025_00005", "title": "500x Compressor: ...",
+     "venue": "ACL", "year": 2025}
+  ],
+  "_meta": {"source_predictions": "...",
+            "agent": "...", "run_timestamp": "...", "n_candidates": 50},
+  "_gold": {"task_family": "...", "primary_evidence_type": "...",
+            "gold_papers": [...], "evidence": [...], "answer": {...}}
+}
+```
+
+**Only the four top-level input fields may be read at inference time.** `_gold`
+is nested precisely so that leakage has to be deliberate: `gold_papers[].title`
+*is* the answer to "which paper", `answer.multiple_choice.options` is oracle-only
+(see commit `f53e1da`), and `task_family` / `primary_evidence_type` do not exist
+in the competition's real input. Pass `--no-gold` to emit a blind copy for
+distribution. Point `--predictions` at a different run to regenerate the file
+against another search configuration.
+
+**2. Read the papers.** `littraceqa.chunk_store.ChunkStore` resolves a
+`paper_id` to its full MinerU chunks. The corpus stores each paper's lines
+contiguously, so a `paper_id -> (offset, length)` index is enough to seek
+straight to it:
+
+```python
+from littraceqa.chunk_store import ChunkStore
+
+store = ChunkStore("/data2/iseakira/pdfs/chunks/mineru_chunks.jsonl")
+chunks = store.load_paper("acl2025_00005")   # every chunk, in body order
+text = store.paper_text("acl2025_00005")     # the same, joined into one string
+figures = store.figures("acl2025_00005")     # table/figure chunks whose image exists
+```
+
+The 1.0 MB index is built on first use (~25 s over the 3.8 GB corpus) and cached
+next to it as `mineru_chunks.jsonl.offsets.json`; it is rebuilt automatically if
+the corpus size or mtime changes. Subsequent startups take 0.03 s and a single
+paper loads in 0.7 ms. An unknown `paper_id` yields an empty list rather than
+raising, since IDs arrive from retrieval output.
+
+Chunk `metadata` carries everything an evidence locator needs (`page`,
+`section`, `table_id`, `figure_id`, `equation_id`) plus `image_path` for tables
+and figures. Those image paths are absolute, so if the corpus is copied to
+another machine pass `ChunkStore(..., image_root="/new/path/to/mineru")` to
+rebase them.
+
+Budget note: a paper averages ~24k tokens, so loading all 50 candidates of one
+query is ~1.1M tokens. Feeding whole papers requires either filtering to a
+handful of papers first, or one model call per paper.
 
 ## Azure RAG pipeline (baseline)
 
@@ -203,6 +274,8 @@ Operational detail for these lives in `RUNBOOK.md`; one line each here:
 - `littraceqa.azure.figure_answer` — vision second pass for figure-primary
   questions: renders figure pages from cached PDFs and revises
   answers/evidence.
+- `littraceqa.chunk_store` — `paper_id` to full MinerU chunks (text plus figure
+  image paths) via a cached byte-offset index; see the handoff section above.
 - `littraceqa.validate_submission` — gold-free lint of a prediction file; the
   mandatory final gate before any submission.
 - `littraceqa.compare_runs` — per-question metric diff of two prediction files

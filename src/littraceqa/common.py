@@ -30,6 +30,7 @@ Record = dict[str, Any]
 T = TypeVar("T")
 
 
+
 def temp_sibling(path: Path) -> Path:
     """Unique temp name in the SAME directory, so os.replace stays atomic."""
     return path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")

@@ -1,4 +1,4 @@
-"""scripts/merge_chunks.py の結合ロジックのテスト（実際にCLIとして起動して検証）。"""
+"""scripts/merge_chunks.py's joining logic, exercised through the real CLI."""
 
 from __future__ import annotations
 
@@ -57,12 +57,12 @@ def test_duplicate_chunk_id_warns_and_keeps_first_by_default(tmp_path):
     b = tmp_path / "b.jsonl"
     output = tmp_path / "merged.jsonl"
     _write_jsonl(a, [_chunk("p1#c0000")])
-    _write_jsonl(b, [_chunk("p1#c0000")])  # 重複
+    _write_jsonl(b, [_chunk("p1#c0000")])  # the duplicate
 
     result = _run_merge(["--inputs", str(a), str(b), "--output", str(output)])
 
     assert result.returncode == 0, result.stderr
-    assert "重複" in result.stderr
+    assert "repeated chunk_id" in result.stderr
     lines = output.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
 
